@@ -1,0 +1,37 @@
+torch>=2.0.0
+# Локальные модели и версия transformers:
+#   Qwen3 (4B/8B/14B): >=4.51.0 (generation_config, chat template)
+#   Gemma 3 (4b/12b): 4.49+ (Gemma3ForCausalLM), стабильно в 4.51+
+#   Ministral-3 / Mistral 3 (3B/8B/14B): 4.50+ (Mistral3ForConditionalGeneration, MistralCommonBackend), в 4.51.1+ в стабильном
+#   Qwen2.5, Gemma 2, CodeGemma, GigaChat3, YandexGPT: работают на 4.37+
+# Итог: единая нижняя граница для всех: transformers>=4.51.0
+transformers>=4.51.0
+pandas>=1.5.0
+openpyxl>=3.0.0
+accelerate>=0.20.0
+bitsandbytes>=0.41.0
+google-genai>=0.2.0
+huggingface-hub>=0.16.0
+triton>=2.1.0  # Требуется для FP8 квантования (опционально, если недоступен - будет использована обычная загрузка)
+langgraph>=0.2.0
+outlines[transformers]  # Для structured output с локальными HF-моделями
+llguidance  # Для режима --guidance (constrained decoding)
+mistral_common[sentencepiece]>=1.8.6
+pydantic>=2.0.0
+fastapi>=0.110.0
+uvicorn[standard]>=0.27.0
+sqlalchemy>=2.0.0
+psycopg2-binary>=2.9.0
+pydantic-settings>=2.0.0
+pytz>=2024.1
+pytest>=8.0.0
+pyyaml>=6.0
+gspread>=5.0.0
+google-auth>=2.0.0
+protobuf>=3.20.0  # Требуется для токенизаторов SentencePiece (YandexGPT-5-Lite и др.)
+scikit_learn==1.8.0
+sentence_transformers==5.2.3
+
+# Опционально: Flash Attention 2 для ускорения и экономии VRAM у локальных моделей.
+# Установка: pip install flash-attn --no-build-isolation (нужны CUDA и совместимый компилятор; на Windows часто недоступен).
+# flash-attn

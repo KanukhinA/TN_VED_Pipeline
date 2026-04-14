@@ -1,0 +1,186 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: pipeline_postgres
+    environment:
+      POSTGRES_DB: rules
+      POSTGRES_USER: rules_user
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-rules_pass}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rules_user -d rules"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: pipeline_ollama
+    # Нужны драйвер NVIDIA на хосте и NVIDIA Container Toolkit; иначе уберите следующую строку или используйте CPU.
+    gpus: all
+    volumes:
+      - ollama_data:/root/.ollama
+    ports:
+      - "11434:11434"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list >/dev/null 2>&1"]
+      interval: 15s
+      timeout: 30s
+      retries: 10
+      start_period: 60s
+
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: pipeline_rules_engine
+    environment:
+      DATABASE_URL: postgresql+psycopg2://rules_user:${POSTGRES_PASSWORD:-rules_pass}@postgres:5432/rules
+      PREPROCESSING_URL: http://preprocessing:8004
+    depends_on:
+      postgres:
+        condition: service_healthy
+      preprocessing:
+        condition: service_started
+    ports:
+      - "8005:8000"
+
+  semantic-search:
+    build:
+      context: .
+      dockerfile: services/semantic-search/Dockerfile
+    container_name: pipeline_semantic_search
+    ports:
+      - "8001:8001"
+
+  llm-naming:
+    build:
+      context: .
+      dockerfile: services/llm-naming/Dockerfile
+    container_name: pipeline_llm_naming
+    ports:
+      - "8002:8002"
+    environment:
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3.1:8b}
+    depends_on:
+      ollama:
+        condition: service_healthy
+
+  preprocessing:
+    build:
+      context: .
+      dockerfile: services/preprocessing/Dockerfile
+    container_name: pipeline_preprocessing
+    ports:
+      - "8004:8004"
+    environment:
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
+      OLLAMA_CONTAINER_NAME: ${OLLAMA_CONTAINER_NAME:-pipeline_ollama}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      ollama:
+        condition: service_healthy
+
+  price-validator:
+    build:
+      context: .
+      dockerfile: services/price-validator/Dockerfile
+    container_name: pipeline_price_validator
+    ports:
+      - "8006:8006"
+
+  clustering-service:
+    build:
+      context: .
+      dockerfile: services/clustering-service/Dockerfile
+    container_name: pipeline_clustering_service
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://rules_user:${POSTGRES_PASSWORD:-rules_pass}@postgres:5432/rules
+      POLL_INTERVAL_SECONDS: "5"
+    ports:
+      - "8007:8007"
+
+  orchestrator:
+    build:
+      context: .
+      dockerfile: services/orchestrator/Dockerfile
+    container_name: pipeline_orchestrator
+    environment:
+      PREPROCESSING_URL: http://preprocessing:8004
+      RULES_ENGINE_URL: http://backend:8000
+      SEMANTIC_SEARCH_URL: http://semantic-search:8001
+      LLM_GENERATOR_URL: http://llm-naming:8002
+      PRICE_VALIDATOR_URL: http://price-validator:8006
+      DATABASE_URL: postgresql://rules_user:${POSTGRES_PASSWORD:-rules_pass}@postgres:5432/rules
+    depends_on:
+      preprocessing:
+        condition: service_started
+      backend:
+        condition: service_started
+      semantic-search:
+        condition: service_started
+      llm-naming:
+        condition: service_started
+      price-validator:
+        condition: service_started
+    ports:
+      - "8003:8003"
+
+  api-gateway:
+    build:
+      context: .
+      dockerfile: services/api-gateway/Dockerfile
+    container_name: pipeline_api_gateway
+    environment:
+      ORCHESTRATOR_URL: http://orchestrator:8003
+      RULES_ENGINE_URL: http://backend:8000
+      PREPROCESSING_URL: http://preprocessing:8004
+      SEMANTIC_SEARCH_URL: http://semantic-search:8001
+      LLM_GENERATOR_URL: http://llm-naming:8002
+      PRICE_VALIDATOR_URL: http://price-validator:8006
+      CLUSTERING_SERVICE_URL: http://clustering-service:8007
+      LLM_HTTP_TIMEOUT: "900"
+    depends_on:
+      preprocessing:
+        condition: service_started
+      orchestrator:
+        condition: service_started
+      backend:
+        condition: service_started
+    ports:
+      - "8000:8000"
+
+  frontend-expert:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+      args:
+        VITE_UI_MODE: expert
+    container_name: pipeline_frontend_expert
+    depends_on:
+      - api-gateway
+    ports:
+      - "8081:80"
+
+  frontend-officer:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+      args:
+        VITE_UI_MODE: officer
+    container_name: pipeline_frontend_officer
+    depends_on:
+      - api-gateway
+    ports:
+      - "8082:80"
+
+volumes:
+  pgdata:
+  ollama_data:

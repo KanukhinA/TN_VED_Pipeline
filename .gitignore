@@ -1,0 +1,64 @@
+# -----------------------------
+# Sensitive files and secrets
+# -----------------------------
+.env
+.env.*
+!.env.example
+!.env.sample
+*.env.local
+
+# Private keys and certificates
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+id_rsa
+id_dsa
+id_ecdsa
+id_ed25519
+
+# Cloud and service credentials
+*credentials*.json
+*secret*.json
+service-account*.json
+firebase-adminsdk*.json
+
+# Local databases, dumps, and backups
+*.sqlite
+*.sqlite3
+*.db
+*.bak
+*.backup
+*.dump
+*.sql
+
+# Logs with potentially sensitive content
+*.log
+logs/
+
+# -----------------------------
+# Local dev artifacts
+# -----------------------------
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+node_modules/
+dist/
+build/
+.cache/
+.vite/
+
+# IDE / OS local files
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
