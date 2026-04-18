@@ -1,10 +1,26 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 import time
 import asyncio
-from typing import Any
+from pathlib import Path
+from typing import Any, Optional
+
+from app.pipeline_config import (
+    CODE_DEFAULT as PIPELINE_CODE_DEFAULT,
+    effective_pipeline_params,
+    load_pipeline_file,
+    pipeline_config_path,
+    save_pipeline_file,
+)
+from app.prompt_generator_config import (
+    CODE_DEFAULT as PROMPT_GENERATOR_CODE_DEFAULT,
+    effective_prompt_generator_params,
+    load_prompt_generator_file,
+    prompt_generator_config_path,
+)
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request, Response
@@ -47,6 +63,7 @@ class ValidationRequest(BaseModel):
     gross_weight_kg: float | None = None
     net_weight_kg: float | None = None
     price: float | None = None
+    extracted_features_override: dict[str, Any] | None = None
 
 
 class FeatureExtractionTestRequest(BaseModel):
@@ -86,16 +103,22 @@ class FewShotAssistRequest(BaseModel):
 
 
 class GenerateExtractionPromptRequest(BaseModel):
-    """Один вызов LLM: по мета-промпту сгенерировать системный промпт извлечения признаков."""
+    """
+    Один вызов LLM: по мета-промпту сгенерировать системный промпт извлечения признаков.
+
+    Параметры Ollama (num_ctx, temperature, …) по умолчанию берутся из JSON config/prompt_generator.json
+    (или PROMPT_GENERATOR_CONFIG_PATH) и перечитываются на каждый запрос.
+    Поля ниже — необязательные переопределения из тела запроса (если ключ передан).
+    """
 
     model: str = ""
     prompt: str = ""
-    num_ctx: int = 8192
-    max_new_tokens: int = 4096
-    temperature: float = 0.3
-    top_p: float = 0.9
-    repetition_penalty: float = 1.0
-    enable_thinking: bool = False
+    num_ctx: Optional[int] = None
+    max_new_tokens: Optional[int] = None
+    repetition_penalty: Optional[float] = None
+    temperature: Optional[float] = None
+    top_p: Optional[float] = None
+    enable_thinking: Optional[bool] = None
 
 
 async def request_with_retry(
@@ -531,16 +554,22 @@ async def generate_extraction_system_prompt(payload: GenerateExtractionPromptReq
 
     await _require_model_running_for_prompt_test(model)
 
-    body = {
+    overrides = payload.model_dump(exclude_unset=True)
+    overrides.pop("model", None)
+    overrides.pop("prompt", None)
+    merged = effective_prompt_generator_params(overrides)
+
+    body: dict[str, Any] = {
         "model": model,
         "prompt": prompt,
-        "num_ctx": int(payload.num_ctx),
-        "max_new_tokens": int(payload.max_new_tokens),
-        "repetition_penalty": float(payload.repetition_penalty),
-        "temperature": float(payload.temperature),
-        "top_p": float(payload.top_p),
-        "enable_thinking": bool(payload.enable_thinking),
+        "num_ctx": int(merged["num_ctx"]),
+        "max_new_tokens": int(merged["max_new_tokens"]),
+        "repetition_penalty": float(merged["repetition_penalty"]),
+        "temperature": float(merged["temperature"]),
+        "enable_thinking": bool(merged["enable_thinking"]),
     }
+    if merged.get("top_p") is not None:
+        body["top_p"] = float(merged["top_p"])
 
     async with httpx.AsyncClient(timeout=LLM_HTTP_TIMEOUT) as client:
         try:
@@ -572,6 +601,7 @@ async def generate_extraction_system_prompt(payload: GenerateExtractionPromptReq
         "status": "ok",
         "generated_prompt": llm_text,
         "ollama": {k: v for k, v in gen.items() if k != "raw_response"},
+        "prompt_generator_params": merged,
     }
     td_ns = gen.get("total_duration_ns")
     if td_ns is not None:
@@ -580,6 +610,67 @@ async def generate_extraction_system_prompt(payload: GenerateExtractionPromptReq
         except (TypeError, ValueError):
             pass
     return out
+
+
+class PipelineConfigBody(BaseModel):
+    semantic_similarity_threshold: Optional[float] = None
+
+
+@app.get("/api/admin/pipeline-config")
+def get_pipeline_configuration() -> dict[str, Any]:
+    """Порог SimCheck (README mermaid): схожесть с классами справочника."""
+    path = pipeline_config_path()
+    return {
+        "config_path": str(path),
+        "file_exists": path.is_file(),
+        "defaults": PIPELINE_CODE_DEFAULT,
+        "from_file": load_pipeline_file(),
+        "effective": effective_pipeline_params(None),
+    }
+
+
+@app.put("/api/admin/pipeline-config")
+def put_pipeline_configuration(body: PipelineConfigBody) -> dict[str, Any]:
+    merged = effective_pipeline_params(body.model_dump(exclude_unset=True))
+    save_pipeline_file(merged)
+    return {"status": "ok", "effective": merged}
+
+
+class ExpertClassNameDecisionBody(BaseModel):
+    declaration_id: str = ""
+    rule_id: str | None = None
+    suggested_class_name: str = ""
+    decision: str = ""
+    note: str | None = None
+
+
+@app.post("/api/expert/class-name-decision")
+def expert_class_name_decision(body: ExpertClassNameDecisionBody) -> dict[str, Any]:
+    """Журнал решений эксперта по сгенерированному имени класса (ветка ExpertValidateGen)."""
+    d = (body.decision or "").strip().lower()
+    if d not in ("approve", "reject"):
+        raise HTTPException(status_code=400, detail="decision must be approve or reject")
+    log_path = Path(__file__).resolve().parent.parent / "config" / "class_name_decisions.jsonl"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    record = {
+        **body.model_dump(),
+        "ts_iso": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    log_path.open("a", encoding="utf-8").write(json.dumps(record, ensure_ascii=False) + "\n")
+    return {"status": "ok", "logged": True, "path": str(log_path)}
+
+
+@app.get("/api/feature-extraction/prompt-generator-config")
+def get_prompt_generator_configuration() -> dict[str, Any]:
+    """Текущие параметры генератора промпта: код по умолчанию, содержимое JSON-файла, итог после слияния."""
+    path = prompt_generator_config_path()
+    return {
+        "config_path": str(path),
+        "file_exists": path.is_file(),
+        "defaults_code": PROMPT_GENERATOR_CODE_DEFAULT,
+        "from_file": load_prompt_generator_file(),
+        "effective": effective_prompt_generator_params(None),
+    }
 
 
 @app.get("/api/feature-extraction/model-settings")
@@ -603,6 +694,52 @@ async def put_feature_extraction_model_settings(request: Request) -> Any:
                 f"{RULES_ENGINE_URL}/api/feature-extraction/model-settings",
                 content=body if body else None,
                 headers={"content-type": request.headers.get("content-type", "application/json")},
+            )
+            return Response(content=resp.content, status_code=resp.status_code, media_type=resp.headers.get("content-type"))
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"rules-engine unavailable: {exc}") from exc
+
+
+@app.post("/api/feature-extraction/few-shot-runs")
+async def post_few_shot_runs(request: Request) -> Any:
+    body = await request.body()
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        try:
+            resp = await request_with_retry(
+                client,
+                "POST",
+                f"{RULES_ENGINE_URL}/api/feature-extraction/few-shot-runs",
+                content=body if body else None,
+                headers={"content-type": request.headers.get("content-type", "application/json")},
+            )
+            return Response(content=resp.content, status_code=resp.status_code, media_type=resp.headers.get("content-type"))
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"rules-engine unavailable: {exc}") from exc
+
+
+@app.get("/api/feature-extraction/few-shot-runs")
+async def get_few_shot_runs(request: Request) -> Any:
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        try:
+            resp = await request_with_retry(
+                client,
+                "GET",
+                f"{RULES_ENGINE_URL}/api/feature-extraction/few-shot-runs",
+                params=request.query_params,
+            )
+            return Response(content=resp.content, status_code=resp.status_code, media_type=resp.headers.get("content-type"))
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"rules-engine unavailable: {exc}") from exc
+
+
+@app.delete("/api/feature-extraction/few-shot-runs/{run_id}")
+async def delete_few_shot_run(run_id: str, request: Request) -> Any:
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        try:
+            resp = await request_with_retry(
+                client,
+                "DELETE",
+                f"{RULES_ENGINE_URL}/api/feature-extraction/few-shot-runs/{run_id}",
             )
             return Response(content=resp.content, status_code=resp.status_code, media_type=resp.headers.get("content-type"))
         except Exception as exc:

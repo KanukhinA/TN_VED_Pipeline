@@ -422,6 +422,16 @@ export default function CatalogUnifiedWizard() {
     return resolveTnVedCodeLabel(tnVedCodeResolved);
   }, [tnVedCodeResolved]);
 
+  const isNewCatalogPristine = useMemo(() => {
+    const normalized = normalizeNumericCharacteristicsDraft(numericCharsDraft);
+    const hasCatalogName = normalized.catalogName.trim().length > 0;
+    const hasTnVed = (normalizeTnVedGroupCode(tnVedGroupCode) ?? "").length > 0;
+    const hasNumeric = normalized.characteristics.some((c) => c.characteristicKey.trim() || c.componentColumnKey.trim());
+    const hasText = (normalized.textArrayFields ?? []).some((t) => t.fieldKey.trim());
+    const hasMisc = normalized.procheeEnabled;
+    return flowStep === 1 && !ruleId && !hasCatalogName && !hasTnVed && !hasNumeric && !hasText && !hasMisc;
+  }, [flowStep, ruleId, numericCharsDraft, tnVedGroupCode]);
+
   return (
     <div className="container">
       {flowStep === 1 ? (
@@ -429,7 +439,7 @@ export default function CatalogUnifiedWizard() {
           <h1 style={{ marginTop: 0, marginBottom: 8 }}>Создание справочника</h1>
 
           <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
-            <button type="button" className="btn-secondary" onClick={newCatalog}>
+            <button type="button" className="btn-secondary" onClick={newCatalog} disabled={isNewCatalogPristine}>
               Новый справочник
             </button>
           </div>
@@ -442,31 +452,11 @@ export default function CatalogUnifiedWizard() {
             onIncludeArchivedChange={setIncludeArchived}
             busy={busy}
             onOpenPrimary={(id) => void openCatalog(id, 1)}
-            onOpenValidate={(id) => void openCatalog(id, 3)}
             onClone={(id) => void cloneCatalog(id)}
-            onQuickValidate={async (id) => {
-              setBusy(true);
-              try {
-                const full = await getRule(id);
-                const restored = loadDraftFromDslResponse(full);
-                const nc = parseNumericCharacteristicsDraft(full.dsl?.meta?.numeric_characteristics_draft);
-                const payload = restored
-                  ? generateSampleJson(restored)
-                  : nc
-                    ? generateNumericCharacteristicsSampleJson({ ...nc, modelId: full.model_id ?? nc.modelId })
-                    : { проверка: true };
-                setValidateResult(await validateRule(id, payload));
-              } catch (e: any) {
-                setValidateResult({ ok: false, errors: [{ message: e?.message ?? String(e) }] });
-              } finally {
-                setBusy(false);
-              }
-            }}
             onArchive={(id) => void onArchiveCatalog(id)}
             onUnarchive={(id) => void onUnarchiveCatalog(id)}
             onDelete={(id) => void onDeleteCatalog(id)}
             openPrimaryLabel="Редактировать"
-            openValidateLabel="Проверка"
           />
         </>
       ) : null}

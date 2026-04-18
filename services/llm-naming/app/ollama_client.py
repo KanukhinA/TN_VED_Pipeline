@@ -32,3 +32,22 @@ def ollama_generate_simple(
         r = client.post(url, json=body)
         r.raise_for_status()
         return r.json()
+
+
+def ollama_list_models(timeout: float = 20.0) -> list[str]:
+    url = f"{OLLAMA_BASE_URL}/api/tags"
+    with httpx.Client(timeout=timeout) as client:
+        r = client.get(url)
+        r.raise_for_status()
+        data = r.json()
+    models = data.get("models")
+    if not isinstance(models, list):
+        return []
+    out: list[str] = []
+    for row in models:
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get("name") or "").strip()
+        if name:
+            out.append(name)
+    return out

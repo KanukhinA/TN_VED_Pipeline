@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import os
+import re
+import statistics
 import uuid
 from datetime import datetime
 from typing import Any, Dict, Optional
@@ -9,8 +12,8 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from ..db.session import get_db_session
-from ..db.models import Rule, RuleVersion
-from ..rules.dsl_models import RuleDSL
+from ..db.models import Rule, RuleReferenceExample, RuleVersion
+from ..rules.dsl_models import RuleDSL, normalize_tn_ved_eaeu_code_value
 from ..rules.compiler import compile_rule
 from ..examples.fertilizer_rule_dsl import (
     FERTILIZER_RULE_DSL,
@@ -28,13 +31,21 @@ def _meta_tn_ved_group_code(dsl_json: Dict[str, Any]) -> Optional[str]:
     raw = meta.get("tn_ved_group_code")
     if raw is None:
         return None
-    s = str(raw).strip()
-    if not s.isdigit():
+    try:
+        return normalize_tn_ved_eaeu_code_value(str(raw).strip())
+    except ValueError:
         return None
-    n = int(s)
-    if n < 1 or n > 97:
-        return None
-    return f"{n:02d}"
+
+
+def _token_jaccard(a: str, b: str) -> float:
+    """Простая лексическая схожесть для калибровки порога по эталонам (без эмбеддингов)."""
+    sa = set(re.findall(r"[\wа-яА-ЯёЁ]+", (a or "").lower()))
+    sb = set(re.findall(r"[\wа-яА-ЯёЁ]+", (b or "").lower()))
+    if not sa and not sb:
+        return 1.0
+    if not sa or not sb:
+        return 0.0
+    return len(sa & sb) / len(sa | sb)
 
 
 def _rule_list_sort_key(item: "RuleListItem") -> tuple[int, str]:
@@ -55,29 +66,24 @@ def _clone_copy_name(base_name: Optional[str]) -> str:
 
 def _make_unique_clone_model_id(db: Session, source_model_id: str) -> str:
     src = source_model_id.strip() or "spravochnik"
-    base = f"{src}-copy"
-    candidate = base
-    idx = 2
+    candidate = f"{src}_{uuid.uuid4().hex[:8]}"
     while db.query(Rule.id).filter(Rule.model_id == candidate).first() is not None:
-        candidate = f"{base}-{idx}"
-        idx += 1
+        candidate = f"{src}_{uuid.uuid4().hex[:8]}"
     return candidate
 
 
-def _validate_feature_extraction_models_unique(meta: Any) -> None:
-    """Одна LLM-модель не может входить в две конфигурации feature_extraction в одном справочнике."""
-    if meta is None:
-        return
-    raw = getattr(meta, "feature_extraction_configs", None)
-    if not raw:
-        return
-    if not isinstance(raw, list):
-        return
-    seen: dict[str, str] = {}
-    for item in raw:
+def _cfg_feature_extraction_primary(item: dict) -> bool:
+    v = item.get("feature_extraction_primary")
+    return v is True or v == "true"
+
+
+def _models_shared_across_feature_configs(cfgs: list) -> bool:
+    """Одна и та же модель отмечена в двух и более конфигурациях (по разным id)."""
+    model_to_cfg_keys: dict[str, set[str]] = {}
+    for idx, item in enumerate(cfgs):
         if not isinstance(item, dict):
             continue
-        cfg_label = str(item.get("name") or item.get("id") or "?").strip() or "?"
+        cfg_key = str(item.get("id") or "").strip() or f"__idx_{idx}"
         models = item.get("selected_models")
         if not isinstance(models, list):
             continue
@@ -85,15 +91,40 @@ def _validate_feature_extraction_models_unique(meta: Any) -> None:
             ms = str(m).strip()
             if not ms:
                 continue
-            if ms in seen:
-                raise HTTPException(
-                    status_code=400,
-                    detail=(
-                        f"Модель «{ms}» указана в двух конфигурациях извлечения признаков "
-                        f"({seen[ms]} и {cfg_label}). Назначьте каждую модель только одной конфигурации."
-                    ),
-                )
-            seen[ms] = cfg_label
+            model_to_cfg_keys.setdefault(ms, set()).add(cfg_key)
+    return any(len(s) > 1 for s in model_to_cfg_keys.values())
+
+
+def _validate_feature_extraction_configs(meta: Any) -> None:
+    """
+    Если одна LLM встречается в нескольких конфигурациях извлечения — ровно одна должна быть отмечена
+    как основная (feature_extraction_primary).
+    """
+    if meta is None:
+        return
+    raw = getattr(meta, "feature_extraction_configs", None)
+    if not raw:
+        return
+    if not isinstance(raw, list):
+        return
+    cfgs = [c for c in raw if isinstance(c, dict)]
+    if not cfgs:
+        return
+    primary_cfgs = [c for c in cfgs if _cfg_feature_extraction_primary(c)]
+    if len(primary_cfgs) > 1:
+        raise HTTPException(
+            status_code=400,
+            detail="В meta.feature_extraction_configs может быть только одна конфигурация с feature_extraction_primary=true.",
+        )
+    shared = _models_shared_across_feature_configs(cfgs)
+    if shared and len(primary_cfgs) != 1:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Одна и та же модель отмечена в нескольких конфигурациях извлечения признаков. "
+                "Укажите ровно одну конфигурацию как основную (feature_extraction_primary)."
+            ),
+        )
 
 
 class CreateRuleResponse(BaseModel):
@@ -255,7 +286,7 @@ def create_rule(dsl_in: Dict[str, Any], db: Session = Depends(get_db_session)) -
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Invalid DSL: {e}")
 
-    _validate_feature_extraction_models_unique(dsl.meta)
+    _validate_feature_extraction_configs(dsl.meta)
 
     if dsl.meta is None or not dsl.meta.tn_ved_group_code:
         raise HTTPException(
@@ -310,7 +341,7 @@ def update_rule(rule_id: uuid.UUID, dsl_in: Dict[str, Any], db: Session = Depend
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Invalid DSL: {e}")
 
-    _validate_feature_extraction_models_unique(dsl.meta)
+    _validate_feature_extraction_configs(dsl.meta)
 
     if dsl.meta is None or not dsl.meta.tn_ved_group_code:
         raise HTTPException(
@@ -398,7 +429,7 @@ def clone_rule(rule_id: uuid.UUID, req: CloneRuleRequest, db: Session = Depends(
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Invalid DSL clone: {e}")
 
-    _validate_feature_extraction_models_unique(dsl.meta)
+    _validate_feature_extraction_configs(dsl.meta)
 
     created_at = datetime.utcnow()
     rule = Rule(
@@ -506,4 +537,179 @@ def validate_rule(rule_id: uuid.UUID, req: ValidateRequest, db: Session = Depend
 
     ok, errors, validated_data, assigned_class = compiled.validate(req.data)
     return ValidateResponse(ok=ok, errors=errors, validated_data=validated_data, assigned_class=assigned_class)
+
+
+@router.get("/{rule_id}/semantic-threshold")
+def get_semantic_threshold_for_rule(rule_id: uuid.UUID, db: Session = Depends(get_db_session)) -> Dict[str, Any]:
+    """
+    Порог SimCheck для справочника: по парам эталонов внутри одного assigned_class_id
+    считается Jaccard по токенам; эффективный порог — доля от медианы внутриклассовых схожестей.
+    Если эталонов мало или все в разных классах — клиенту следует взять глобальный порог из pipeline.
+    """
+    global_default = float(os.getenv("SEMANTIC_SIMILARITY_THRESHOLD", "0.75"))
+
+    rule: Rule | None = db.query(Rule).filter(Rule.id == rule_id).one_or_none()
+    if rule is None:
+        raise HTTPException(status_code=404, detail="Rule not found")
+
+    rows = (
+        db.query(RuleReferenceExample)
+        .filter(RuleReferenceExample.rule_id == rule_id)
+        .all()
+    )
+    if len(rows) < 2:
+        return {
+            "threshold": None,
+            "source": "global_fallback",
+            "n_examples": len(rows),
+            "n_pairs": 0,
+            "global_default_hint": global_default,
+            "reason": "need_at_least_two_examples",
+        }
+
+    by_class: dict[str, list[str]] = {}
+    for r in rows:
+        cid = str(r.assigned_class_id or "").strip()
+        if not cid:
+            continue
+        by_class.setdefault(cid, []).append(r.description_text or "")
+
+    sims: list[float] = []
+    for texts in by_class.values():
+        if len(texts) < 2:
+            continue
+        for i in range(len(texts)):
+            for j in range(i + 1, len(texts)):
+                sims.append(_token_jaccard(texts[i], texts[j]))
+
+    if not sims:
+        return {
+            "threshold": None,
+            "source": "global_fallback",
+            "n_examples": len(rows),
+            "n_pairs": 0,
+            "global_default_hint": global_default,
+            "reason": "no_intra_class_pairs",
+        }
+
+    med = float(statistics.median(sims))
+    calibrated = max(0.35, min(0.92, med * 0.85))
+    return {
+        "threshold": calibrated,
+        "source": "reference_examples",
+        "n_examples": len(rows),
+        "n_pairs": len(sims),
+        "median_intra_class_similarity": med,
+        "global_default_hint": global_default,
+    }
+
+
+class ReferenceExampleBulkItem(BaseModel):
+    """Строка датасета: описание декларации + JSON признаков для детерминированной классификации."""
+
+    description_text: str = ""
+    data: Any
+
+
+class ReferenceExampleBulkIn(BaseModel):
+    items: list[ReferenceExampleBulkItem] = Field(default_factory=list)
+
+
+class ReferenceExampleBulkOut(BaseModel):
+    inserted: int
+    skipped: list[dict[str, Any]]
+
+
+@router.get("/{rule_id}/reference-examples")
+def list_reference_examples(rule_id: uuid.UUID, db: Session = Depends(get_db_session)) -> Dict[str, Any]:
+    rule: Rule | None = db.query(Rule).filter(Rule.id == rule_id).one_or_none()
+    if rule is None:
+        raise HTTPException(status_code=404, detail="Rule not found")
+    rows = (
+        db.query(RuleReferenceExample)
+        .filter(RuleReferenceExample.rule_id == rule_id)
+        .order_by(RuleReferenceExample.created_at.desc())
+        .all()
+    )
+    return {
+        "examples": [
+            {
+                "id": str(r.id),
+                "rule_id": str(r.rule_id),
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+                "description_text": r.description_text,
+                "features_json": r.features_json,
+                "assigned_class_id": r.assigned_class_id,
+            }
+            for r in rows
+        ]
+    }
+
+
+@router.post("/{rule_id}/reference-examples/bulk", response_model=ReferenceExampleBulkOut)
+def bulk_reference_examples(
+    rule_id: uuid.UUID, body: ReferenceExampleBulkIn, db: Session = Depends(get_db_session)
+) -> ReferenceExampleBulkOut:
+    rule: Rule | None = db.query(Rule).filter(Rule.id == rule_id).one_or_none()
+    if rule is None:
+        raise HTTPException(status_code=404, detail="Rule not found")
+
+    rv: RuleVersion | None = (
+        db.query(RuleVersion)
+        .filter(RuleVersion.rule_id == rule_id, RuleVersion.is_active.is_(True))
+        .order_by(RuleVersion.version.desc())
+        .first()
+    )
+    if rv is None:
+        raise HTTPException(status_code=404, detail="Active rule version not found")
+
+    try:
+        dsl = RuleDSL.model_validate(rv.dsl_json)
+        compiled = compile_rule(dsl)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Rule compilation failed: {e}")
+
+    inserted = 0
+    skipped: list[dict[str, Any]] = []
+    for idx, item in enumerate(body.items):
+        ok, errors, validated_data, assigned_class = compiled.validate(item.data)
+        if not ok or not assigned_class:
+            skipped.append(
+                {
+                    "index": idx,
+                    "reason": "validation_failed" if not ok else "no_class",
+                    "errors": errors if not ok else None,
+                }
+            )
+            continue
+        desc = (item.description_text or "").strip()
+        if not desc:
+            desc = "(без описания)"
+        row = RuleReferenceExample(
+            rule_id=rule_id,
+            description_text=desc[:500_000],
+            features_json=validated_data if isinstance(validated_data, dict) else item.data,
+            assigned_class_id=str(assigned_class),
+        )
+        db.add(row)
+        inserted += 1
+
+    db.commit()
+    return ReferenceExampleBulkOut(inserted=inserted, skipped=skipped)
+
+
+@router.delete("/{rule_id}/reference-examples/{example_id}")
+def delete_reference_example(
+    rule_id: uuid.UUID, example_id: uuid.UUID, db: Session = Depends(get_db_session)
+) -> Dict[str, str]:
+    row: RuleReferenceExample | None = (
+        db.query(RuleReferenceExample)
+        .filter(RuleReferenceExample.id == example_id, RuleReferenceExample.rule_id == rule_id)
+        .one_or_none()
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail="Example not found")
+    db.delete(row)
+    db.commit()
+    return {"status": "ok"}
 

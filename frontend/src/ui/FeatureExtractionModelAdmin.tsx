@@ -8,14 +8,14 @@ import {
   pauseFeatureExtractionModel,
   saveFeatureExtractionModelSettings,
 } from "../api/client";
-import type { OllamaOperationLogState } from "./FeatureExtractionOllamaConsole";
+import type { LlmOperationLogState } from "./FeatureExtractionLlmConsole";
 
 type Props = {
-  /** Список сейчас запущенных в Ollama моделей (для экрана «Справочники»). */
+  /** Список сейчас запущенных на сервере моделей (для экрана «Справочники»). */
   onRunningModelsChange?: (runningModels: string[]) => void;
   /** Состояние консоли вынесено на страницу — не пропадает при смене вкладки. */
-  ollamaTerminal: OllamaOperationLogState;
-  setOllamaTerminal: React.Dispatch<React.SetStateAction<OllamaOperationLogState>>;
+  llmConsole: LlmOperationLogState;
+  setLlmConsole: React.Dispatch<React.SetStateAction<LlmOperationLogState>>;
 };
 
 const defaultJson = {
@@ -214,8 +214,8 @@ function formatDeployElapsed(totalSec: number): string {
 
 export default function FeatureExtractionModelAdmin({
   onRunningModelsChange,
-  ollamaTerminal,
-  setOllamaTerminal,
+  llmConsole,
+  setLlmConsole,
 }: Props) {
   const [settingsText, setSettingsText] = React.useState(JSON.stringify(defaultJson, null, 2));
   const [installedModels, setInstalledModels] = React.useState<string[]>([]);
@@ -275,7 +275,7 @@ export default function FeatureExtractionModelAdmin({
     async (hint?: string) => {
       setBusy(true);
       setSettingsError(null);
-      setActivityLine(hint ?? "Обновление состояния Ollama…");
+      setActivityLine(hint ?? "Обновление состояния моделей…");
       try {
         const [settings, available] = await Promise.all([
           getFeatureExtractionModelSettings(),
@@ -332,7 +332,7 @@ export default function FeatureExtractionModelAdmin({
 
   async function runDeploy(model: string) {
     setAction({ model, kind: "deploy" });
-    setOllamaTerminal(null);
+    setLlmConsole(null);
     clearModelFeedback(model);
     try {
       setActivityLine(
@@ -345,7 +345,7 @@ export default function FeatureExtractionModelAdmin({
       }
       setActivityLine(
         installedSet.has(model)
-          ? `Запуск «${model}» в Ollama…`
+          ? `Запуск «${model}» на сервере…`
           : `Подкачка образа «${model}», затем запуск…`,
       );
       const result = await deployFeatureExtractionModel(model);
@@ -360,29 +360,29 @@ export default function FeatureExtractionModelAdmin({
         pullConsole.trim()
           ? `=== События подкачки (как в консоли preprocessing) ===\n${pullConsole}`
           : null,
-        pullLog.trim() ? `=== Сырой поток Ollama (NDJSON) ===\n${pullLog}` : null,
+        pullLog.trim() ? `=== Сырой поток загрузки (NDJSON) ===\n${pullLog}` : null,
         warmBlock || null,
       ]
         .filter(Boolean)
         .join("\n\n");
       const durationSec = typeof (result as any)?.duration_sec === "number" ? (result as any).duration_sec : undefined;
-      setOllamaTerminal({
+      setLlmConsole({
         model,
         log:
           combinedLog.trim() ||
-          "(нет лога: проверьте тег модели и доступ к Ollama)",
+          "(нет лога: проверьте тег модели и доступ к серверу моделей)",
         durationSec,
         ok: true,
       });
       await refresh("Синхронизация состояния после загрузки…");
       setModelFeedback((prev) => ({
         ...prev,
-        [model]: { kind: "success", text: "Модель запущена в Ollama" },
+        [model]: { kind: "success", text: "Модель запущена на сервере" },
       }));
       window.setTimeout(() => clearModelFeedback(model), 4000);
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
-      setOllamaTerminal({ model, log: msg, ok: false });
+      setLlmConsole({ model, log: msg, ok: false });
       setModelFeedback((prev) => ({
         ...prev,
         [model]: { kind: "error", text: msg || "Не удалось запустить модель" },
@@ -417,7 +417,7 @@ export default function FeatureExtractionModelAdmin({
   }
 
   async function runDelete(model: string) {
-    if (!window.confirm(`Удалить модель ${model} из Ollama с диска?`)) return;
+    if (!window.confirm(`Удалить модель ${model} с диска сервера?`)) return;
     setAction({ model, kind: "delete" });
     clearModelFeedback(model);
     setActivityLine(`Удаление образа «${model}» с диска…`);
@@ -447,16 +447,6 @@ export default function FeatureExtractionModelAdmin({
 
   return (
     <div className="card" style={{ padding: 0, overflow: "hidden" }}>
-      <div
-        style={{
-          padding: "16px 18px",
-          borderBottom: "1px solid #e2e8f0",
-          background: "linear-gradient(180deg, #f8fafc 0%, #fff 100%)",
-        }}
-      >
-        <h2 style={{ margin: 0, fontSize: 18 }}>Администрирование моделей</h2>
-      </div>
-
       <div style={{ padding: "16px 18px", display: "grid", gap: 16 }}>
         {showGlobalActivityBanner ? (
           <div
@@ -489,7 +479,7 @@ export default function FeatureExtractionModelAdmin({
             color: "#334155",
           }}
         >
-          <span style={{ fontWeight: 600 }}>Запущенные модели (Ollama): </span>
+          <span style={{ fontWeight: 600 }}>Запущенные модели: </span>
           {runningModels.length === 0 ? (
             <span style={{ color: "#64748b" }}>нет запущенных (см. колонку «Запущена» ниже).</span>
           ) : (
@@ -507,7 +497,7 @@ export default function FeatureExtractionModelAdmin({
           <table style={tableStyle}>
             <thead>
               <tr>
-                <th style={thStyle}>Тег модели (Ollama)</th>
+                <th style={thStyle}>Тег модели</th>
                 <th style={{ ...thStyle, width: 120 }}>Образ</th>
                 <th style={{ ...thStyle, width: 120 }}>Запущена</th>
                 <th style={{ ...thStyle, width: 200, textAlign: "right" }}>Действия</th>
@@ -615,7 +605,7 @@ export default function FeatureExtractionModelAdmin({
                                 borderColor: "#2563eb",
                                 color: "#2563eb",
                               }}
-                              title="Запустить модель в Ollama (при отсутствии образа — подкачать, затем запустить инференс)"
+                              title="Запустить модель на сервере (при отсутствии образа — подкачать, затем запустить инференс)"
                               aria-label="Запустить модель"
                               disabled={busy || rowOtherBusy || rowSelfBusy}
                               onClick={() => void runDeploy(m)}

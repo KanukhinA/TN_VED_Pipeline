@@ -10,6 +10,7 @@ COPY services/api-gateway/requirements.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir -r /tmp/requirements.txt
 
 COPY services/api-gateway/app /app/app
+COPY services/api-gateway/config /app/config
 COPY shared/json_recovery.py /app/app/json_recovery.py
 
 EXPOSE 8000

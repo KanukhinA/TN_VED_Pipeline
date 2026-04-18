@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import re
 import sys
@@ -23,7 +24,6 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 DEFAULT_INPUT = REPO / "data" / "ТН ВЭД.xlsx"
 OUT_FILE = REPO / "frontend" / "src" / "catalog" / "tnVedChildren.generated.ts"
-TXT_L2 = REPO / "data" / "TNVED2.TXT"
 TXT_L3 = REPO / "data" / "TNVED3.TXT"
 TXT_L4_A = REPO / "data" / "TNVED4.TXT"
 TXT_L4_B = REPO / "data" / "TNVED4.Txt"
@@ -150,7 +150,7 @@ def _norm_fixed_digits(raw: str, n: int) -> str | None:
 
 def _load_from_tnved_txt() -> dict[str, str]:
     """
-    Строит карту код->название из TNVED2/3/4:
+    Строит карту код->название из TNVED3/4:
       - TNVED3: уровень 4 цифры (группа)
       - TNVED4: уровень 10 цифр (подсубпозиция)
     Названия уровней 6/8 далее автоматически выводятся из 10-значных кодов.
@@ -542,9 +542,7 @@ def main() -> int:
         print(f"Положите Excel в {DEFAULT_INPUT} или укажите --input", file=sys.stderr)
         return 1
 
-    try:
-        import pandas as pd
-    except ImportError:
+    if importlib.util.find_spec("pandas") is None:
         print("Установите pandas: pip install pandas openpyxl", file=sys.stderr)
         return 1
 

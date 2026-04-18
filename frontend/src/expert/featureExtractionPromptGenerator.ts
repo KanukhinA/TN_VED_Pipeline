@@ -2,6 +2,10 @@
 /**
  * Сборка запроса к LLM, который генерирует системный промпт для извлечения признаков
  * по данным справочника (numeric_characteristics_draft).
+ *
+ * Параметры вызова LLM для генератора (temperature, num_ctx, …): JSON
+ * `services/api-gateway/config/prompt_generator.json` или `PROMPT_GENERATOR_CONFIG_PATH`.
+ * Обзор: раздел «Генерация системного промпта извлечения признаков» в корневом README.md.
  */
 
 import {

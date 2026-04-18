@@ -1,8 +1,10 @@
-import React from "react";
+import React, { Suspense, lazy } from "react";
 import { Navigate, useNavigate, useLocation } from "react-router-dom";
 import CatalogUnifiedWizard from "./pages/CatalogUnifiedWizard";
 import OfficerValidationPage from "./pages/OfficerValidationPage";
-import FeatureExtractionSettingsPage from "./pages/FeatureExtractionSettingsPage";
+
+/** Ленивая загрузка: страница тянет xlsx и тяжёлые зависимости — не должна ломать /catalog при старте. */
+const FeatureExtractionSettingsPage = lazy(() => import("./pages/FeatureExtractionSettingsPage"));
 
 const expertNavTextBtnBase: React.CSSProperties = {
   margin: 0,
@@ -27,7 +29,7 @@ function ExpertTabs({ basePath }: { basePath: "" | "/expert" }) {
   const featurePath = `${basePath}/feature-extraction` || "/feature-extraction";
 
   return (
-    <div>
+    <div className="expert-shell">
       <div style={{ display: "flex", gap: 20, marginBottom: 14, flexWrap: "wrap", alignItems: "baseline" }}>
         <button
           type="button"
@@ -51,10 +53,16 @@ function ExpertTabs({ basePath }: { basePath: "" | "/expert" }) {
           }}
           onClick={() => navigate(featurePath)}
         >
-          Настройка извлечения признаков
+          Настройки сервисов
         </button>
       </div>
-      {expertPage === "catalog" ? <CatalogUnifiedWizard /> : <FeatureExtractionSettingsPage />}
+      {expertPage === "catalog" ? (
+        <CatalogUnifiedWizard />
+      ) : (
+        <Suspense fallback={<div style={{ padding: 16, color: "#64748b" }}>Загрузка настроек извлечения…</div>}>
+          <FeatureExtractionSettingsPage />
+        </Suspense>
+      )}
     </div>
   );
 }

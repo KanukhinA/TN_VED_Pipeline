@@ -106,23 +106,46 @@ flowchart TD
 
 ## Декомпозиция на микросервисы
 
-Ниже — предлагаемое разбиение по **границам изменения, нагрузки и команды**: что выносить в отдельный деплой, а что оставить в одном процессе на раннем MVP.
+Ниже — **фактический контур**, который реально поднимается в текущем `docker-compose.yml`.
 
-| Модули схемы | Микросервис | Зачем отдельно |
-|--------------|-------------|----------------|
-| **М3** Извлечение признаков | `feature-extraction` | Свой жизненный цикл моделей/NLP, частые обновления без перезапуска правил. |
-| **М4** Детерминированная классификация + **М9** Правила экспертов | `rule-engine` | DSL, версии справочников, компиляция правил; единый источник истины для «жёсткой» классификации. |
-| **М5** Семантический поиск | `semantic-search` | Векторный индекс, иные ресурсы (GPU/память), смена эмбеддингов. |
-| **М6**, **М8** (имена классов и кластеров) | `llm-service` | Вызовы внешнего LLM, таймауты, ключи, политика ретраев; общий контур для двух сценариев. |
-| **М7** Сборка кластеров (+ оркестрация **М8**) | `taxonomy-clustering` | Пакетные job’ы, офлайн-режим, отдельно от real-time ветки. |
-| Декларации, решения эксперта, очереди «на разбор» | `expert-workflow` | BFF/API для экспертного UI, статусы кейсов, связь с правилами и таксономией. |
-| **М10** Проверка стоимости | `pricing-validation` | Интеграция с прайсами/тарифами, свой SLA и кэш. |
-| Сквозной сценарий Блок 1 → 3 | `pipeline-orchestrator` | Один вход для таможни: порядок М3→М4→М5→М6→сохранение→М10. |
-| UI | `frontend` | SPA + nginx. |
+| Compose-сервис | Назначение | Статус реализации |
+|---|---|---|
+| `api-gateway` | Единая точка входа (`/api/validate`, `/ready`, прокси к backend/orchestrator/preprocessing) | рабочий |
+| `orchestrator` | Сквозной pipeline: `officer-run -> price-validator -> enqueue job` | рабочий |
+| `backend` (`rules-engine`) | CRUD правил, настройки feature extraction, `officer-run` | рабочий |
+| `preprocessing` | Интеграция с Ollama, deploy/pause/delete моделей, генерация | рабочий |
+| `llm-naming` | Генерация имени класса через Ollama, fallback на stub | рабочий (с fallback) |
+| `semantic-search` | Семантический поиск для fallback-ветки | **stub** |
+| `price-validator` | Проверка цены в pipeline | **stub** (`accepted_info_only`) |
+| `clustering-service` | Воркер очереди jobs + выбор кандидатов (k-means по эмбеддингам) | частично (job-run stub, candidate selection рабочий) |
+| `postgres` | БД правил и очереди jobs | рабочий |
+| `frontend-expert` | UI эксперта (`VITE_UI_MODE=expert`) | рабочий |
+| `frontend-officer` | UI инспектора (`VITE_UI_MODE=officer`) | рабочий |
+| `ollama` | LLM runtime для `preprocessing` и `llm-naming` | рабочий |
 
-**Хранилища:** реляционная БД для правил/деклараций/аудита (PostgreSQL), векторный слой для семантического поиска (pgvector или Qdrant). Для офлайн-веток при росте нагрузки — брокер сообщений.
+**Что реально используется как хранилища сейчас:**
+- `postgres` (`pgdata`) — правила, настройки, очередь jobs;
+- `ollama_data` — локальные модели Ollama.
+
+Отдельная векторная БД в текущем `compose` не поднята.
+
+## Генерация системного промпта извлечения признаков (кнопка «Сгенерировать основу промпта из справочника»)
+
+Здесь **два разных места правки**, не путать с текстом промпта конфигурации в UI (он хранится в DSL правила в БД).
+
+| Что менять | Где в репозитории | Формат |
+|---|---|---|
+| **Мета-инструкция для LLM «промпт-инженера»** — текст, который задаёт роль, структуру и требования к выходному системному промпту | `frontend/src/expert/featureExtractionPromptGenerator.ts` — константа `FEATURE_EXTRACTION_PROMPT_GENERATOR_META` и логика сборки запроса в `buildFeatureExtractionPromptGeneratorRequest` | Исходный код (TypeScript), не YAML |
+| **Параметры вызова Ollama** для этого запроса (`num_ctx`, `temperature`, `max_new_tokens`, …) | По умолчанию: `services/api-gateway/config/prompt_generator.json`. Переопределение пути: переменная окружения `PROMPT_GENERATOR_CONFIG_PATH` (см. `services/api-gateway/app/prompt_generator_config.py`). Файл перечитывается на каждый запрос. | JSON |
+| Дополнительные значения по умолчанию в коде (если JSON отсутствует или неполный) | `services/api-gateway/app/prompt_generator_config.py` — словарь `CODE_DEFAULT` | Python |
+
+**Исходные данные справочника** (шаблон JSON, допустимые значения), которые подмешиваются в запрос к генератору, берутся из DSL правила: `meta.numeric_characteristics_draft` (редактируется в мастере каталога и сохраняется в БД вместе с правилом, не отдельным yaml-файлом в репозитории).
+
+Диагностика текущего эффективного конфига генератора: `GET /api/feature-extraction/prompt-generator-config` на `api-gateway`.
 
 ## Контекстная диаграмма
+
+Диаграмма ниже отражает предметный контекст (не список контейнеров `docker-compose` один-к-одному).
 
 ```plantuml
 @startuml
@@ -167,6 +190,8 @@ docker compose ps
 ```powershell
 docker compose exec ollama ollama pull llama3.1:8b
 ```
+
+В `docker-compose.yml` для `ollama` сейчас включено `gpus: all`. Если GPU/Tookit недоступны на хосте, временно уберите эту строку и перезапустите стек.
 
 Если сервис не поднят:
 
@@ -269,53 +294,87 @@ docker compose up -d
 - `Invoke-RestMethod http://<host>:8000/ready`
 - `docker compose exec ollama ollama list`
 
-## Контейнерная диаграмма (MVP)
+## Контейнерная диаграмма (фактический compose-контур)
 
-```plantuml
 @startuml
 !include <C4/C4_Container>
 
 left to right direction
+skinparam nodesep 10
+skinparam ranksep 60
+skinparam padding 10
+skinparam defaultFontSize 16
+
 title Система валидации ДТ (Контейнерная диаграмма)
 
 Boundary(SystemBoundary, "") {
-    Container(ExpertUI, "Интерфейс эксперта", "React + TS", "Управление правилами")
-    Container(OfficerUI, "Интерфейс инспектора", "React + TS", "Прогон ДТ, мониторинг")
-    Container(Nginx, "Nginx", "Reverse Proxy", "Статика, SSL, проксирование /api")
-    Container(ApiGateway, "Шлюз API", "FastAPI", "Auth, Rate Limit, Маршрутизация")
-    Container(Orchestrator, "Оркестратор", "FastAPI", "Координация пайплайна")
-    Container(PreprocessingSvc, "Сервис предобработки", "FastAPI + Ollama", "Сегментация + Валидация + Признаки")
-    Container(RulesEngine, "Движок правил", "FastAPI", "Классификация, CRUD")
-    Container(SemanticSearch, "Семантический поиск", "FastAPI", "Поиск (pgvector)")
-    Container(LlmGenerator, "Генерация классов", "FastAPI + Ollama", "Генерация названий")
-    Container(PriceValidator, "Проверка стоимости", "FastAPI", "Сверка с ценами ФТС")
-    Container(ClusteringService, "Сервис кластеризации", "FastAPI + PyTorch", "Офлайн ML Worker")
-    ContainerDb(Postgres, "БД правил и задач", "PostgreSQL", "Правила, Очереди задач, Сессии, История ДТ")
-    ContainerDb(VectorDB, "Векторная БД", "PostgreSQL + pgvector", "Эмбеддинги товаров, Векторный поиск")
+    
+    Container(ExpertUI, "Интерфейс эксперта", "Nginx + React + TypeScript (Vite build)", "Управление правилами и моделями")
+    Container(OfficerUI, "Интерфейс инспектора", "Nginx + React + TypeScript (Vite build)", "Прогон ДТ и мониторинг")
+
+    Container(ApiGateway, "Шлюз API", "FastAPI + Uvicorn", "Агрегация API, ретраи, проксирование")
+    Container(Orchestrator, "Оркестратор", "FastAPI + Uvicorn", "Координация пайплайна валидации")
+    Container(PreprocessingSvc, "Сервис предобработки", "FastAPI + Uvicorn + Ollama HTTP", "Извлечение признаков и управление LLM")
+    Container(RulesEngine, "Движок правил (backend)", "FastAPI + SQLAlchemy + PostgreSQL", "CRUD правил и классификация")
+    Container(SemanticSearch, "Семантический поиск", "FastAPI + PostgreSQL (pgvector)", "Векторный поиск похожих товаров")
+    Container(LlmGenerator, "Генерация классов", "FastAPI + Ollama HTTP", "Генерация названия класса")
+    Container(PriceValidator, "Проверка стоимости", "FastAPI + Uvicorn", "Сверка цены с внешним сервисом")
+
+    Container(ClusteringService, "Сервис кластеризации", "FastAPI + sentence-transformers + scikit-learn", "Фоновая обработка задач кластеризации")
+    Container(Ollama, "Ollama", "ollama/ollama", "Локальный LLM runtime")
+
+    ContainerDb(Postgres, "PostgreSQL", "PostgreSQL 16 (+ pgvector)", "Правила, задачи кластеризации, результаты, векторы")
 }
 
 System_Ext(PriceService, "Сервис цен ФТС", "API", "Рыночные цены")
 System_Ext(FtsSystem, "Шлюз ФТС/ФНС", "HTTPS/XML", "Контролирующие органы")
 
-Rel(OfficerUI, Nginx, "HTTPS")
-Rel(ExpertUI, Nginx, "HTTPS")
-Rel(Nginx, ApiGateway, "Proxy /api")
+' === Relations ===
+Rel(OfficerUI, ApiGateway, "HTTPS /api")
+Rel(ExpertUI, ApiGateway, "HTTPS /api")
+Rel(ExpertUI, ApiGateway, "Few-shot: запуск кластеризации", "REST")
 Rel(ApiGateway, Orchestrator, "Валидация ДТ", "REST")
+
 Rel(Orchestrator, PreprocessingSvc, "Текст ДТ")
 Rel(PreprocessingSvc, Orchestrator, "Признаки")
 Rel(Orchestrator, RulesEngine, "Поиск правила")
 Rel(Orchestrator, SemanticSearch, "Поиск похожих")
 Rel(Orchestrator, LlmGenerator, "Генерация имени")
 Rel(Orchestrator, PriceValidator, "Проверка цены")
+
 Rel(RulesEngine, Postgres, "CRUD правил", "SQL")
-Rel(SemanticSearch, VectorDB, "pgvector поиск", "SQL")
-Rel(PreprocessingSvc, Postgres, "Кэш эмбеддингов", "SQL")
-Rel(Orchestrator, Postgres, "INSERT INTO jobs", "SQL")
-Rel(Postgres, ClusteringService, "Poll jobs (SKIP LOCKED)", "SQL")
-Rel(ClusteringService, Postgres, "Update result", "SQL")
+Rel(SemanticSearch, Postgres, "pgvector поиск", "SQL")
+Rel(PreprocessingSvc, Ollama, "Pull/Generate model", "HTTP")
+Rel(LlmGenerator, Ollama, "Generate class name", "HTTP")
+
+Rel(Orchestrator, Postgres, "Создание задач кластеризации", "SQL")
+Rel(Postgres, ClusteringService, "Выбор задач (SKIP LOCKED)", "SQL")
+Rel(ClusteringService, Postgres, "Запись результата и снятие блокировки", "SQL")
+
 Rel(OfficerUI, ApiGateway, "Подписка на статус", "WebSocket/SSE")
-Rel(ApiGateway, Postgres, "LISTEN job_status / Read status", "SQL")
-Rel(PriceValidator, PriceService, "Запрос цены", "HTTPS")
+Rel(ApiGateway, Postgres, "LISTEN статусов задач", "SQL")
+Rel(ApiGateway, ClusteringService, "Few-shot assist / clustering", "REST")
+
+Rel(PriceValidator, PriceService, "Запрос цены", "HTTPS (Timeout -> Cache)")
 Rel(ApiGateway, FtsSystem, "Отчетность / Результаты", "HTTPS/XML")
+
+' === Styling ===
+UpdateElementStyle(ExpertUI, $fontColor="#00838f", $bgColor="#e0f7fa", $borderColor="#00838f")
+UpdateElementStyle(OfficerUI, $fontColor="#0277bd", $bgColor="#e1f5fe", $borderColor="#0277bd")
+UpdateElementStyle(ApiGateway, $fontColor="#0d47a1", $bgColor="#e3f2fd", $borderColor="#0d47a1")
+UpdateElementStyle(Orchestrator, $fontColor="#1b5e20", $bgColor="#c8e6c9", $borderColor="#1b5e20")
+UpdateElementStyle(PreprocessingSvc, $fontColor="#1b5e20", $bgColor="#f1f8e9", $borderColor="#1b5e20")
+UpdateElementStyle(RulesEngine, $fontColor="#1b5e20", $bgColor="#f1f8e9", $borderColor="#1b5e20")
+UpdateElementStyle(ClusteringService, $fontColor="#e65100", $bgColor="#ffe0b2", $borderColor="#e65100")
+UpdateElementStyle(Postgres, $fontColor="#2e7d32", $bgColor="#e8f5e9", $borderColor="#2e7d32")
+UpdateElementStyle(Ollama, $fontColor="#6a1b9a", $bgColor="#f3e5f5", $borderColor="#6a1b9a")
+
+Legend right
+  <#1b5e20>■</color> Core Services (Sync)
+  <#e65100>■</color> Async Worker (ML)
+  <#2e7d32>■</color> PostgreSQL (правила/задачи)
+  <#6a1b9a>■</color> LLM Runtime (Ollama)
+  <#0277bd>■</color> UI
+endLegend
+
 @enduml
-```

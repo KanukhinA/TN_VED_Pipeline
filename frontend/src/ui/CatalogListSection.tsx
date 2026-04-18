@@ -9,15 +9,12 @@ export interface CatalogListSectionProps {
   onIncludeArchivedChange: (v: boolean) => void;
   busy: boolean;
   onOpenPrimary: (ruleId: string) => void;
-  onOpenValidate: (ruleId: string) => void;
   onClone: (ruleId: string) => void;
-  onQuickValidate: (ruleId: string) => void;
   onArchive: (ruleId: string) => void;
   onUnarchive: (ruleId: string) => void;
   onDelete: (ruleId: string) => void;
   /** Подписи кнопки «открыть для редактирования» */
   openPrimaryLabel?: string;
-  openValidateLabel?: string;
 }
 
 export default function CatalogListSection(props: CatalogListSectionProps) {
@@ -29,14 +26,11 @@ export default function CatalogListSection(props: CatalogListSectionProps) {
     onIncludeArchivedChange,
     busy,
     onOpenPrimary,
-    onOpenValidate,
     onClone,
-    onQuickValidate,
     onArchive,
     onUnarchive,
     onDelete,
     openPrimaryLabel = "Редактировать",
-    openValidateLabel = "Проверка",
   } = props;
 
   return (
@@ -114,14 +108,8 @@ export default function CatalogListSection(props: CatalogListSectionProps) {
               <button type="button" className="btn-secondary" disabled={busy} onClick={() => void onOpenPrimary(c.rule_id)}>
                 {openPrimaryLabel}
               </button>
-              <button type="button" className="btn-secondary" disabled={busy} onClick={() => void onOpenValidate(c.rule_id)}>
-                {openValidateLabel}
-              </button>
               <button type="button" className="btn-secondary" disabled={busy} onClick={() => void onClone(c.rule_id)}>
                 Клонировать
-              </button>
-              <button type="button" className="btn-secondary" disabled={busy} onClick={() => void onQuickValidate(c.rule_id)}>
-                Проверить примером
               </button>
               {c.is_archived ? (
                 <button type="button" className="btn-secondary" disabled={busy} onClick={() => void onUnarchive(c.rule_id)}>

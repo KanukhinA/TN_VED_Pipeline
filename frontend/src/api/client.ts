@@ -1,5 +1,11 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
+import {
+  EXTRACTION_TEST_INFER_DURATION_FIELD,
+  FEATURE_EXTRACTION_LLM_CONTAINER_LOGS_PATH,
+  INFERENCE_OPTIONS_BODY_KEY,
+} from "./backendInferenceKeys";
+
 const API_BASE = (import.meta as any).env?.VITE_API_BASE ?? "/api";
 const RETRY_ATTEMPTS = 3;
 const RETRY_BASE_DELAY_MS = 350;
@@ -70,6 +76,7 @@ async function fetchWithRetry(input: RequestInfo | URL, init?: RequestInit, atte
       }
       return res;
     } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") throw err;
       lastError = err;
       if (attempt < attempts - 1) {
         await sleep(RETRY_BASE_DELAY_MS * 2 ** attempt);
@@ -131,6 +138,38 @@ export async function validateRule(ruleId: string, data: any): Promise<any> {
   return json;
 }
 
+export async function listReferenceExamples(ruleId: string): Promise<{ examples: any[] }> {
+  const res = await fetchWithRetry(`${API_BASE}/rules/${encodeURIComponent(ruleId)}/reference-examples`, {
+    method: "GET",
+  });
+  const json = await res.json();
+  if (!res.ok) throw new Error(json?.detail ?? "Не удалось загрузить эталонные примеры");
+  return json;
+}
+
+export async function bulkSaveReferenceExamples(
+  ruleId: string,
+  items: { description_text: string; data: unknown }[],
+): Promise<{ inserted: number; skipped: any[] }> {
+  const res = await fetchWithRetry(`${API_BASE}/rules/${encodeURIComponent(ruleId)}/reference-examples/bulk`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ items }),
+  });
+  const json = await res.json();
+  if (!res.ok) throw new Error(json?.detail ?? "Не удалось сохранить примеры");
+  return json;
+}
+
+export async function deleteReferenceExample(ruleId: string, exampleId: string): Promise<void> {
+  const res = await fetchWithRetry(
+    `${API_BASE}/rules/${encodeURIComponent(ruleId)}/reference-examples/${encodeURIComponent(exampleId)}`,
+    { method: "DELETE" },
+  );
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(json?.detail ?? "Не удалось удалить пример");
+}
+
 export async function listRules(params?: { q?: string; include_archived?: boolean }): Promise<any[]> {
   const sp = new URLSearchParams();
   if (params?.q?.trim()) sp.set("q", params.q.trim());
@@ -164,20 +203,6 @@ export async function cloneRule(ruleId: string, payload?: { name?: string; model
   return json;
 }
 
-export async function listTemplates(): Promise<any[]> {
-  const res = await fetchWithRetry(`${API_BASE}/rules/templates`, { method: "GET" });
-  const json = await res.json();
-  if (!res.ok) throw new Error(json?.detail ?? "Failed to list templates");
-  return Array.isArray(json) ? json : [];
-}
-
-export async function getTemplate(templateId: string): Promise<any> {
-  const res = await fetchWithRetry(`${API_BASE}/rules/templates/${templateId}`, { method: "GET" });
-  const json = await res.json();
-  if (!res.ok) throw new Error(json?.detail ?? "Failed to get template");
-  return json;
-}
-
 export async function archiveRule(ruleId: string): Promise<void> {
   const res = await fetchWithRetry(`${API_BASE}/rules/${ruleId}/archive`, { method: "POST" });
   const json = await res.json().catch(() => ({}));
@@ -202,20 +227,30 @@ export type OfficerValidationPayload = {
   graph35: number;
   graph38: number;
   graph42: number;
+  /** Если задан — сервер пропускает вызов модели извлечения и использует этот JSON. */
+  extracted_features_override?: Record<string, unknown> | null;
 };
 
-export async function validateDeclarationByOfficer(payload: OfficerValidationPayload): Promise<any> {
+export async function validateDeclarationByOfficer(
+  payload: OfficerValidationPayload,
+  options?: { signal?: AbortSignal },
+): Promise<any> {
+  const body: Record<string, unknown> = {
+    declaration_id: `OFFICER-${Date.now()}`,
+    description: payload.graph31,
+    tnved_code: payload.graph33,
+    gross_weight_kg: payload.graph35,
+    net_weight_kg: payload.graph38,
+    price: payload.graph42,
+  };
+  if (payload.extracted_features_override != null) {
+    body.extracted_features_override = payload.extracted_features_override;
+  }
   const res = await fetchWithRetry(`${API_BASE}/validate`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      declaration_id: `OFFICER-${Date.now()}`,
-      description: payload.graph31,
-      tnved_code: payload.graph33,
-      gross_weight_kg: payload.graph35,
-      net_weight_kg: payload.graph38,
-      price: payload.graph42,
-    }),
+    body: JSON.stringify(body),
+    signal: options?.signal,
   });
   const json = await parseJsonSafe(res);
   if (!res.ok) {
@@ -224,19 +259,95 @@ export async function validateDeclarationByOfficer(payload: OfficerValidationPay
   return json;
 }
 
+export async function getPrimaryCatalogSettings(): Promise<{ by_group_code: Record<string, string> }> {
+  const res = await fetchWithRetry(`${API_BASE}/feature-extraction/primary-catalog-settings`, {
+    method: "GET",
+  });
+  const json = await parseJsonSafe(res);
+  if (!res.ok) {
+    throw new Error(formatFastApiDetail(json?.detail) ?? "Не удалось загрузить основной справочник по категориям");
+  }
+  const raw = json?.by_group_code;
+  return {
+    by_group_code:
+      raw && typeof raw === "object" && !Array.isArray(raw)
+        ? (raw as Record<string, string>)
+        : {},
+  };
+}
+
+export async function putPrimaryCatalogSettings(
+  by_group_code: Record<string, string>,
+): Promise<{ by_group_code: Record<string, string> }> {
+  const res = await fetchWithRetry(`${API_BASE}/feature-extraction/primary-catalog-settings`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ by_group_code }),
+  });
+  const json = await parseJsonSafe(res);
+  if (!res.ok) {
+    throw new Error(formatFastApiDetail(json?.detail) ?? "Не удалось сохранить основной справочник");
+  }
+  return json;
+}
+
+export async function getPipelineConfig(): Promise<any> {
+  const res = await fetchWithRetry(`${API_BASE}/admin/pipeline-config`, { method: "GET" });
+  const json = await parseJsonSafe(res);
+  if (!res.ok) {
+    throw new Error(json?.detail ?? "Не удалось загрузить конфигурацию пайплайна");
+  }
+  return json;
+}
+
+export async function savePipelineConfig(body: { semantic_similarity_threshold?: number }): Promise<any> {
+  const res = await fetchWithRetry(`${API_BASE}/admin/pipeline-config`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const json = await parseJsonSafe(res);
+  if (!res.ok) {
+    throw new Error(json?.detail ?? "Не удалось сохранить конфигурацию пайплайна");
+  }
+  return json;
+}
+
+export async function submitExpertClassNameDecision(body: {
+  declaration_id: string;
+  rule_id?: string | null;
+  suggested_class_name: string;
+  decision: "approve" | "reject";
+  note?: string | null;
+}): Promise<any> {
+  const res = await fetchWithRetry(`${API_BASE}/expert/class-name-decision`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const json = await parseJsonSafe(res);
+  if (!res.ok) {
+    throw new Error(json?.detail ?? "Не удалось записать решение эксперта");
+  }
+  return json;
+}
+
+/** Опции инференса для теста извлечения (в теле API передаются под ключом, ожидаемым бэкендом). */
+export type LlmInferenceOptions = {
+  model?: string;
+  num_ctx?: number;
+  max_new_tokens?: number;
+  repetition_penalty?: number;
+  max_length?: number;
+  enable_thinking?: boolean;
+};
+
 export type FeatureExtractionTestPayload = {
   model: string;
   prompt: string;
   sample_text?: string;
   raw_llm_output?: string;
-  ollama?: {
-    model?: string;
-    num_ctx?: number;
-    max_new_tokens?: number;
-    repetition_penalty?: number;
-    max_length?: number;
-    enable_thinking?: boolean;
-  };
+  llm_inference_options?: LlmInferenceOptions;
   runtime?: {
     structured_output?: boolean;
     use_guidance?: boolean;
@@ -245,10 +356,15 @@ export type FeatureExtractionTestPayload = {
 };
 
 export async function testFeatureExtractionPrompt(payload: FeatureExtractionTestPayload): Promise<any> {
+  const { llm_inference_options, ...rest } = payload;
+  const body: Record<string, unknown> = { ...rest };
+  if (llm_inference_options != null) {
+    body[INFERENCE_OPTIONS_BODY_KEY] = llm_inference_options;
+  }
   const res = await fetchWithRetry(`${API_BASE}/feature-extraction/test`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
+    body: JSON.stringify(body),
   });
   const json = await parseJsonSafe(res);
   if (!res.ok) {
@@ -291,13 +407,38 @@ export async function runFewShotAssist(payload: FewShotAssistPayload): Promise<a
   return readJsonOrThrow(res, "Не удалось выполнить оценку few-shot");
 }
 
+export async function saveFewShotAssistRun(ruleId: string, result: Record<string, unknown>): Promise<any> {
+  const res = await fetchWithRetry(`${API_BASE}/feature-extraction/few-shot-runs`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ rule_id: ruleId, result }),
+  });
+  return readJsonOrThrow(res, "Не удалось сохранить прогон few-shot");
+}
+
+export async function listFewShotAssistRuns(ruleId: string): Promise<{ runs: any[] }> {
+  const qs = new URLSearchParams({ rule_id: ruleId });
+  const res = await fetchWithRetry(`${API_BASE}/feature-extraction/few-shot-runs?${qs.toString()}`, {
+    method: "GET",
+  });
+  return readJsonOrThrow(res, "Не удалось загрузить историю few-shot");
+}
+
+export async function deleteFewShotAssistRun(runId: string): Promise<any> {
+  const res = await fetchWithRetry(`${API_BASE}/feature-extraction/few-shot-runs/${encodeURIComponent(runId)}`, {
+    method: "DELETE",
+  });
+  return readJsonOrThrow(res, "Не удалось удалить прогон few-shot");
+}
+
+/** Дефолты на шлюзе совпадают с инференсом извлечения (ctx, max_new_tokens, repeat_penalty), температура выше нуля. */
 export type GenerateExtractionPromptPayload = {
   model: string;
   prompt: string;
   num_ctx?: number;
   max_new_tokens?: number;
   temperature?: number;
-  top_p?: number;
+  top_p?: number | null;
   repetition_penalty?: number;
   enable_thinking?: boolean;
 };
@@ -363,14 +504,14 @@ export async function listFeatureExtractionModels(): Promise<{
   };
 }
 
-/** Без retry: долгие операции с Ollama не должны выполняться по три раза при 502. */
+/** Без retry: долгие операции с моделью не должны выполняться по три раза при 502. */
 export async function deployFeatureExtractionModel(model: string): Promise<any> {
   const res = await fetch(`${API_BASE}/feature-extraction/deploy`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ model }),
   });
-  return readJsonOrThrow(res, "Не удалось запустить модель в Ollama");
+  return readJsonOrThrow(res, "Не удалось запустить модель на сервере");
 }
 
 export async function pauseFeatureExtractionModel(model: string): Promise<any> {
@@ -391,7 +532,7 @@ export async function deleteFeatureExtractionModel(model: string): Promise<any> 
   return readJsonOrThrow(res, "Не удалось удалить образ модели");
 }
 
-export type OllamaContainerLogsResponse = {
+export type LlmContainerLogsResponse = {
   available?: boolean;
   container?: string;
   tail?: number;
@@ -400,13 +541,13 @@ export type OllamaContainerLogsResponse = {
   hint?: string;
 };
 
-/** Хвост `docker logs` контейнера Ollama (через preprocessing + сокет Docker на хосте). */
-export async function fetchOllamaContainerLogs(tail: number = 300): Promise<OllamaContainerLogsResponse> {
+/** Хвост логов контейнера с LLM (через preprocessing + docker). */
+export async function fetchLlmContainerLogs(tail: number = 300): Promise<LlmContainerLogsResponse> {
   const t = Math.max(20, Math.min(tail, 5000));
-  const res = await fetch(`${API_BASE}/feature-extraction/ollama-container-logs?tail=${t}`);
-  const json = (await parseJsonSafe(res)) as OllamaContainerLogsResponse;
+  const res = await fetch(`${API_BASE}/${FEATURE_EXTRACTION_LLM_CONTAINER_LOGS_PATH}?tail=${t}`);
+  const json = (await parseJsonSafe(res)) as LlmContainerLogsResponse;
   if (!res.ok) {
-    throw new Error((json as { detail?: string })?.detail ?? "Не удалось получить логи контейнера Ollama");
+    throw new Error((json as { detail?: string })?.detail ?? "Не удалось получить логи контейнера с моделью");
   }
   return json;
 }

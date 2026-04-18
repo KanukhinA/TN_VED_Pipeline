@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React from "react";
 import { normalizeTnVedEaeuCode } from "../catalog/tnVedCode";
 import { isTnVedChildrenDatasetIncomplete, resolveTnVedCodeLabel, TN_VED_CHILDREN_BUILD_INFO } from "../catalog/tnVedEaeuTree";
 import TnVedEaeuTreeListbox from "./TnVedEaeuTreeListbox";
@@ -11,30 +11,18 @@ export type TnVedEaeuPickerProps = {
   label?: React.ReactNode | null;
   /** Не показывать верхнюю подпись (если заголовок снаружи) */
   hideLabel?: boolean;
-  /** id для поля ручного ввода кода */
+  /** id для поля поиска/ввода кода (см. TnVedEaeuTreeListbox) */
   manualInputId?: string;
-  /** Лейбл над левым полем ручного ввода в общей строке */
+  /** Лейбл над блоком дерева в общей строке с aside */
   manualInputInlineLabel?: React.ReactNode;
-  /** Контролы справа от верхнего поля ручного ввода */
+  /** Контролы справа от подписи (например, заметка и приоритет класса) */
   manualInputAside?: React.ReactNode;
-  /** Внешняя раскладка для строки ручного ввода */
+  /** Внешняя раскладка для строки с подписью и aside */
   manualInputRowStyle?: React.CSSProperties;
 };
 
-const selectStyle: React.CSSProperties = {
-  width: "100%",
-  maxWidth: "min(100%, 36rem)",
-  padding: "6px 8px",
-  fontSize: 13,
-  lineHeight: 1.35,
-  borderRadius: 8,
-  border: "1px solid #cbd5e1",
-  background: "#fff",
-  color: "#0f172a",
-};
-
 /**
- * Код ТН ВЭД ЕАЭС: иерархический listbox (уровни раскрываются «+») или ввод вручную.
+ * Код ТН ВЭД ЕАЭС: одно поле для поиска по дереву и ввода кода цифрами; иерархический listbox (уровни «+»).
  * Полный набор позиций задаётся данными `tnVedChildren.generated.ts` (сборка из Excel, см. скрипт в репозитории).
  */
 export default function TnVedEaeuPicker(props: TnVedEaeuPickerProps) {
@@ -42,8 +30,6 @@ export default function TnVedEaeuPicker(props: TnVedEaeuPickerProps) {
   const labelResolved =
     label === undefined ? "Код ТН ВЭД ЕАЭС для класса" : label;
   const norm = normalizeTnVedEaeuCode(value.trim()) ?? "";
-  const [manual, setManual] = useState(value);
-  useEffect(() => setManual(value), [value]);
 
   const summary = norm ? resolveTnVedCodeLabel(norm) : "";
 
@@ -76,63 +62,27 @@ export default function TnVedEaeuPicker(props: TnVedEaeuPickerProps) {
           {` `}(при нескольких листах: <code style={{ fontSize: 11 }}>--sheet all</code>). Подробности — <code style={{ fontSize: 11 }}>data/README.md</code>.
         </div>
       ) : null}
-      <div style={{ display: "flex", gap: 12, alignItems: "flex-start", marginBottom: 6, ...manualInputRowStyle }}>
-        <div style={{ flex: "1 1 auto", minWidth: 0 }}>
-          {manualInputInlineLabel ? (
-            <div style={{ fontWeight: 600, marginBottom: 4, fontSize: 13 }}>{manualInputInlineLabel}</div>
-          ) : null}
-          <input
-            id={manualInputId}
-            type="text"
-            inputMode="numeric"
-            autoComplete="off"
-            disabled={disabled}
-            placeholder="Ввод кода классификатора вручную"
-            value={manual}
-            className="fe-font-mono"
-            style={{
-              ...selectStyle,
-              maxWidth: "100%",
-            }}
-            onChange={(e) => {
-              const t = e.target.value.replace(/\D/g, "").slice(0, 10);
-              setManual(t);
-            }}
-            onBlur={() => {
-              const n = normalizeTnVedEaeuCode(manual.trim());
-              if (n) {
-                onChange(n);
-                setManual(n);
-              } else if (manual.trim() === "") {
-                onChange("");
-              } else {
-                setManual(value);
-              }
-            }}
-          />
-        </div>
-        {manualInputAside ? <div style={{ flex: "0 0 auto" }}>{manualInputAside}</div> : null}
-      </div>
-
-      <div style={{ marginBottom: 10, width: "100%" }}>
-        <TnVedEaeuTreeListbox value={value} onChange={onChange} disabled={disabled} />
-      </div>
-
-      {summary ? (
-        <div
-          style={{
-            fontSize: 12,
-            color: "#0f172a",
-            padding: "6px 8px",
-            background: "#eff6ff",
-            borderRadius: 8,
-            border: "1px solid #bfdbfe",
-            maxWidth: "min(100%, 40rem)",
-          }}
-        >
-          {summary}
+      {manualInputInlineLabel || manualInputAside ? (
+        <div style={{ display: "flex", gap: 12, alignItems: "flex-start", marginBottom: 6, ...manualInputRowStyle }}>
+          <div style={{ flex: "1 1 auto", minWidth: 0 }}>
+            {manualInputInlineLabel ? (
+              <div style={{ fontWeight: 600, marginBottom: 4, fontSize: 13 }}>{manualInputInlineLabel}</div>
+            ) : null}
+          </div>
+          {manualInputAside ? <div style={{ flex: "0 0 auto" }}>{manualInputAside}</div> : null}
         </div>
       ) : null}
+
+      <div style={{ marginBottom: 10, width: "100%" }}>
+        <TnVedEaeuTreeListbox
+          value={value}
+          onChange={onChange}
+          disabled={disabled}
+          searchInputId={manualInputId}
+        />
+      </div>
+
+      {summary ? <div className="tnved-picker-summary">{summary}</div> : null}
     </div>
   );
 }

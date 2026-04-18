@@ -52,6 +52,10 @@ services:
       context: .
       dockerfile: services/semantic-search/Dockerfile
     container_name: pipeline_semantic_search
+    environment:
+      SEMANTIC_SEARCH_EMBEDDING_MODEL: ${SEMANTIC_SEARCH_EMBEDDING_MODEL:-intfloat/multilingual-e5-base}
+      # Для тестов без загрузки модели: 1 — всегда старая заглушка по ТН ВЭД.
+      SEMANTIC_SEARCH_FORCE_STUB: ${SEMANTIC_SEARCH_FORCE_STUB:-0}
     ports:
       - "8001:8001"
 
@@ -119,6 +123,9 @@ services:
       LLM_GENERATOR_URL: http://llm-naming:8002
       PRICE_VALIDATOR_URL: http://price-validator:8006
       DATABASE_URL: postgresql://rules_user:${POSTGRES_PASSWORD:-rules_pass}@postgres:5432/rules
+      PIPELINE_CONFIG_PATH: /app/config/pipeline.json
+    volumes:
+      - ./services/api-gateway/config/pipeline.json:/app/config/pipeline.json
     depends_on:
       preprocessing:
         condition: service_started
@@ -147,6 +154,11 @@ services:
       PRICE_VALIDATOR_URL: http://price-validator:8006
       CLUSTERING_SERVICE_URL: http://clustering-service:8007
       LLM_HTTP_TIMEOUT: "900"
+      PROMPT_GENERATOR_CONFIG_PATH: /app/config/prompt_generator.json
+      PIPELINE_CONFIG_PATH: /app/config/pipeline.json
+    volumes:
+      - ./services/api-gateway/config/prompt_generator.json:/app/config/prompt_generator.json
+      - ./services/api-gateway/config/pipeline.json:/app/config/pipeline.json
     depends_on:
       preprocessing:
         condition: service_started

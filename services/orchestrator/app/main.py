@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import json
 import os
-from typing import Any
+from typing import Any, Optional
 
 import httpx
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import psycopg2
+
+from app.pipeline_config import load_semantic_similarity_threshold
 
 PREPROCESSING_URL = os.getenv("PREPROCESSING_URL", "http://preprocessing:8004")
 RULES_ENGINE_URL = os.getenv("RULES_ENGINE_URL", "http://backend:8000")
@@ -26,6 +28,7 @@ class ValidationRequest(BaseModel):
     gross_weight_kg: float | None = None
     net_weight_kg: float | None = None
     price: float | None = None
+    extracted_features_override: Optional[dict[str, Any]] = None
 
 
 def init_jobs_schema() -> None:
@@ -110,8 +113,63 @@ def health() -> dict[str, str]:
     return {"status": "ok", "service": "orchestrator"}
 
 
+async def _fetch_reference_examples_for_rule(
+    client: httpx.AsyncClient, rule_id: str | None
+) -> list[dict[str, str]]:
+    if not rule_id:
+        return []
+    try:
+        r = await client.get(
+            f"{RULES_ENGINE_URL}/api/rules/{rule_id}/reference-examples",
+            timeout=30.0,
+        )
+        r.raise_for_status()
+        data = r.json()
+        raw = data.get("examples") if isinstance(data, dict) else None
+        if not isinstance(raw, list):
+            return []
+        out: list[dict[str, str]] = []
+        for ex in raw:
+            if not isinstance(ex, dict):
+                continue
+            out.append(
+                {
+                    "description_text": str(ex.get("description_text") or ""),
+                    "assigned_class_id": str(ex.get("assigned_class_id") or ""),
+                }
+            )
+        return out
+    except Exception:
+        return []
+
+
+async def _effective_semantic_threshold(client: httpx.AsyncClient, rule_id: str | None) -> tuple[float, dict[str, Any]]:
+    """Глобальный порог из pipeline; при наличии rule_id — калибровка по эталонам в БД."""
+    base = load_semantic_similarity_threshold()
+    if not rule_id:
+        return base, {"source": "global", "rule_id": None}
+    try:
+        r = await client.get(
+            f"{RULES_ENGINE_URL}/api/rules/{rule_id}/semantic-threshold",
+            timeout=15.0,
+        )
+        r.raise_for_status()
+        data = r.json()
+        src = data.get("source")
+        raw = data.get("threshold")
+        if src == "reference_examples" and isinstance(raw, (int, float)):
+            return float(raw), {"source": "reference_examples", "rule_id": rule_id, **data}
+        return base, {"source": "global_fallback", "rule_id": rule_id, **data}
+    except Exception as exc:
+        return base, {"source": "global", "rule_id": rule_id, "error": str(exc)}
+
+
 @app.post("/api/v1/pipeline/validate")
 async def validate(payload: ValidationRequest) -> Any:
+    """
+    Блок 1 README: officer → при отсутствии класса — семантический поиск (Mod5) и SimCheck;
+    при схожести ≤ порога — LLM-именование класса (Mod6), имя требует подтверждения эксперта.
+    """
     flow: dict[str, Any] = {"declaration_id": payload.declaration_id, "steps": []}
     class_id: str | None = None
 
@@ -126,6 +184,125 @@ async def validate(payload: ValidationRequest) -> Any:
             flow["steps"].append({"step": "officer-pipeline", "result": officer_json})
 
             class_id = officer_json.get("final_class_id")
+            catalog_classes = officer_json.get("catalog_classification_classes") or []
+            requires_expert_review = bool(officer_json.get("requires_expert_review"))
+
+            if requires_expert_review:
+                flow["steps"].append(
+                    {
+                        "step": "expert-review-routing",
+                        "result": {
+                            "requires_expert_review": True,
+                            "reason": "classification_exactly_one_conflict",
+                            "explanation_ru": (
+                                "Выявлен конфликт правил классификации в справочнике "
+                                "(для exactly_one одновременно сработало несколько правил). "
+                                "Декларация направлена на экспертное рассмотрение."
+                            ),
+                        },
+                    }
+                )
+            elif not class_id:
+                cat = officer_json.get("catalog")
+                rule_id_from_catalog: str | None = None
+                if isinstance(cat, dict):
+                    raw_rid = cat.get("rule_id")
+                    if raw_rid is not None and str(raw_rid).strip():
+                        rule_id_from_catalog = str(raw_rid).strip()
+
+                threshold, threshold_meta = await _effective_semantic_threshold(client, rule_id_from_catalog)
+                flow["semantic_threshold_resolution"] = threshold_meta
+
+                reference_examples = await _fetch_reference_examples_for_rule(client, rule_id_from_catalog)
+
+                try:
+                    ss = await client.post(
+                        f"{SEMANTIC_SEARCH_URL}/api/v1/search",
+                        json={
+                            "description": payload.description,
+                            "tnved_code": payload.tnved_code,
+                            "similarity_threshold": threshold,
+                            "rule_id": rule_id_from_catalog,
+                            "reference_examples": reference_examples,
+                        },
+                    )
+                    ss.raise_for_status()
+                    ss_data = ss.json()
+                except Exception as exc:
+                    ss_data = {
+                        "matched": False,
+                        "similarity": 0.0,
+                        "class_id": None,
+                        "error": str(exc),
+                        "service_mode": "error",
+                    }
+
+                sim = float(ss_data.get("similarity") or 0.0)
+                matched = bool(ss_data.get("matched"))
+                below_or_equal = sim <= threshold
+
+                flow["steps"].append(
+                    {
+                        "step": "semantic-search",
+                        "result": {
+                            **ss_data,
+                            "similarity_threshold": threshold,
+                            "threshold_resolution": threshold_meta,
+                            "reference_examples_submitted": len(reference_examples),
+                            "below_threshold": below_or_equal,
+                            "explanation_ru": (
+                                "Схожесть выше порога и есть кандидат — класс можно взять из семантического поиска (после проверок)."
+                                if not below_or_equal and matched and ss_data.get("class_id")
+                                else "Схожесть не превышает порог или совпадения нет — по схеме запускается LLM-именование нового класса."
+                            ),
+                        },
+                    }
+                )
+
+                if not below_or_equal and matched and ss_data.get("class_id"):
+                    class_id = str(ss_data.get("class_id"))
+                elif below_or_equal or not matched:
+                    labels_payload: list[dict[str, str]] = []
+                    if isinstance(catalog_classes, list):
+                        for c in catalog_classes:
+                            if not isinstance(c, dict):
+                                continue
+                            cid = str(c.get("class_id") or "").strip()
+                            if not cid:
+                                continue
+                            labels_payload.append(
+                                {"class_id": cid, "title": str(c.get("title") or "").strip()}
+                            )
+                    body_nm = {
+                        "description": payload.description,
+                        "tnved_code": payload.tnved_code,
+                        "existing_classes": [x["class_id"] for x in labels_payload],
+                        "existing_class_labels": labels_payload,
+                    }
+                    try:
+                        nm = await client.post(
+                            f"{LLM_GENERATOR_URL}/api/v1/suggest-class-name",
+                            json=body_nm,
+                        )
+                        nm.raise_for_status()
+                        nm_data = nm.json()
+                    except Exception as exc:
+                        nm_data = {
+                            "suggested_class_name": "GENERATION_FAILED",
+                            "mode": "error",
+                            "error": str(exc),
+                            "requires_expert_confirmation": True,
+                        }
+                    flow["steps"].append(
+                        {
+                            "step": "llm-class-name-suggestion",
+                            "result": {
+                                **nm_data,
+                                "requires_expert_confirmation": True,
+                                "explanation_ru": "Имя класса сгенерировано LLM и не применяется к декларации, пока эксперт не подтвердит его в интерфейсе.",
+                            },
+                        }
+                    )
 
             price = await client.post(
                 f"{PRICE_VALIDATOR_URL}/api/v1/price/validate",

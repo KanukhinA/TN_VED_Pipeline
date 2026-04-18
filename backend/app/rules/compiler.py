@@ -16,10 +16,9 @@ from .dsl_models import (
     BooleanFieldSchema,
     FieldSchema,
     RuleDSL,
-    PropertyDef,
     ClassificationConfig,
 )
-from .cross_rules import CrossRuleError, validate_cross_rules
+from .cross_rules import validate_cross_rules
 from .schema_normalize import lowercase_enum_constrained_strings
 
 
@@ -62,7 +61,7 @@ def _compile_field_type(schema: FieldSchema, *, model_name_prefix: str, counter:
         return (
             create_model(
                 class_name,
-                __config__=ConfigDict(extra="forbid", use_enum_values=True),
+                __config__=ConfigDict(extra="allow", use_enum_values=True),
                 **properties,
             ),
             {},
@@ -100,7 +99,7 @@ def _compile_field_type(schema: FieldSchema, *, model_name_prefix: str, counter:
         return (str, constraints)
 
     if isinstance(schema, NumberFieldSchema):
-        pair = Annotated[List[Union[int, float]], Field(min_length=2, max_length=2)]
+        pair = Annotated[List[Optional[Union[int, float]]], Field(min_length=2, max_length=2)]
         if schema.constraints:
             c = schema.constraints
             if c.enum is not None and len(c.enum) > 0:
@@ -122,7 +121,7 @@ def _compile_field_type(schema: FieldSchema, *, model_name_prefix: str, counter:
         return (Union[int, float, pair], {})
 
     if isinstance(schema, IntegerFieldSchema):
-        pair = Annotated[List[Union[int, float]], Field(min_length=2, max_length=2)]
+        pair = Annotated[List[Optional[Union[int, float]]], Field(min_length=2, max_length=2)]
         if schema.constraints:
             c = schema.constraints
             if c.enum is not None and len(c.enum) > 0:

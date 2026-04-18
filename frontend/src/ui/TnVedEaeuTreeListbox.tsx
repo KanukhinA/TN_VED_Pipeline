@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { normalizeTnVedEaeuCode } from "../catalog/tnVedCode";
 import { getTnVedParentPrefixesForExpansion, listTnVedChildren } from "../catalog/tnVedEaeuTree";
 import { TN_VED_GROUPS } from "../catalog/tnVedGroupsData";
@@ -27,8 +27,15 @@ function TnVedTreeNode(props: NodeProps) {
   const syntheticPrefixMatch = code.match(/^\d{4}::group::(\d+)::/);
   const displayCode = isSelectable ? code : syntheticPrefixMatch?.[1] ?? code.replace(/^(\d{4})::group::.*$/, "$1");
   const isMatched = matchedCodes?.has(code) ?? false;
-  const levelBackgrounds = ["#dbe4ea", "#e4eaee", "#ebf0f3", "#f1f4f6", "#f6f8f9"];
-  const levelBackground = levelBackgrounds[Math.min(depth, levelBackgrounds.length - 1)];
+  const depthClass = `tnved-tree__row--depth-${Math.min(depth, 4)}`;
+  const rowClass = [
+    "tnved-tree__row",
+    depthClass,
+    isSelected ? "tnved-tree__row--selected" : "",
+    !isSelected && isMatched ? "tnved-tree__row--match" : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
 
   return (
     <>
@@ -36,42 +43,22 @@ function TnVedTreeNode(props: NodeProps) {
         role="treeitem"
         aria-expanded={hasChildren ? isExpanded : undefined}
         data-tnved-selected={isSelected ? "true" : undefined}
+        className={rowClass}
         style={{
-          display: "flex",
-          alignItems: "center",
-          gap: 4,
-          padding: "1px 6px",
           paddingLeft: 6 + depth * 18,
-          borderRadius: 4,
-          borderTop: "1px solid rgba(255,255,255,0.9)",
-          background: isSelected ? "#dbeafe" : isMatched ? "#fef3c7" : levelBackground,
-          fontSize: 12,
-          lineHeight: 1.22,
-          userSelect: "text",
         }}
       >
         <span style={{ width: 22, flexShrink: 0, display: "flex", justifyContent: "center", alignItems: "center" }}>
           {hasChildren ? (
             <button
               type="button"
+              className="tnved-tree__expand"
               disabled={disabled}
               onClick={(e) => {
                 e.stopPropagation();
                 toggle(code);
               }}
               aria-label={isExpanded ? "Свернуть вложенные позиции" : "Показать вложенные позиции"}
-              style={{
-                width: 22,
-                height: 22,
-                padding: 0,
-                border: "1px solid #94a3b8",
-                borderRadius: 4,
-                background: "#f8fafc",
-                cursor: disabled ? "not-allowed" : "pointer",
-                fontSize: 14,
-                lineHeight: 1,
-                color: "#334155",
-              }}
             >
               {isExpanded ? "−" : "+"}
             </button>
@@ -81,25 +68,14 @@ function TnVedTreeNode(props: NodeProps) {
         </span>
         <button
           type="button"
+          className="tnved-tree__pick"
           disabled={disabled || !isSelectable}
           onClick={() => onPick(code)}
-          style={{
-            flex: 1,
-            minWidth: 0,
-            textAlign: "left",
-            border: "none",
-            background: "transparent",
-            cursor: disabled || !isSelectable ? "default" : "pointer",
-            color: "#0f172a",
-            padding: "1px 4px",
-            borderRadius: 2,
-            userSelect: "text",
-          }}
         >
           <span className="fe-font-mono" style={{ fontWeight: 600 }}>
             {displayCode}
           </span>
-          <span style={{ color: "#475569" }}> — {title}</span>
+          <span className="tnved-tree__pick-title"> — {title}</span>
         </button>
       </div>
       {hasChildren && isExpanded
@@ -127,16 +103,50 @@ export type TnVedEaeuTreeListboxProps = {
   value: string;
   onChange: (normalizedCode: string) => void;
   disabled?: boolean;
+  /** id для поля поиска/ввода кода (например, связь с подписью снаружи) */
+  searchInputId?: string;
 };
 
 /**
  * Иерархический listbox: главы ТН ВЭД → дочерние коды из TN_VED_CHILDREN; раскрытие «+», выбор строки задаёт код.
  */
 export default function TnVedEaeuTreeListbox(props: TnVedEaeuTreeListboxProps) {
-  const { value, onChange, disabled } = props;
+  const { value, onChange, disabled, searchInputId } = props;
   const selectedNorm = normalizeTnVedEaeuCode(value.trim()) ?? "";
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
-  const [query, setQuery] = useState("");
+  const [query, setQuery] = useState(value);
+  const [isOpen, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const panelId = useId();
+  useEffect(() => {
+    setQuery(value);
+  }, [value]);
+  useEffect(() => {
+    if (disabled) setOpen(false);
+  }, [disabled]);
+  useEffect(() => {
+    if (!isOpen) return;
+    const onDoc = (e: MouseEvent) => {
+      if (rootRef.current && !rootRef.current.contains(e.target as Node)) {
+        setOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", onDoc);
+    return () => document.removeEventListener("mousedown", onDoc);
+  }, [isOpen]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      e.preventDefault();
+      e.stopPropagation();
+      setOpen(false);
+    };
+    document.addEventListener("keydown", onKey, true);
+    return () => document.removeEventListener("keydown", onKey, true);
+  }, [isOpen]);
   const treeRef = useRef<HTMLDivElement>(null);
   const normalizeSearchText = useCallback((text: string) => text.toLowerCase().replace(/\s+/g, " ").trim(), []);
   const queryNorm = normalizeSearchText(query);
@@ -186,12 +196,12 @@ export default function TnVedEaeuTreeListbox(props: TnVedEaeuTreeListboxProps) {
   }, [searchState.autoExpand]);
 
   useLayoutEffect(() => {
-    if (!selectedNorm || !treeRef.current) return;
+    if (!isOpen || !selectedNorm || !treeRef.current) return;
     const el = treeRef.current.querySelector("[data-tnved-selected=\"true\"]");
     if (el instanceof HTMLElement) {
       el.scrollIntoView({ block: "nearest", behavior: "smooth" });
     }
-  }, [selectedNorm, expanded]);
+  }, [selectedNorm, expanded, isOpen]);
 
   const toggle = useCallback((code: string) => {
     setExpanded((prev) => {
@@ -205,59 +215,132 @@ export default function TnVedEaeuTreeListbox(props: TnVedEaeuTreeListboxProps) {
   const onPick = useCallback(
     (code: string) => {
       const n = normalizeTnVedEaeuCode(code);
-      if (n) onChange(n);
+      if (n) {
+        onChange(n);
+        setOpen(false);
+      }
     },
     [onChange],
   );
 
+  const tryCommitDigitsAsCode = useCallback(() => {
+    const trimmed = query.trim();
+    if (trimmed === "") {
+      return;
+    }
+    const hasLetters = /[a-zA-Zа-яА-ЯёЁ]/.test(trimmed);
+    if (hasLetters) return;
+    const digits = trimmed.replace(/\D/g, "");
+    if (digits.length === 0) return;
+    const n = normalizeTnVedEaeuCode(digits);
+    if (n) {
+      onChange(n);
+      setOpen(false);
+    } else {
+      setQuery(value);
+    }
+  }, [onChange, query, value]);
+
+  const handleInputBlur = () => {
+    tryCommitDigitsAsCode();
+    window.setTimeout(() => {
+      if (!rootRef.current?.contains(document.activeElement)) {
+        setOpen(false);
+      }
+    }, 0);
+  };
+
   return (
-    <div>
-      <input
-        type="text"
-        value={query}
-        onChange={(e) => setQuery(e.target.value)}
-        placeholder="Поиск по коду или названию"
-        style={{
-          width: "100%",
-          marginBottom: 8,
-          padding: 8,
-          borderRadius: 8,
-          border: "1px solid #cbd5e1",
-          background: "#fff",
-        }}
-      />
-      <div
-        ref={treeRef}
-        role="tree"
-        aria-label="Дерево кодов ТН ВЭД ЕАЭС"
-        style={{
-          width: "100%",
-          boxSizing: "border-box",
-          border: "1px solid #cbd5e1",
-          borderRadius: 10,
-          maxHeight: "min(28vh, 15rem)",
-          overflow: "auto",
-          background: "#fff",
-          padding: "2px 0",
-          userSelect: "text",
-        }}
-      >
-        {TN_VED_GROUPS.map((g) => (
-          <TnVedTreeNode
-            key={g.code}
-            code={g.code}
-            title={g.title}
-            depth={0}
-            selectedNorm={selectedNorm}
-            disabled={disabled}
-            expanded={expanded}
-            toggle={toggle}
-            onPick={onPick}
-            matchedCodes={searchState.matchedCodes ?? undefined}
-            visibleCodes={searchState.visibleCodes ?? undefined}
-          />
-        ))}
+    <div
+      ref={rootRef}
+      className="tnved-combobox"
+      role="group"
+      aria-label="Код ТН ВЭД ЕАЭС: ввод и дерево классификатора"
+    >
+      <div className={`tnved-combobox__trigger${isOpen ? " tnved-combobox__trigger--open" : ""}`}>
+        <input
+          ref={inputRef}
+          id={searchInputId}
+          type="text"
+          inputMode="search"
+          autoComplete="off"
+          disabled={disabled}
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          onFocus={() => {
+            if (!disabled) setOpen(true);
+          }}
+          onBlur={handleInputBlur}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              tryCommitDigitsAsCode();
+            }
+            if (e.key === "Escape") {
+              e.preventDefault();
+              if (!isOpen) {
+                onChange("");
+                setQuery("");
+              }
+            }
+          }}
+          placeholder="Код или поиск по названию"
+          className="tnved-combobox__input"
+          role="combobox"
+          aria-expanded={isOpen}
+          aria-controls={panelId}
+          aria-autocomplete="list"
+        />
+        <button
+          type="button"
+          className="tnved-combobox__toggle"
+          disabled={disabled}
+          tabIndex={-1}
+          aria-expanded={isOpen}
+          aria-controls={panelId}
+          title={isOpen ? "Скрыть дерево" : "Показать дерево классификатора"}
+          onMouseDown={(e) => e.preventDefault()}
+          onClick={() => {
+            setOpen((o) => {
+              const next = !o;
+              if (next) {
+                requestAnimationFrame(() => inputRef.current?.focus());
+              }
+              return next;
+            });
+          }}
+        >
+          <span className="tnved-combobox__toggle-icon" aria-hidden>
+            {isOpen ? "▲" : "▼"}
+          </span>
+        </button>
       </div>
+      {isOpen ? (
+        <div id={panelId} className="tnved-combobox__panel" role="presentation">
+          <div
+            ref={treeRef}
+            className="tnved-combobox__tree"
+            role="tree"
+            aria-label="Дерево кодов ТН ВЭД ЕАЭС"
+          >
+            {TN_VED_GROUPS.map((g) => (
+              <TnVedTreeNode
+                key={g.code}
+                code={g.code}
+                title={g.title}
+                depth={0}
+                selectedNorm={selectedNorm}
+                disabled={disabled}
+                expanded={expanded}
+                toggle={toggle}
+                onPick={onPick}
+                matchedCodes={searchState.matchedCodes ?? undefined}
+                visibleCodes={searchState.visibleCodes ?? undefined}
+              />
+            ))}
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

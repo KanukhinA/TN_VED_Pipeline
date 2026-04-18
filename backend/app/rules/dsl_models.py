@@ -422,7 +422,8 @@ class RuleMeta(BaseModel):
     expert_draft: Optional[Dict[str, Any]] = None
     # Черновик мастера «числовые характеристики» (единый мастер справочника); произвольная структура как на фронте
     numeric_characteristics_draft: Optional[Dict[str, Any]] = None
-    # Множественные конфигурации извлечения признаков (selected_models; prompt + дубли prompts_by_model для совместимости)
+    # Множественные конфигурации извлечения признаков (selected_models; prompt + дубли prompts_by_model для совместимости).
+    # В элементах списка допускается feature_extraction_primary: если одна LLM в нескольких конфигурациях — ровно одна должна быть true.
     feature_extraction_configs: Optional[List[Dict[str, Any]]] = None
     # Активная конфигурация извлечения признаков (id из feature_extraction_configs)
     feature_extraction_active_config_id: Optional[str] = None

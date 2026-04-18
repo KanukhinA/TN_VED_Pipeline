@@ -6,14 +6,16 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from ..db.models import Rule, RuleVersion
 from ..db.session import get_db_session
 from ..rules.classification import find_first_matching_classification_rule
 from ..rules.compiler import compile_rule
+from ..primary_catalog_settings import get_effective_primary_catalog_map
 from ..rules.dsl_models import ObjectFieldSchema, RuleDSL, normalize_tn_ved_eaeu_code_value
+from ..rules.officer_validation_errors_ru import humanize_officer_error_list, note_class_not_assigned_ru
 
 router = APIRouter(tags=["officer-pipeline"])
 
@@ -48,6 +50,8 @@ def _find_best_rule_for_tnved(
     if not decl:
         return None
 
+    primary_by_group = get_effective_primary_catalog_map(db)
+
     stmt = (
         db.query(Rule, RuleVersion)
         .join(RuleVersion, RuleVersion.rule_id == Rule.id)
@@ -56,9 +60,7 @@ def _find_best_rule_for_tnved(
     )
     rows = stmt.order_by(RuleVersion.created_at.desc()).all()
 
-    best: Optional[Tuple[Rule, RuleVersion]] = None
-    best_prefix_len = -1
-
+    candidates: list[tuple[int, Rule, RuleVersion, str]] = []
     for rule, rv in rows:
         meta = rv.dsl_json.get("meta") if isinstance(rv.dsl_json, dict) else None
         if not isinstance(meta, dict):
@@ -70,11 +72,26 @@ def _find_best_rule_for_tnved(
             grp = normalize_tn_ved_eaeu_code_value(str(raw_grp).strip())
         except ValueError:
             continue
-        if decl.startswith(grp) and len(grp) > best_prefix_len:
-            best = (rule, rv)
-            best_prefix_len = len(grp)
+        if decl.startswith(grp):
+            candidates.append((len(grp), rule, rv, grp))
 
-    return best
+    if not candidates:
+        return None
+
+    max_len = max(c[0] for c in candidates)
+    tier = [c for c in candidates if c[0] == max_len]
+    if len(tier) == 1:
+        return tier[0][1], tier[0][2]
+
+    grp_key = tier[0][3]
+    prim_id = primary_by_group.get(grp_key)
+    if prim_id:
+        for _ln, rule, rv, _g in tier:
+            if str(rule.id) == prim_id:
+                return (rule, rv)
+
+    tier.sort(key=lambda x: x[2].created_at, reverse=True)
+    return tier[0][1], tier[0][2]
 
 
 def _fmt_scalar_display(v: Any) -> str:
@@ -216,6 +233,15 @@ def _pick_active_feature_config(dsl: RuleDSL) -> Optional[Dict[str, Any]]:
     cfgs = meta.feature_extraction_configs
     if not cfgs or not isinstance(cfgs, list):
         return None
+    primary: list[Dict[str, Any]] = []
+    for c in cfgs:
+        if not isinstance(c, dict):
+            continue
+        v = c.get("feature_extraction_primary")
+        if v is True or v == "true":
+            primary.append(c)
+    if len(primary) == 1:
+        return primary[0]
     active_id = (meta.feature_extraction_active_config_id or "").strip()
     if active_id:
         for c in cfgs:
@@ -237,6 +263,46 @@ def _assemble_llm_prompt(cfg: Dict[str, Any], description: str) -> str:
     return "\n\n".join(parts)
 
 
+def _catalog_classification_entries(dsl: RuleDSL) -> List[Dict[str, str]]:
+    clf = dsl.classification
+    if not clf or not clf.rules:
+        return []
+    out: List[Dict[str, str]] = []
+    for r in clf.rules:
+        cid = (r.class_id or "").strip()
+        if not cid:
+            continue
+        out.append({"class_id": cid, "title": (r.title or "").strip()})
+    return out
+
+
+def _extract_exactly_one_conflict(errors: List[Any]) -> Optional[Dict[str, Any]]:
+    for e in errors:
+        if not isinstance(e, dict):
+            continue
+        msg = str(e.get("message") or "")
+        if "exactly_one" not in msg:
+            continue
+        details = e.get("details")
+        if not isinstance(details, dict):
+            continue
+        matched = details.get("matched_class_ids")
+        if not isinstance(matched, list):
+            continue
+        class_ids = [str(x).strip() for x in matched if str(x).strip()]
+        if len(class_ids) <= 1:
+            continue
+        return {
+            "matched_count": len(class_ids),
+            "matched_class_ids": class_ids,
+            "error_ru": (
+                "Ошибка в справочнике: для стратегии exactly_one сработало несколько правил одновременно. "
+                "Декларация требует экспертного рассмотрения."
+            ),
+        }
+    return None
+
+
 class OfficerRunRequest(BaseModel):
     declaration_id: str
     description: str
@@ -244,6 +310,10 @@ class OfficerRunRequest(BaseModel):
     gross_weight_kg: float | None = None
     net_weight_kg: float | None = None
     price: float | None = None
+    extracted_features_override: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Если задан — используется вместо результата LLM-извлечения (корректировка инспектором).",
+    )
 
 
 @router.post("/api/pipeline/officer-run")
@@ -287,7 +357,16 @@ def officer_run(
     }
     parsed: Dict[str, Any] = {}
 
-    if fe_cfg:
+    if payload.extracted_features_override is not None:
+        parsed = dict(payload.extracted_features_override)
+        compact = format_extracted_document_compact(parsed) if parsed else "(пустой JSON)"
+        feature_block = {
+            "status": "inspector_override",
+            "extracted_document_ru": compact,
+            "parsed": parsed,
+            "reason": "Признаки заданы инспектором вручную; вызов модели извлечения не выполнялся.",
+        }
+    elif fe_cfg:
         models_raw = fe_cfg.get("selected_models")
         models = [str(m).strip() for m in models_raw] if isinstance(models_raw, list) else []
         model = models[0] if models else ""
@@ -360,6 +439,7 @@ def officer_run(
     )
 
     ok, errors, validated_dict, assigned_class = compiled.validate(merged)
+    exactly_one_conflict = _extract_exactly_one_conflict(errors)
 
     clf_cfg = compiled.classification
     matched_rule = None
@@ -396,12 +476,21 @@ def officer_run(
         sep,
         f"Валидация структуры и правил · {'успешно' if ok else 'есть ошибки'}",
     ]
+    class_note = note_class_not_assigned_ru(ok, assigned_class)
+    if class_note:
+        summary_lines.append(class_note)
     if assigned_class:
         summary_lines.append(f"Итоговый класс (class_id): {assigned_class}")
     if rule_title:
         summary_lines.append(f"Сработавшее правило классификации: {rule_title}")
+    errors_ru = humanize_officer_error_list(errors) if errors else []
     if errors:
-        summary_lines.append("Ошибки: " + json.dumps(errors, ensure_ascii=False))
+        summary_lines.append("Ошибки (пояснение): " + json.dumps(errors_ru, ensure_ascii=False))
+    if exactly_one_conflict:
+        summary_lines.append(
+            "Конфликт классификации: " + json.dumps(exactly_one_conflict["matched_class_ids"], ensure_ascii=False)
+        )
+        summary_lines.append(str(exactly_one_conflict["error_ru"]))
 
     out: Dict[str, Any] = {
         "declaration_id": payload.declaration_id,
@@ -417,10 +506,17 @@ def officer_run(
         "deterministic": {
             "validation_ok": ok,
             "errors": errors,
+            "errors_ru": errors_ru,
+            "class_note_ru": class_note,
             "assigned_class_id": assigned_class,
             "matched_classification_rule_title": rule_title,
             "matched_classification_class_id": matched_rule.class_id if matched_rule else None,
+            "exactly_one_conflict": exactly_one_conflict,
+            "candidate_class_ids": exactly_one_conflict["matched_class_ids"] if exactly_one_conflict else [],
+            "requires_expert_review": bool(exactly_one_conflict),
         },
         "final_class_id": assigned_class,
+        "catalog_classification_classes": _catalog_classification_entries(dsl),
+        "requires_expert_review": bool(exactly_one_conflict),
     }
     return out

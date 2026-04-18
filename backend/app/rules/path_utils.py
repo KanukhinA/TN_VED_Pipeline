@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Any, Iterable, List, Literal, Optional
+from typing import Any, List, Literal, Optional
 
 
 @dataclass(frozen=True)
