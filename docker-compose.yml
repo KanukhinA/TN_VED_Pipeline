@@ -39,6 +39,9 @@ services:
     environment:
       DATABASE_URL: postgresql+psycopg2://rules_user:${POSTGRES_PASSWORD:-rules_pass}@postgres:5432/rules
       PREPROCESSING_URL: http://preprocessing:8004
+      FEATURE_EXTRACTION_MODEL_DEFAULTS_PATH: /app/config/llm_models.json
+    volumes:
+      - ./config/llm_models.json:/app/config/llm_models.json
     depends_on:
       postgres:
         condition: service_healthy
@@ -67,7 +70,10 @@ services:
     ports:
       - "8002:8002"
     environment:
+      # LLM_BACKEND=ollama (по умолчанию) или vllm; при vllm задайте VLLM_BASE_URL и имя модели как на сервере vLLM.
+      LLM_BACKEND: ${LLM_BACKEND:-ollama}
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
+      VLLM_BASE_URL: ${VLLM_BASE_URL:-http://vllm:8000}
       OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3.1:8b}
     depends_on:
       ollama:
@@ -81,10 +87,15 @@ services:
     ports:
       - "8004:8004"
     environment:
+      LLM_BACKEND: ${LLM_BACKEND:-ollama}
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
+      VLLM_BASE_URL: ${VLLM_BASE_URL:-http://vllm:8000}
       OLLAMA_CONTAINER_NAME: ${OLLAMA_CONTAINER_NAME:-pipeline_ollama}
+      VLLM_CONTAINER_NAME: ${VLLM_CONTAINER_NAME:-pipeline_vllm}
+      MODEL_RUNTIME_SETTINGS_PATH: /app/config/llm_models.json
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+      - ./config/llm_models.json:/app/config/llm_models.json
     depends_on:
       ollama:
         condition: service_healthy
@@ -108,6 +119,8 @@ services:
     environment:
       DATABASE_URL: postgresql://rules_user:${POSTGRES_PASSWORD:-rules_pass}@postgres:5432/rules
       POLL_INTERVAL_SECONDS: "5"
+      # Эмбеддинги: auto (CUDA если доступна) | cuda | cpu. K-means в sklearn остаётся на CPU.
+      CLUSTERING_DEVICE: "${CLUSTERING_DEVICE:-auto}"
     ports:
       - "8007:8007"
 

@@ -1,0 +1,5 @@
+# Подключить GPU к clustering-service (нужен NVIDIA Container Toolkit).
+# Запуск: docker compose -f docker-compose.yml -f docker-compose.clustering-gpu.yml up -d --build clustering-service
+services:
+  clustering-service:
+    gpus: all

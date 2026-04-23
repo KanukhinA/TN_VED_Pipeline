@@ -1,53 +1,10 @@
+"""Обратная совместимость: те же имена; фактический бэкенд — Ollama или vLLM (LLM_BACKEND)."""
+
 from __future__ import annotations
 
-import os
-from typing import Any
+from shared.llm_runtime.compat import ollama_generate_simple, ollama_list_models
+from shared.llm_runtime.config import runtime_base_url
 
-import httpx
+OLLAMA_BASE_URL = runtime_base_url()
 
-OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
-
-
-def ollama_generate_simple(
-    model: str,
-    prompt: str,
-    *,
-    num_ctx: int = 4096,
-    num_predict: int = 128,
-    temperature: float = 0.0,
-    timeout: float = 120.0,
-) -> dict[str, Any]:
-    url = f"{OLLAMA_BASE_URL}/api/generate"
-    body: dict[str, Any] = {
-        "model": model.strip(),
-        "prompt": prompt,
-        "stream": False,
-        "options": {
-            "num_ctx": num_ctx,
-            "num_predict": num_predict,
-            "temperature": temperature,
-        },
-    }
-    with httpx.Client(timeout=timeout) as client:
-        r = client.post(url, json=body)
-        r.raise_for_status()
-        return r.json()
-
-
-def ollama_list_models(timeout: float = 20.0) -> list[str]:
-    url = f"{OLLAMA_BASE_URL}/api/tags"
-    with httpx.Client(timeout=timeout) as client:
-        r = client.get(url)
-        r.raise_for_status()
-        data = r.json()
-    models = data.get("models")
-    if not isinstance(models, list):
-        return []
-    out: list[str] = []
-    for row in models:
-        if not isinstance(row, dict):
-            continue
-        name = str(row.get("name") or "").strip()
-        if name:
-            out.append(name)
-    return out
+__all__ = ["OLLAMA_BASE_URL", "ollama_generate_simple", "ollama_list_models"]

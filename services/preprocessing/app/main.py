@@ -12,11 +12,23 @@ import httpx
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.ollama_client import OLLAMA_BASE_URL, ollama_generate
+from app.llm_runtime_bridge import (
+    delete_model_request,
+    fetch_running_models,
+    get_installed_model_names,
+    ollama_pull_stream,
+    pause_one_model_ram,
+    ready_probe,
+    unload_other_running_ollama_models,
+)
+from shared.llm_runtime.compat import ollama_generate
+from shared.llm_runtime.config import is_vllm, runtime_base_url
 
 app = FastAPI(title="Preprocessing Service", version="0.1.0")
-MODEL_SETTINGS_PATH = Path(__file__).resolve().parent / "model_runtime_settings.json"
+_MODEL_SETTINGS_FALLBACK = Path(__file__).resolve().parent / "model_runtime_settings.json"
+MODEL_SETTINGS_PATH = Path(os.getenv("MODEL_RUNTIME_SETTINGS_PATH", str(_MODEL_SETTINGS_FALLBACK)))
 OLLAMA_CONTAINER_NAME = (os.getenv("OLLAMA_CONTAINER_NAME") or "pipeline_ollama").strip()
+VLLM_CONTAINER_NAME = (os.getenv("VLLM_CONTAINER_NAME") or "pipeline_vllm").strip()
 PREPROCESSING_CONTAINER_NAME = (os.getenv("PREPROCESSING_CONTAINER_NAME") or "pipeline_preprocessing").strip()
 
 
@@ -33,18 +45,7 @@ class ModelRuntimeSettingsPayload(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
 
-DEFAULT_MODEL_SETTINGS: dict[str, Any] = {
-    "models": {
-        "qwen3:4b-q4_K_M": {
-            "num_ctx": 8192,
-            "max_new_tokens": 3904,
-            "repetition_penalty": 1.0,
-            "max_length": 4096,
-            "enable_thinking": False,
-            "temperature": 0.0,
-        }
-    },
-}
+DEFAULT_MODEL_SETTINGS: dict[str, Any] = {"models": {}}
 
 
 def _load_model_settings() -> dict[str, Any]:
@@ -69,71 +70,6 @@ def _save_model_settings(payload: dict[str, Any]) -> dict[str, Any]:
     }
     MODEL_SETTINGS_PATH.write_text(json.dumps(normalized, ensure_ascii=False, indent=2), encoding="utf-8")
     return normalized
-
-
-def _pause_one_model_ram(model: str) -> dict[str, Any]:
-    """Выгрузить модель из RAM Ollama (keep_alive=0), без удаления файлов."""
-    url = f"{OLLAMA_BASE_URL}/api/generate"
-    body = {"model": model, "prompt": "", "stream": False, "keep_alive": 0}
-    with httpx.Client(timeout=30.0) as client:
-        resp = client.post(url, json=body)
-        resp.raise_for_status()
-        return resp.json() if resp.content else {}
-
-
-def _get_installed_model_names() -> set[str]:
-    """Имена образов из GET /api/tags (уже скачанные в Ollama)."""
-    url = f"{OLLAMA_BASE_URL}/api/tags"
-    with httpx.Client(timeout=10.0) as client:
-        resp = client.get(url)
-        resp.raise_for_status()
-        data = resp.json()
-    tags = data.get("models") if isinstance(data, dict) else []
-    out: set[str] = set()
-    for x in tags if isinstance(tags, list) else []:
-        if isinstance(x, dict):
-            n = str(x.get("name") or "").strip()
-            if n:
-                out.add(n)
-    return out
-
-
-def _ollama_pull_stream(model: str) -> tuple[list[str], dict[str, Any], list[str]]:
-    """Скачать образ (pull). Ошибки в NDJSON → HTTPException.
-
-    Возвращает: сырой NDJSON от Ollama, последнее событие, строки «как в консоли» (дубль print для UI).
-    """
-    url = f"{OLLAMA_BASE_URL}/api/pull"
-    log_lines: list[str] = []
-    console_lines: list[str] = []
-    last_event: dict[str, Any] = {}
-    pull_error: str | None = None
-    with httpx.Client(timeout=900.0) as client:
-        with client.stream("POST", url, json={"name": model, "stream": True}) as resp:
-            resp.raise_for_status()
-            for raw in resp.iter_lines():
-                if not raw:
-                    continue
-                line = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else str(raw)
-                log_lines.append(line)
-                try:
-                    event = json.loads(line)
-                except Exception:
-                    msg = f"[ollama deploy] non-json line: {line[:500]}"
-                    print(msg)
-                    console_lines.append(msg)
-                    continue
-                if isinstance(event, dict):
-                    if event.get("error"):
-                        pull_error = str(event["error"])
-                    last_event = event
-                ev = json.dumps(event, ensure_ascii=False) if isinstance(event, dict) else repr(line)
-                msg = f"[ollama deploy] model={model} event={ev}"
-                print(msg)
-                console_lines.append(msg)
-    if pull_error:
-        raise HTTPException(status_code=502, detail=f"ollama pull: {pull_error}")
-    return log_lines, last_event or {"status": "completed"}, console_lines
 
 
 def _warm_load_model_into_ram(model: str) -> dict[str, Any]:
@@ -167,32 +103,6 @@ def _warm_load_model_into_ram(model: str) -> dict[str, Any]:
     return slim
 
 
-def unload_other_running_ollama_models(keep_model: str) -> None:
-    """В RAM остаётся одна модель: перед инференсом выгружаем остальные (не таймер — явный вызов из пайплайна)."""
-    keep = (keep_model or "").strip()
-    if not keep:
-        return
-    ps_url = f"{OLLAMA_BASE_URL}/api/ps"
-    try:
-        with httpx.Client(timeout=8.0) as client:
-            resp = client.get(ps_url)
-            if resp.status_code == 404:
-                return
-            resp.raise_for_status()
-            data = resp.json()
-    except Exception:
-        return
-    models = data.get("models") if isinstance(data, dict) else []
-    running = [str((x or {}).get("name") or "").strip() for x in models if isinstance(x, dict)]
-    for name in running:
-        if not name or name == keep:
-            continue
-        try:
-            _pause_one_model_ram(name)
-        except Exception:
-            pass
-
-
 class PreprocessRequest(BaseModel):
     declaration_id: str
     description: str
@@ -223,14 +133,14 @@ def health() -> dict[str, str]:
 
 @app.get("/ready")
 def ready() -> dict[str, Any]:
-    url = f"{OLLAMA_BASE_URL}/api/tags"
-    try:
-        with httpx.Client(timeout=3.0) as client:
-            r = client.get(url)
-            ok = r.status_code == 200
-    except Exception:
-        ok = False
-    return {"status": "ok" if ok else "degraded", "ollama": "ok" if ok else "down", "ollama_base_url": OLLAMA_BASE_URL}
+    ok, _probe_url = ready_probe()
+    rb = runtime_base_url()
+    return {
+        "status": "ok" if ok else "degraded",
+        "ollama": "ok" if ok else "down",
+        "ollama_base_url": rb,
+        "llm_backend": "vllm" if is_vllm() else "ollama",
+    }
 
 
 @app.get("/api/v1/models/settings")
@@ -245,19 +155,15 @@ def put_model_settings(payload: ModelRuntimeSettingsPayload) -> dict[str, Any]:
 
 @app.get("/api/v1/models/available")
 def get_available_models() -> dict[str, Any]:
-    url = f"{OLLAMA_BASE_URL}/api/tags"
     configured = _load_model_settings()
     configured_models = list((configured.get("models") or {}).keys())
     try:
-        with httpx.Client(timeout=10.0) as client:
-            resp = client.get(url)
-            resp.raise_for_status()
-            data = resp.json()
-        tags = data.get("models") if isinstance(data, dict) else []
-        installed = [str((x or {}).get("name") or "").strip() for x in tags if isinstance(x, dict)]
-        installed = [x for x in installed if x]
+        installed = sorted(get_installed_model_names())
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"ollama unavailable ({OLLAMA_BASE_URL}): {exc}") from exc
+        raise HTTPException(
+            status_code=502,
+            detail=f"llm runtime unavailable ({runtime_base_url()}): {exc}",
+        ) from exc
     return {
         "installed_models": installed,
         "configured_models": configured_models,
@@ -266,31 +172,15 @@ def get_available_models() -> dict[str, Any]:
 
 @app.get("/api/v1/models/running")
 def get_running_models() -> dict[str, Any]:
-    """Список моделей, загруженных в память Ollama (GET /api/ps)."""
-    url = f"{OLLAMA_BASE_URL}/api/ps"
-    try:
-        with httpx.Client(timeout=8.0) as client:
-            resp = client.get(url)
-            if resp.status_code == 404:
-                return {"running_models": [], "ollama_ps": "unavailable"}
-            resp.raise_for_status()
-            data = resp.json()
-    except httpx.HTTPStatusError as exc:
-        raise HTTPException(status_code=502, detail=f"ollama http {exc.response.status_code}: {exc.response.text[:500]}") from exc
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"ollama unavailable ({OLLAMA_BASE_URL}): {exc}") from exc
-    models = data.get("models") if isinstance(data, dict) else []
-    running = [str((x or {}).get("name") or "").strip() for x in models if isinstance(x, dict)]
-    running = [x for x in running if x]
-    return {"running_models": running}
+    """Ollama: GET /api/ps. vLLM: GET /v1/models (модели, отданные сервером)."""
+    return fetch_running_models()
 
 
 @app.post("/api/v1/models/deploy")
 def deploy_model(payload: ModelDeployRequest) -> dict[str, Any]:
     """
-    Запуск модели в памяти Ollama:
-    - если образа ещё нет в /api/tags — ollama pull;
-    - затем короткий generate, чтобы веса оказались в RAM (и остальные модели выгружаются).
+    Ollama: при отсутствии тега — pull, затем короткий generate.
+    vLLM: pull нет; модель должна быть в /v1/models, затем короткий generate (прогрев).
     """
     model = (payload.model or "").strip()
     if not model:
@@ -301,17 +191,25 @@ def deploy_model(payload: ModelDeployRequest) -> dict[str, Any]:
     last_pull_event: dict[str, Any] = {}
     pulled = False
     try:
-        installed = _get_installed_model_names()
+        installed = get_installed_model_names()
         if model not in installed:
+            if is_vllm():
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Модель {model!r} не найдена в {runtime_base_url()}/v1/models. "
+                        "Запустите vLLM с этой моделью или исправьте имя (часто HF id)."
+                    ),
+                )
             pulled = True
-            pull_log, last_pull_event, pull_console_lines = _ollama_pull_stream(model)
+            pull_log, last_pull_event, pull_console_lines = ollama_pull_stream(model)
         warm_load = _warm_load_model_into_ram(model)
     except HTTPException:
         raise
     except httpx.HTTPStatusError as exc:
         raise HTTPException(status_code=502, detail=f"ollama http {exc.response.status_code}: {exc.response.text[:500]}") from exc
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"ollama unavailable ({OLLAMA_BASE_URL}): {exc}") from exc
+        raise HTTPException(status_code=502, detail=f"llm runtime unavailable ({runtime_base_url()}): {exc}") from exc
     tail = pull_log[-400:]
     tail_console = pull_console_lines[-400:]
     duration_sec = round(time.time() - t0, 2)
@@ -333,11 +231,13 @@ def pause_model(payload: ModelActionRequest) -> dict[str, Any]:
     if not model:
         raise HTTPException(status_code=400, detail="model is required")
     try:
-        data = _pause_one_model_ram(model)
+        data = pause_one_model_ram(model)
     except httpx.HTTPStatusError as exc:
         raise HTTPException(status_code=502, detail=f"ollama http {exc.response.status_code}: {exc.response.text[:500]}") from exc
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"ollama unavailable ({OLLAMA_BASE_URL}): {exc}") from exc
+        raise HTTPException(status_code=502, detail=f"llm runtime unavailable ({runtime_base_url()}): {exc}") from exc
+    if is_vllm() and not data:
+        data = {"note": "noop: vLLM не поддерживает выгрузку отдельной модели как Ollama keep_alive=0"}
     return {"status": "ok", "model": model, "action": "pause", "ollama_response": data}
 
 
@@ -346,16 +246,14 @@ def delete_model(payload: ModelActionRequest) -> dict[str, Any]:
     model = (payload.model or "").strip()
     if not model:
         raise HTTPException(status_code=400, detail="model is required")
-    url = f"{OLLAMA_BASE_URL}/api/delete"
     try:
-        with httpx.Client(timeout=120.0) as client:
-            resp = client.post(url, json={"name": model})
-            resp.raise_for_status()
-            data = resp.json() if resp.content else {}
+        data = delete_model_request(model)
+    except HTTPException:
+        raise
     except httpx.HTTPStatusError as exc:
         raise HTTPException(status_code=502, detail=f"ollama http {exc.response.status_code}: {exc.response.text[:500]}") from exc
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"ollama unavailable ({OLLAMA_BASE_URL}): {exc}") from exc
+        raise HTTPException(status_code=502, detail=f"llm runtime unavailable ({runtime_base_url()}): {exc}") from exc
     return {"status": "ok", "model": model, "action": "delete", "ollama_response": data}
 
 
@@ -392,9 +290,16 @@ def ollama_generate_endpoint(body: OllamaGenerateRequest) -> dict[str, Any]:
             enable_thinking=body.enable_thinking,
         )
     except httpx.HTTPStatusError as e:
-        raise HTTPException(status_code=502, detail=f"ollama http {e.response.status_code}: {e.response.text[:500]}") from e
+        tag = "vllm" if is_vllm() else "ollama"
+        raise HTTPException(
+            status_code=502,
+            detail=f"{tag} http {e.response.status_code}: {e.response.text[:500]}",
+        ) from e
     except httpx.RequestError as e:
-        raise HTTPException(status_code=502, detail=f"ollama unreachable ({OLLAMA_BASE_URL}): {e}") from e
+        raise HTTPException(
+            status_code=502,
+            detail=f"llm unreachable ({runtime_base_url()}): {e}",
+        ) from e
 
 
 @app.post("/api/v1/preprocess")
@@ -412,16 +317,17 @@ def preprocess(payload: PreprocessRequest) -> dict[str, object]:
 @app.get("/api/v1/diagnostics/ollama-container-logs")
 def ollama_container_logs(tail: int = 200) -> dict[str, Any]:
     """
-    Хвост stdout/stderr контейнера Ollama через `docker logs`.
+    Хвост stdout/stderr контейнера LLM через `docker logs` (Ollama или vLLM).
     Нужны: docker CLI в образе и доступ к сокету Docker (см. docker-compose: volume docker.sock).
     """
     t = max(20, min(int(tail), 5000))
-    name = OLLAMA_CONTAINER_NAME
+    name = VLLM_CONTAINER_NAME if is_vllm() else OLLAMA_CONTAINER_NAME
+    env_hint = "VLLM_CONTAINER_NAME" if is_vllm() else "OLLAMA_CONTAINER_NAME"
     if not name:
         return {
             "available": False,
-            "reason": "OLLAMA_CONTAINER_NAME пуст",
-            "hint": "Укажите имя контейнера Ollama.",
+            "reason": f"{env_hint} пуст",
+            "hint": "Укажите имя контейнера LLM (Ollama или vLLM).",
             "lines": "",
         }
     docker = shutil.which("docker")

@@ -90,24 +90,38 @@ def humanize_pydantic_validation_error(err: Any) -> str:
     return s
 
 
+def _normalize_matched_class_ids(details: Any) -> List[str]:
+    """Идентификаторы классов из ответа классификатора (в т.ч. если ключ отсутствовал или был null)."""
+    if not isinstance(details, dict):
+        return []
+    raw = details.get("matched_class_ids")
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        return []
+    return [str(x).strip() for x in raw if str(x).strip()]
+
+
 def humanize_officer_error_list(errors: List[Any]) -> List[str]:
     out: List[str] = []
     for e in errors:
         if isinstance(e, dict):
             msg = e.get("message") or e.get("msg") or e.get("detail")
             details = e.get("details")
-            if (
-                isinstance(msg, str)
-                and "exactly_one" in msg
-                and isinstance(details, dict)
-                and isinstance(details.get("matched_class_ids"), list)
-            ):
-                class_ids = [str(x).strip() for x in details.get("matched_class_ids") if str(x).strip()]
+            # Устаревшие ошибки классификации с matched_class_ids в details (текущий движок их не шлёт).
+            if isinstance(details, dict) and "matched_class_ids" in details:
+                class_ids = _normalize_matched_class_ids(details)
                 if len(class_ids) > 1:
                     out.append(
-                        "Ошибка в справочнике: для strategy exactly_one сработало несколько правил. "
-                        + "Подходящие классы: "
+                        "Подошло несколько классов: "
                         + ", ".join(class_ids)
+                        + ". Выберите один корректный или уточните условия в справочнике."
+                    )
+                    continue
+                if len(class_ids) == 0:
+                    out.append(
+                        "Ни одно правило классификации не подошло. "
+                        "Уточните условия в справочнике, назначьте класс вручную или обратитесь к эксперту."
                     )
                     continue
             if isinstance(msg, str) and msg.strip():

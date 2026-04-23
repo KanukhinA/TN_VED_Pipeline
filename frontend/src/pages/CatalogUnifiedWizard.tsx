@@ -4,6 +4,7 @@ import {
   archiveRule,
   cloneRule,
   deleteRule,
+  getPrimaryCatalogSettings,
   getRule,
   listRules,
   saveRule,
@@ -61,6 +62,8 @@ export default function CatalogUnifiedWizard() {
   const [classificationJsonError, setClassificationJsonError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [catalogs, setCatalogs] = useState<any[]>([]);
+  /** Эффективный основной справочник по коду группы ТН ВЭД (с сервера). */
+  const [primaryByGroup, setPrimaryByGroup] = useState<Record<string, string> | null>(null);
   const [catalogQuery, setCatalogQuery] = useState("");
   const [includeArchived, setIncludeArchived] = useState(false);
   const [tnVedGroupCode, setTnVedGroupCode] = useState("");
@@ -74,14 +77,23 @@ export default function CatalogUnifiedWizard() {
 
   const refreshCatalogs = useCallback(async () => {
     try {
-      setCatalogs(
-        await listRules({
+      const [list, primaryCfg] = await Promise.all([
+        listRules({
           q: catalogQuery.trim() || undefined,
           include_archived: includeArchived,
         }),
-      );
+        getPrimaryCatalogSettings().catch(() => null),
+      ]);
+      setCatalogs(Array.isArray(list) ? list : []);
+      const raw = primaryCfg?.by_group_code;
+      if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+        setPrimaryByGroup(raw as Record<string, string>);
+      } else {
+        setPrimaryByGroup(null);
+      }
     } catch {
       setCatalogs([]);
+      setPrimaryByGroup(null);
     }
   }, [catalogQuery, includeArchived]);
 
@@ -185,16 +197,22 @@ export default function CatalogUnifiedWizard() {
     if (!normalizeTnVedGroupCode(tnVedGroupCode)) return false;
     if (!numericCharsDraft.catalogName.trim()) return false;
     const n = normalizeNumericCharacteristicsDraft(numericCharsDraft);
-    const hasNumeric = n.characteristics.some((c) => c.characteristicKey.trim() && c.componentColumnKey.trim());
+    const hasNumeric = n.characteristics.some((c) =>
+      c.layout === "scalar"
+        ? !!c.characteristicKey.trim()
+        : !!(c.characteristicKey.trim() && c.componentColumnKey.trim()),
+    );
     const hasProchee = n.procheeEnabled;
-    const hasText = (n.textArrayFields ?? []).some((t) => t.fieldKey.trim());
+    const hasTextArray = (n.textArrayFields ?? []).some((t) => t.fieldKey.trim());
+    const hasTextScalar = (n.textScalarFields ?? []).some((t) => t.fieldKey.trim());
+    const hasText = hasTextArray || hasTextScalar;
     return hasNumeric || hasProchee || hasText;
   }
 
   function goToRulesStep() {
     if (!canCompleteStructure()) {
       window.alert(
-        "Укажите главу ТН ВЭД, название справочника и хотя бы одну структуру: поле с числами, блок «прочее» или фиксированное текстовое поле.",
+        "Укажите главу ТН ВЭД, название справочника и хотя бы одну структуру: числовое поле, текстовое поле, массив из допустимых значений или блок «прочее».",
       );
       return;
     }
@@ -245,7 +263,7 @@ export default function CatalogUnifiedWizard() {
     const rebuilt = numericCharacteristicsToDsl(normalizedDraft);
     const modelId = (dsl.model_id?.trim() || rebuilt.model_id || "").trim();
     if (!modelId) {
-      window.alert("Укажите идентификатор модели (model_id).");
+      window.alert("Не удалось сформировать идентификатор модели (model_id). Проверьте название справочника на шаге 1.");
       return;
     }
     if (!classificationHasTnVedForAllRules(classificationUi)) {
@@ -355,7 +373,6 @@ export default function CatalogUnifiedWizard() {
         rawTn != null && String(rawTn).trim() !== "" ? normalizeTnVedChapterMeta(String(rawTn)) ?? "" : "",
       );
       setRuleId(String(cloned.rule_id));
-      setFlowStep(2);
       dataJsonTouchedRef.current = false;
       dataJsonAutoDraftKeyRef.current = "";
       await refreshCatalogs();
@@ -426,8 +443,14 @@ export default function CatalogUnifiedWizard() {
     const normalized = normalizeNumericCharacteristicsDraft(numericCharsDraft);
     const hasCatalogName = normalized.catalogName.trim().length > 0;
     const hasTnVed = (normalizeTnVedGroupCode(tnVedGroupCode) ?? "").length > 0;
-    const hasNumeric = normalized.characteristics.some((c) => c.characteristicKey.trim() || c.componentColumnKey.trim());
-    const hasText = (normalized.textArrayFields ?? []).some((t) => t.fieldKey.trim());
+    const hasNumeric = normalized.characteristics.some((c) =>
+      c.layout === "scalar"
+        ? !!c.characteristicKey.trim()
+        : !!(c.characteristicKey.trim() && c.componentColumnKey.trim()),
+    );
+    const hasTextArray = (normalized.textArrayFields ?? []).some((t) => t.fieldKey.trim());
+    const hasTextScalar = (normalized.textScalarFields ?? []).some((t) => t.fieldKey.trim());
+    const hasText = hasTextArray || hasTextScalar;
     const hasMisc = normalized.procheeEnabled;
     return flowStep === 1 && !ruleId && !hasCatalogName && !hasTnVed && !hasNumeric && !hasText && !hasMisc;
   }, [flowStep, ruleId, numericCharsDraft, tnVedGroupCode]);
@@ -446,6 +469,7 @@ export default function CatalogUnifiedWizard() {
 
           <CatalogListSection
             catalogs={catalogs}
+            primaryByGroup={primaryByGroup}
             catalogQuery={catalogQuery}
             onCatalogQueryChange={setCatalogQuery}
             includeArchived={includeArchived}
@@ -594,16 +618,6 @@ export default function CatalogUnifiedWizard() {
       {flowStep === 3 && savedSource && (
         <div className="card">
           <h2 style={{ marginTop: 0 }}>Сохранение и проверка</h2>
-          <label style={{ display: "block", marginBottom: 12 }}>
-            <span style={{ display: "block", fontWeight: 600, marginBottom: 4 }} title="Техническое имя в системе, поле model_id">
-              Идентификатор модели <span style={{ color: "#b91c1c" }} aria-hidden="true">*</span>
-            </span>
-            <input
-              style={{ width: "100%", maxWidth: "100%", padding: 8, borderRadius: 8, border: "1px solid #cbd5e1" }}
-              value={dsl.model_id ?? ""}
-              onChange={(e) => setDsl((prev: any) => ({ ...prev, model_id: e.target.value }))}
-            />
-          </label>
           {ruleId ? <p style={{ color: "#15803d" }}>{ruleId}</p> : null}
           <textarea
             className="fe-textarea-code"

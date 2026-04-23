@@ -1,0 +1,108 @@
+{
+  "models": {
+    "gemma2:2b-instruct-q4_K_M": {
+      "num_ctx": 8192,
+      "max_new_tokens": 3904,
+      "repetition_penalty": 1.0,
+      "max_length": 4096,
+      "enable_thinking": false,
+      "temperature": 0.0
+    },
+    "qwen2.5:3b-instruct-q4_K_M": {
+      "num_ctx": 8192,
+      "max_new_tokens": 3904,
+      "repetition_penalty": 1.0,
+      "max_length": 4096,
+      "enable_thinking": false,
+      "temperature": 0.0
+    },
+    "qwen3:4b-q4_K_M": {
+      "num_ctx": 8192,
+      "max_new_tokens": 3904,
+      "repetition_penalty": 1.0,
+      "max_length": 4096,
+      "enable_thinking": false,
+      "temperature": 0.0
+    },
+    "qwen3:8b-q4_K_M": {
+      "num_ctx": 8192,
+      "max_new_tokens": 3904,
+      "repetition_penalty": 1.0,
+      "max_length": 4096,
+      "enable_thinking": false,
+      "temperature": 0.0
+    },
+    "qwen3:14b-q4_K_M": {
+      "num_ctx": 8192,
+      "max_new_tokens": 3904,
+      "repetition_penalty": 1.0,
+      "max_length": 4096,
+      "enable_thinking": false,
+      "temperature": 0.0
+    },
+    "gemma3:4b-it-q4_K_M": {
+      "num_ctx": 8192,
+      "max_new_tokens": 3904,
+      "repetition_penalty": 1.0,
+      "max_length": 4096,
+      "enable_thinking": false,
+      "temperature": 0.0
+    },
+    "codegemma:7b-instruct-q4_K_M": {
+      "num_ctx": 8192,
+      "max_new_tokens": 3904,
+      "repetition_penalty": 1.0,
+      "max_length": 4096,
+      "enable_thinking": false,
+      "temperature": 0.0
+    },
+    "gemma3:12b-it-q4_K_M": {
+      "num_ctx": 8192,
+      "max_new_tokens": 3904,
+      "repetition_penalty": 1.0,
+      "max_length": 4096,
+      "enable_thinking": false,
+      "temperature": 0.0
+    },
+    "ministral-3:8b-instruct-2512-q4_K_M": {
+      "num_ctx": 8192,
+      "max_new_tokens": 3904,
+      "repetition_penalty": 1.0,
+      "max_length": 4096,
+      "enable_thinking": false,
+      "temperature": 0.0
+    },
+    "ministral-3:14b-instruct-2512-q4_K_M": {
+      "num_ctx": 8192,
+      "max_new_tokens": 3904,
+      "repetition_penalty": 1.0,
+      "max_length": 4096,
+      "enable_thinking": false,
+      "temperature": 0.0
+    },
+    "ministral-3:3b-instruct-2512-q4_K_M": {
+      "num_ctx": 8192,
+      "max_new_tokens": 3904,
+      "repetition_penalty": 1.0,
+      "max_length": 4096,
+      "enable_thinking": false,
+      "temperature": 0.0
+    },
+    "forzer/GigaChat3-10B-A1.8B": {
+      "num_ctx": 8192,
+      "max_new_tokens": 3904,
+      "repetition_penalty": 1.0,
+      "max_length": 4096,
+      "enable_thinking": false,
+      "temperature": 0.0
+    },
+    "gigachat-20b-a3b-instruct-v1.5:q4_K_M": {
+      "num_ctx": 8192,
+      "max_new_tokens": 3904,
+      "repetition_penalty": 1.0,
+      "max_length": 4096,
+      "enable_thinking": false,
+      "temperature": 0.0
+    }
+  }
+}

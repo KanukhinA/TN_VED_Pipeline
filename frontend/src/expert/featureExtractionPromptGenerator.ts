@@ -99,8 +99,16 @@ export function buildFeatureExtractionPromptGeneratorRequest(
 
   for (const c of normalized.characteristics) {
     const k = c.characteristicKey.trim();
+    if (!k) continue;
+    if (c.layout === "scalar") {
+      allowedBlocks.push(
+        `Числовое поле на корне документа (одно значение, не массив): ключ «${k}».`,
+      );
+      allowedBlocks.push("");
+      continue;
+    }
     const comp = c.componentColumnKey.trim();
-    if (!k || !comp) continue;
+    if (!comp) continue;
     const allowed = c.allowedComponentValues;
     if (allowed?.length) {
       allowedBlocks.push(`Допустимые значения поля «${comp}» (массив «${k}»):`);
@@ -115,6 +123,16 @@ export function buildFeatureExtractionPromptGeneratorRequest(
     const ex = t.exampleValues;
     if (ex?.length) {
       allowedBlocks.push(`Примеры допустимых значений поля «${k}» (массив «${k}»):`);
+      allowedBlocks.push(ex.join("\n"));
+      allowedBlocks.push("");
+    }
+  }
+  for (const t of normalized.textScalarFields ?? []) {
+    const k = t.fieldKey.trim();
+    if (!k) continue;
+    const ex = t.exampleValues;
+    if (ex?.length) {
+      allowedBlocks.push(`Примеры допустимых значений поля «${k}» (одно текстовое значение на корне):`);
       allowedBlocks.push(ex.join("\n"));
       allowedBlocks.push("");
     }

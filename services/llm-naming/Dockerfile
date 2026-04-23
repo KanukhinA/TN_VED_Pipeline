@@ -7,9 +7,10 @@ ENV PYTHONUNBUFFERED=1
 ENV PYTHONPATH=/app
 
 COPY services/llm-naming/requirements.txt /tmp/requirements.txt
-RUN pip install --no-cache-dir -r /tmp/requirements.txt
+RUN PIP_CONFIG_FILE=/dev/null PIP_REQUIRE_HASHES=0 pip install --no-cache-dir -r /tmp/requirements.txt
 
 COPY services/llm-naming/app /app/app
+COPY shared/llm_runtime /app/shared/llm_runtime
 
 EXPOSE 8002
 

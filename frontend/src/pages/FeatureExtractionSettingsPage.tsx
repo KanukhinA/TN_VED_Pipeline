@@ -3,6 +3,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useLocation, useNavigate } from "react-router-dom";
 import { EXTRACTION_TEST_INFER_DURATION_FIELD } from "../api/backendInferenceKeys";
 import {
+  fetchFeatureExtractionModelOperationHistory,
   fetchLlmContainerLogs,
   generateFeatureExtractionSystemPrompt,
   getRule,
@@ -10,6 +11,7 @@ import {
   listRules,
   saveRule,
   testFeatureExtractionPrompt,
+  type ModelOperationHistoryEvent,
 } from "../api/client";
 import { buildFeatureExtractionPromptGeneratorRequest } from "../expert/featureExtractionPromptGenerator";
 import SemanticFallbackSettingsPage from "./SemanticFallbackSettingsPage";
@@ -17,8 +19,11 @@ import FeatureExtractionModelAdmin from "../ui/FeatureExtractionModelAdmin";
 import FeatureExtractionLlmConsole, { type LlmOperationLogState } from "../ui/FeatureExtractionLlmConsole";
 import FewShotPromptAssistant from "../ui/FewShotPromptAssistant";
 import DatasetImportPanel from "../ui/DatasetImportPanel";
+import { LongOperationStatusBar } from "../ui/LongOperationStatusBar";
+import { ModalCloseButton } from "../ui/ModalCloseButton";
 import { TableColumnPreviewModal } from "../ui/TableColumnPreviewModal";
 import { formatElapsedSec, useElapsedSeconds } from "../hooks/useElapsedSeconds";
+import { finalizeRowInput, rowRangeBounds, type RowInputValue } from "../utils/rowRangeNumericInput";
 import { normalizeCell, parseUploadedTableFile, type ParsedTable } from "../utils/tableFileParse";
 
 type RuleListItem = {
@@ -130,7 +135,7 @@ function buildRulesPreviewFromDsl(dsl: any): string {
       lines.push(`- ${key}${type ? ` (${type})` : ""}`);
     }
   } else {
-    lines.push("- No explicit numeric characteristics found in catalog DSL");
+    lines.push("- В описании справочника не заданы явные числовые характеристики");
   }
 
   lines.push("");
@@ -214,9 +219,9 @@ function formatNestedMassDoliaValue(v: unknown, depth: number): string[] {
     if (range) return [`${ind}массовая доля: ${range}`];
     if (v.length === 0) return [`${ind}массовая доля: —`];
     const lines = [`${ind}массовая доля:`];
-    for (const el of v) {
-      lines.push(`${indBullet}• ${formatScalarRu(el)}`);
-    }
+    v.forEach((el, idx) => {
+      lines.push(`${indBullet}${idx + 1}) ${formatScalarRu(el)}`);
+    });
     return lines;
   }
   if (isPlainRecord(v)) {
@@ -281,7 +286,6 @@ function formatMassFractionStylePayload(o: Record<string, unknown>): string {
         lines.push(`${IND}${idx + 1})`);
         lines.push(...formatMassFractionItemBlock(item, 2));
       });
-      lines.push("");
       continue;
     }
     if (key === "прочее" && Array.isArray(val)) {
@@ -290,19 +294,16 @@ function formatMassFractionStylePayload(o: Record<string, unknown>): string {
         lines.push(`${IND}${idx + 1})`);
         lines.push(...formatProcheeItemBlock(item, 2));
       });
-      lines.push("");
       continue;
     }
     lines.push(...formatReadableKeyValue(key, val, 0));
-    lines.push("");
   }
 
   for (const key of rest) {
     lines.push(...formatReadableKeyValue(key, o[key], 0));
-    lines.push("");
   }
 
-  return lines.join("\n").replace(/\n{3,}/g, "\n\n").trimEnd();
+  return lines.join("\n").trim();
 }
 
 function formatReadableKeyValue(key: string, val: unknown, depth: number): string[] {
@@ -320,17 +321,6 @@ function formatReadableKeyValue(key: string, val: unknown, depth: number): strin
     const range = formatPairAsRange(val);
     if (range) return [`${ind}${key}: ${range}`];
     if (val.length === 0) return [`${ind}${key}: —`];
-    const allPrim = val.every(
-      (x) =>
-        x === null ||
-        x === undefined ||
-        typeof x === "string" ||
-        typeof x === "number" ||
-        typeof x === "boolean",
-    );
-    if (allPrim && val.length <= 8) {
-      return [`${ind}${key}: ${val.map(formatScalarRu).join(", ")}`];
-    }
     const lines: string[] = [`${ind}${key}:`];
     val.forEach((el, idx) => {
       if (isPlainRecord(el)) {
@@ -338,7 +328,7 @@ function formatReadableKeyValue(key: string, val: unknown, depth: number): strin
         lines.push(formatReadableObject(el, depth + 2));
       } else {
         const r = Array.isArray(el) ? formatPairAsRange(el) : null;
-        lines.push(`${IND.repeat(depth + 1)}• ${r ?? formatScalarRu(el)}`);
+        lines.push(`${IND.repeat(depth + 1)}${idx + 1}) ${r ?? formatScalarRu(el)}`);
       }
     });
     return lines;
@@ -370,7 +360,7 @@ function formatReadableArray(x: unknown[], depth: number): string {
         return [`${IND.repeat(depth)}${idx + 1})`, formatReadableObject(item, depth + 1)].join("\n");
       }
       const r = Array.isArray(item) ? formatPairAsRange(item) : null;
-      return `${IND.repeat(depth)}• ${r ?? formatScalarRu(item)}`;
+      return `${IND.repeat(depth)}${idx + 1}) ${r ?? formatScalarRu(item)}`;
     })
     .join("\n");
 }
@@ -528,11 +518,18 @@ export default function FeatureExtractionSettingsPage() {
   /** Состояние консоли модели: показ только на вкладке «Администрирование моделей», при повторном входе текст сохраняется. */
   const [llmConsole, setLlmConsole] = useState<LlmOperationLogState>(null);
   const [llmContainerLogs, setLlmContainerLogs] = useState<string | null>(null);
+  /** Журнал deploy/pause/delete с api-gateway (память процесса шлюза). */
+  const [modelOpHistory, setModelOpHistory] = useState<ModelOperationHistoryEvent[]>([]);
+  const [modelOpHistoryError, setModelOpHistoryError] = useState<string | null>(null);
   /** Ключи из JSON админки «Администрирование моделей» (объект models в БД). */
   const [adminModelTags, setAdminModelTags] = useState<string[]>([]);
 
   const [catalogs, setCatalogs] = useState<RuleListItem[]>([]);
   const [busy, setBusy] = useState(false);
+  /** Чем занят `busy`: загрузка справочника или сохранение настроек — для текста в статус-баре. */
+  const [catalogBusyReason, setCatalogBusyReason] = useState<"load" | "save" | null>(null);
+  /** Прогресс по шагам для генерации промпта и тестов (N из M). */
+  const [llmOpProgress, setLlmOpProgress] = useState<{ done: number; total: number } | null>(null);
   const [selectedRuleId, setSelectedRuleId] = useState("");
   const [catalogName, setCatalogName] = useState("");
   const [configs, setConfigs] = useState<FeatureExtractionConfig[]>([]);
@@ -540,19 +537,23 @@ export default function FeatureExtractionSettingsPage() {
   const [loadedDsl, setLoadedDsl] = useState<any>(null);
   const [loadedModelId, setLoadedModelId] = useState("");
   const [error, setError] = useState<string | null>(null);
+  /** Ошибки ввода/проверки внутри модальных окон: показываются поверх всех окон. */
+  const [popupError, setPopupError] = useState<string | null>(null);
   const [testBusy, setTestBusy] = useState(false);
   const [promptGenBusy, setPromptGenBusy] = useState(false);
   const [promptGenModel, setPromptGenModel] = useState("");
-  const [sampleText, setSampleText] = useState("");
-  const [testResult, setTestResult] = useState<any>(null);
+  /** Несколько полей «Текст для извлечения» в окне проверки; каждое непустое — отдельный запрос к модели. */
+  const [sampleTexts, setSampleTexts] = useState<string[]>([""]);
+  /** Результаты последнего прогона «Проверить» по одному/нескольким примерам. */
+  const [singlePromptTestResults, setSinglePromptTestResults] = useState<{ sample: string; result: any }[] | null>(null);
   const [testDetailsExpanded, setTestDetailsExpanded] = useState(false);
   const [testModel, setTestModel] = useState("");
   const [testMode, setTestMode] = useState<"single" | "batch">("single");
   const [batchTable, setBatchTable] = useState<ParsedTable>({ columns: [], rows: [] });
   const [batchTextColumn, setBatchTextColumn] = useState("");
   /** Включительно, номера строк данных (1-based). */
-  const [batchDataRowStart, setBatchDataRowStart] = useState(1);
-  const [batchDataRowEnd, setBatchDataRowEnd] = useState(1);
+  const [batchDataRowStart, setBatchDataRowStart] = useState<RowInputValue>(1);
+  const [batchDataRowEnd, setBatchDataRowEnd] = useState<RowInputValue>(1);
   const [batchResults, setBatchResults] = useState<BatchPromptTestRow[]>([]);
   const [batchSummary, setBatchSummary] = useState<string>("");
   const [batchPickerOpen, setBatchPickerOpen] = useState(false);
@@ -561,7 +562,6 @@ export default function FeatureExtractionSettingsPage() {
   const [batchTestModalOpen, setBatchTestModalOpen] = useState(false);
   const [fewShotExpanded, setFewShotExpanded] = useState(false);
   const modelStripRef = useRef<HTMLDivElement | null>(null);
-  const singleExampleTextareaRef = useRef<HTMLTextAreaElement | null>(null);
 
   const elapsedPromptGen = useElapsedSeconds(promptGenBusy);
   const elapsedTest = useElapsedSeconds(testBusy);
@@ -631,10 +631,19 @@ export default function FeatureExtractionSettingsPage() {
 
   const canRunPromptTest = useMemo(() => {
     if (!activeConfig) return false;
-    const hasSample = sampleText.trim().length > 0;
+    const hasSample = sampleTexts.some((s) => s.trim().length > 0);
     const hasPrompt = String(activeConfig.prompt ?? "").trim().length > 0;
     return hasSample && hasPrompt && isTestModelRunning;
-  }, [activeConfig, sampleText, isTestModelRunning]);
+  }, [activeConfig, sampleTexts, isTestModelRunning]);
+
+  const singleSamplesNonEmptyCount = useMemo(
+    () => sampleTexts.filter((s) => s.trim().length > 0).length,
+    [sampleTexts],
+  );
+  const singleSamplesTotalChars = useMemo(
+    () => sampleTexts.reduce((acc, s) => acc + s.trim().length, 0),
+    [sampleTexts],
+  );
 
   const batchColumnIndex = useMemo(
     () => batchTable.columns.findIndex((c) => c === batchTextColumn),
@@ -649,12 +658,15 @@ export default function FeatureExtractionSettingsPage() {
   const batchRowRange = useMemo(() => {
     const n = batchTable.rows.length;
     if (batchColumnIndex < 0 || n === 0) {
-      return { items: [] as { rowNumber: number; text: string }[], start: 1, end: 0, rowCount: 0 };
+      return {
+        items: [] as { rowNumber: number; text: string }[],
+        start: 1,
+        end: 0,
+        rowCount: 0,
+        incomplete: false,
+      };
     }
-    const rawS = Number(batchDataRowStart);
-    const rawE = Number(batchDataRowEnd);
-    const s0 = Number.isFinite(rawS) ? rawS : 1;
-    const e0 = Number.isFinite(rawE) ? rawE : n;
+    const { s0, e0, incomplete } = rowRangeBounds(batchDataRowStart, batchDataRowEnd, n);
     let lo = Math.min(Math.max(1, Math.floor(s0)), n);
     let hi = Math.min(Math.max(1, Math.floor(e0)), n);
     if (lo > hi) [lo, hi] = [hi, lo];
@@ -665,7 +677,7 @@ export default function FeatureExtractionSettingsPage() {
         text: normalizeCell(batchTable.rows[i][batchColumnIndex]),
       });
     }
-    return { items, start: lo, end: hi, rowCount: n };
+    return { items, start: lo, end: hi, rowCount: n, incomplete };
   }, [batchTable.rows, batchColumnIndex, batchDataRowStart, batchDataRowEnd]);
 
   /** Название/ТН ВЭД выбранного справочника (если строка есть в `catalogs`). */
@@ -698,14 +710,51 @@ export default function FeatureExtractionSettingsPage() {
     }
   }, []);
 
+  const loadModelOpHistory = useCallback(async () => {
+    try {
+      const data = await fetchFeatureExtractionModelOperationHistory();
+      setModelOpHistory(data.events);
+      setModelOpHistoryError(null);
+    } catch (e: any) {
+      setModelOpHistoryError(e?.message ?? "Не удалось загрузить журнал операций");
+    }
+  }, []);
+
   const mergedLlmConsoleText = useMemo(() => {
+    const journalHeader =
+      "=== Журнал операций с моделями (API gateway, память процесса) ===\n" +
+      "События deploy/pause/delete и авто-детект runtime-start/runtime-stop/runtime-error; история доступна, пока контейнер api-gateway не перезапущен.\n";
+    let journalBlock: string;
+    if (modelOpHistoryError) {
+      journalBlock = `${journalHeader}\nОшибка загрузки журнала: ${modelOpHistoryError}\n`;
+    } else if (modelOpHistory.length === 0) {
+      journalBlock = `${journalHeader}\n(записей пока нет)\n`;
+    } else {
+      const lines = modelOpHistory.map((ev) => {
+        const st = ev.ok ? "OK" : "FAIL";
+        const detail = ev.detail.trim() ? ` | ${ev.detail.replace(/\s+/g, " ").trim()}` : "";
+        return `${ev.ts_iso}  ${ev.kind}  ${ev.model}  ${st}  http=${ev.http_status}${detail}`;
+      });
+      journalBlock = `${journalHeader}\n${lines.join("\n")}\n`;
+    }
+
     const docker = llmContainerLogs ?? "Загрузка…";
-    if (!llmConsole) return docker;
+    if (!llmConsole) {
+      return [
+        journalBlock,
+        "",
+        "=== Хвост логов контейнера (docker logs) ===",
+        "",
+        docker,
+      ].join("\n");
+    }
     const title =
       `Операция с моделью ${llmConsole.model}` +
       (llmConsole.durationSec != null && llmConsole.ok ? ` · ${llmConsole.durationSec} с (сервер)` : "") +
       (!llmConsole.ok ? " · ошибка" : "");
     return [
+      journalBlock,
+      "",
       "=== Хвост логов контейнера (docker logs) ===",
       "",
       docker,
@@ -715,14 +764,18 @@ export default function FeatureExtractionSettingsPage() {
       "",
       llmConsole.log,
     ].join("\n");
-  }, [llmConsole, llmContainerLogs]);
+  }, [llmConsole, llmContainerLogs, modelOpHistory, modelOpHistoryError]);
 
   useEffect(() => {
     if (!isModelAdminPage) return;
     void loadLlmContainerLogs();
-    const id = window.setInterval(() => void loadLlmContainerLogs(), 2000);
+    void loadModelOpHistory();
+    const id = window.setInterval(() => {
+      void loadLlmContainerLogs();
+      void loadModelOpHistory();
+    }, 2000);
     return () => window.clearInterval(id);
-  }, [loadLlmContainerLogs, isModelAdminPage]);
+  }, [loadLlmContainerLogs, loadModelOpHistory, isModelAdminPage]);
 
   async function refreshCatalogs() {
     try {
@@ -761,15 +814,16 @@ export default function FeatureExtractionSettingsPage() {
       setConfigs([]);
       setActiveConfigId("");
       setTestModel("");
-      setTestResult(null);
-      setSampleText("");
+      setSinglePromptTestResults(null);
+      setSampleTexts([""]);
       setTestDetailsExpanded(false);
       setError(null);
       return;
     }
     setBusy(true);
+    setCatalogBusyReason("load");
     setError(null);
-    setTestResult(null);
+    setSinglePromptTestResults(null);
     setTestDetailsExpanded(false);
     try {
       const full = await getRule(ruleId);
@@ -839,6 +893,7 @@ export default function FeatureExtractionSettingsPage() {
       setActiveConfigId("");
     } finally {
       setBusy(false);
+      setCatalogBusyReason(null);
     }
   }
 
@@ -864,6 +919,7 @@ export default function FeatureExtractionSettingsPage() {
     }
 
     setBusy(true);
+    setCatalogBusyReason("save");
     setError(null);
     try {
       const payload = {
@@ -892,6 +948,7 @@ export default function FeatureExtractionSettingsPage() {
       setError(e?.message ?? "Не удалось сохранить настройки.");
     } finally {
       setBusy(false);
+      setCatalogBusyReason(null);
     }
   }
 
@@ -948,6 +1005,7 @@ export default function FeatureExtractionSettingsPage() {
       );
       return;
     }
+    setLlmOpProgress({ done: 0, total: 1 });
     setPromptGenBusy(true);
     setError(null);
     try {
@@ -960,95 +1018,126 @@ export default function FeatureExtractionSettingsPage() {
         throw new Error("Модель вернула пустой ответ.");
       }
       updateActiveConfig({ prompt: text });
+      setLlmOpProgress({ done: 1, total: 1 });
     } catch (e: any) {
       setError(e?.message ?? "Не удалось сгенерировать промпт.");
     } finally {
       setPromptGenBusy(false);
+      setLlmOpProgress(null);
     }
   }
 
   async function runPromptTest() {
+    const reportInputModalError = (message: string) => {
+      if (singleTestModalOpen || batchTestModalOpen) {
+        setPopupError(message);
+        return;
+      }
+      setError(message);
+    };
     if (!activeConfig) {
-      setError("Выберите активную конфигурацию.");
+      reportInputModalError("Выберите активную конфигурацию.");
       return;
     }
     const primaryErr = validateFeatureExtractionPrimary(configs);
     if (primaryErr) {
-      setError(primaryErr);
+      reportInputModalError(primaryErr);
       return;
     }
     const effectiveModel = testModelResolved;
     const effectivePrompt = String(activeConfig.prompt ?? "");
     if (!effectivePrompt.trim()) {
-      setError("Задайте промпт на шаге «Конфигурация и промпты».");
+      reportInputModalError("Задайте промпт на шаге «Конфигурация и промпты».");
       return;
     }
-    if (!sampleText.trim()) {
-      setError("Введите текст для извлечения.");
+    const samples = sampleTexts.map((s) => s.trim()).filter(Boolean);
+    if (!samples.length) {
+      reportInputModalError("Введите хотя бы один текст для извлечения.");
       return;
     }
     if (!effectiveModel.trim()) {
-      setError("Выберите модель для теста.");
+      reportInputModalError("Выберите модель для теста.");
       return;
     }
     if (!runningModels.includes(effectiveModel)) {
-      setError(
+      reportInputModalError(
         "Выбранная модель не запущена на сервере. Загрузите и запустите её в разделе «Администрирование моделей» — на этой странице нельзя управлять запуском и остановкой моделей.",
       );
       return;
     }
+    const total = samples.length;
+    setLlmOpProgress({ done: 0, total });
     setTestBusy(true);
     setError(null);
+    setPopupError(null);
     setTestDetailsExpanded(false);
     try {
-      const res = await testFeatureExtractionPrompt({
-        model: effectiveModel,
-        prompt: effectivePrompt,
-        sample_text: sampleText,
-        runtime: extractionRuntimeToDsl(activeConfig.extraction_runtime),
-        /** Как при сохранении в DSL — иначе в шлюзе к промпту не попадало превью правил и тест расходился с реальным извлечением. */
-        rules_preview: loadedDsl ? buildRulesPreviewFromDsl(loadedDsl) : undefined,
-      });
-      setTestResult(res);
+      const rows: { sample: string; result: any }[] = [];
+      const rules_preview = loadedDsl ? buildRulesPreviewFromDsl(loadedDsl) : undefined;
+      const runtime = extractionRuntimeToDsl(activeConfig.extraction_runtime);
+      for (let i = 0; i < samples.length; i += 1) {
+        setLlmOpProgress({ done: i, total });
+        const res = await testFeatureExtractionPrompt({
+          model: effectiveModel,
+          prompt: effectivePrompt,
+          sample_text: samples[i],
+          runtime,
+          rules_preview,
+        });
+        rows.push({ sample: samples[i], result: res });
+      }
+      setSinglePromptTestResults(rows);
+      setLlmOpProgress({ done: total, total });
     } catch (e: any) {
-      setError(e?.message ?? "Ошибка тестирования промпта.");
-      setTestResult(null);
+      reportInputModalError(e?.message ?? "Ошибка тестирования промпта.");
+      setSinglePromptTestResults(null);
     } finally {
       setTestBusy(false);
+      setLlmOpProgress(null);
     }
   }
 
   async function runBatchPromptTest() {
+    const reportInputModalError = (message: string) => {
+      if (singleTestModalOpen || batchTestModalOpen) {
+        setPopupError(message);
+        return;
+      }
+      setError(message);
+    };
     if (!activeConfig) {
-      setError("Выберите активную конфигурацию.");
+      reportInputModalError("Выберите активную конфигурацию.");
       return;
     }
     const primaryErr = validateFeatureExtractionPrimary(configs);
     if (primaryErr) {
-      setError(primaryErr);
+      reportInputModalError(primaryErr);
       return;
     }
     const effectiveModel = testModelResolved;
     const effectivePrompt = String(activeConfig.prompt ?? "");
     if (!effectivePrompt.trim()) {
-      setError("Задайте промпт на шаге «Конфигурация и промпты».");
+      reportInputModalError("Задайте промпт на шаге «Конфигурация и промпты».");
       return;
     }
     if (!effectiveModel.trim()) {
-      setError("Выберите модель для теста.");
+      reportInputModalError("Выберите модель для теста.");
       return;
     }
     if (!runningModels.includes(effectiveModel)) {
-      setError("Выбранная модель не запущена на сервере.");
+      reportInputModalError("Выбранная модель не запущена на сервере.");
       return;
     }
     if (!batchRowRange.items.length) {
-      setError("Загрузите файл, выберите колонку и задайте диапазон строк.");
+      reportInputModalError("Загрузите файл, выберите колонку и задайте диапазон строк.");
       return;
     }
     const selected = batchRowRange.items;
+    const totalRows = selected.length;
+    setLlmOpProgress({ done: 0, total: totalRows });
     setTestBusy(true);
     setError(null);
+    setPopupError(null);
     setTestDetailsExpanded(false);
     setBatchResults([]);
     setBatchSummary("");
@@ -1064,6 +1153,7 @@ export default function FeatureExtractionSettingsPage() {
           error: "Пустая ячейка в выбранной колонке",
         });
         setBatchResults([...rows]);
+        setLlmOpProgress({ done: rows.length, total: totalRows });
         continue;
       }
       try {
@@ -1092,14 +1182,44 @@ export default function FeatureExtractionSettingsPage() {
         });
       }
       setBatchResults([...rows]);
+      setLlmOpProgress({ done: rows.length, total: totalRows });
     }
     const okCount = rows.filter((r) => r.ok).length;
     setBatchSummary(`Проверено: ${rows.length}. Успешно: ${okCount}. Ошибок: ${rows.length - okCount}.`);
     setTestBusy(false);
+    setLlmOpProgress(null);
   }
 
+  const showFeLongOpBar = busy || promptGenBusy || testBusy;
+  const feLongOpElapsed = busy ? elapsedCatalogOps : promptGenBusy ? elapsedPromptGen : elapsedTest;
+  const feLongOpTitle = busy
+    ? catalogBusyReason === "save"
+      ? "Сохранение настроек справочника…"
+      : "Загрузка данных справочника…"
+    : promptGenBusy
+      ? "Генерация промпта (запрос к LLM)…"
+      : testBusy
+        ? testMode === "batch"
+          ? "Пакетный тест промпта…"
+          : llmOpProgress && llmOpProgress.total > 1
+            ? "Проверка промпта на примерах…"
+            : "Проверка промпта на примере…"
+        : "";
+  const feLongOpDetail =
+    testBusy && testMode === "batch"
+      ? "Каждая обрабатываемая строка — отдельный запрос к модели; счётчик учитывает все строки диапазона."
+      : promptGenBusy
+        ? "Один запрос к выбранной модели."
+        : testBusy
+          ? "Запрос к модели для тестового текста."
+          : busy
+            ? catalogBusyReason === "save"
+              ? "Запись в БД и обновление списка справочников."
+              : "Загрузка правил и конфигураций из сервера."
+            : undefined;
+
   return (
-    <div className="container">
+    <div className="container" style={{ paddingBottom: showFeLongOpBar ? 88 : undefined }}>
       <h1 style={{ marginBottom: 10 }}>{featurePageH1}</h1>
       <nav className="fe-text-nav" aria-label="Основные разделы настроек">
         <button
@@ -1114,7 +1234,7 @@ export default function FeatureExtractionSettingsPage() {
           className={`fe-text-nav__tab${isModelAdminPage ? " fe-text-nav__tab--active" : ""}`}
           onClick={() => navigate(`${featureBasePath}/models`)}
         >
-          Администрирование моделей
+          🔒 Администрирование моделей
         </button>
         <button
           type="button"
@@ -1266,17 +1386,6 @@ export default function FeatureExtractionSettingsPage() {
         </div>
       ) : null}
 
-      {catalogSelected && busy ? (
-        <div className="card" style={{ color: "#475569" }}>
-          <p style={{ margin: 0 }}>
-            Загрузка данных справочника…{" "}
-            <span style={{ fontWeight: 600, fontVariantNumeric: "tabular-nums", color: "#334155" }}>
-              {formatElapsedSec(elapsedCatalogOps)}
-            </span>
-          </p>
-        </div>
-      ) : null}
-
       </>
       )}
 
@@ -1302,23 +1411,12 @@ export default function FeatureExtractionSettingsPage() {
           </button>
         </div>
       ) : null}
-      {catalogSelected && busy ? (
-        <div className="card" style={{ color: "#475569", marginBottom: 16 }}>
-          <p style={{ margin: 0 }}>
-            Загрузка данных справочника…{" "}
-            <span style={{ fontWeight: 600, fontVariantNumeric: "tabular-nums", color: "#334155" }}>
-              {formatElapsedSec(elapsedCatalogOps)}
-            </span>
-          </p>
-        </div>
-      ) : null}
       {editorReady ? (
           <div className="card">
             <h2 style={{ marginTop: 0, marginBottom: 8 }}>Конфигурация и промпты</h2>
             <p style={{ margin: "0 0 16px 0", color: "#64748b", fontSize: 14, lineHeight: 1.45 }}>
               Набор правил извлечения: на один справочник можно завести несколько конфигураций. У каждой конфигурации — один общий промпт и
-              набор моделей LLM (для теста выбирается одна из отмеченных). Одну и ту же модель можно отметить в нескольких конфигурациях;
-              в этом случае укажите, какая из них основная для пайплайна.
+              набор моделей LLM. Одну и ту же модель можно отметить в нескольких конфигурациях. Если одну и ту же LLM допускается использовать в нескольких конфигурациях - отметьте одну из конфигураций в качестве основной.
             </p>
 
             <div
@@ -1417,8 +1515,8 @@ export default function FeatureExtractionSettingsPage() {
             </label>
             {extractionModelsShared ? (
               <p style={{ margin: "0 0 14px 0", fontSize: 12, color: "#64748b", lineHeight: 1.45 }}>
-                Обязательно, если одна и та же модель отмечена в нескольких конфигурациях: по этой конфигурации пайплайн
-                извлечения признаков будет вызывать LLM.
+                Обязательно, если одна и та же модель отмечена в нескольких конфигурациях: по отмеченной основной
+                конфигурации извлечение признаков будет вызывать LLM.
               </p>
             ) : null}
 
@@ -1601,8 +1699,21 @@ export default function FeatureExtractionSettingsPage() {
                   <button
                     type="button"
                     className="btn-secondary"
-                    disabled={busy || promptGenBusy}
-                    onClick={() => setFewShotExpanded((v) => !v)}
+                    disabled={busy || promptGenBusy || (!fewShotExpanded && runningModels.length === 0)}
+                    title={
+                      !fewShotExpanded && runningModels.length === 0
+                        ? "Сначала запустите хотя бы одну языковую модель в разделе администрирования моделей."
+                        : undefined
+                    }
+                    onClick={() => {
+                      if (!fewShotExpanded && runningModels.length === 0) {
+                        setError(
+                          "Запустите хотя бы одну языковую модель в разделе администрирования моделей, затем откройте поиск few-shot примеров.",
+                        );
+                        return;
+                      }
+                      setFewShotExpanded((v) => !v);
+                    }}
                   >
                     {fewShotExpanded ? "Закрыть окно few-shot" : "Сгенерировать few-shot примеры"}
                   </button>
@@ -1642,9 +1753,6 @@ export default function FeatureExtractionSettingsPage() {
               <div style={{ display: "grid", gap: 12 }}>
                 <label style={{ display: "grid", gap: 6 }}>
                   <span style={{ fontWeight: 600 }}>Модель для теста</span>
-                  <span style={{ fontSize: 12, color: "#64748b", lineHeight: 1.45 }}>
-                    Только из моделей, отмеченных для этой конфигурации выше.
-                  </span>
                   <select
                     value={testModelResolved}
                     onChange={(e) => setTestModel(e.target.value)}
@@ -1660,41 +1768,66 @@ export default function FeatureExtractionSettingsPage() {
                   </select>
                 </label>
 
-                <p style={{ margin: 0, fontSize: 13, color: "#64748b", lineHeight: 1.5 }}>
-                  Системный промпт — в поле выше. Ниже — только{" "}
-                  <strong>исходный текст документа</strong>, из которого модель извлекает признаки. Вызов API собирает одну
-                  строку: превью правил справочника + промпт + этот текст с подписью «Текст для извлечения».
-                </p>
-                <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+                <div
+                  style={{
+                    display: "flex",
+                    flexWrap: "wrap",
+                    alignItems: "center",
+                    rowGap: 12,
+                    columnGap: 10,
+                  }}
+                >
                   <button
                     type="button"
                     className={testMode === "single" ? "btn" : "btn-secondary"}
                     onClick={() => {
+                      if (runningModels.length === 0) {
+                        setError(
+                          "Запустите хотя бы одну языковую модель в разделе администрирования моделей, затем откройте окно проверки промпта.",
+                        );
+                        return;
+                      }
                       setTestMode("single");
                       setSingleTestModalOpen(true);
                     }}
-                    disabled={busy || promptGenBusy || testBusy}
+                    disabled={busy || promptGenBusy || testBusy || runningModels.length === 0}
+                    title={
+                      runningModels.length === 0
+                        ? "Сначала запустите хотя бы одну языковую модель в разделе администрирования моделей."
+                        : undefined
+                    }
                   >
-                    Один пример
+                    Ввести пример для анализа
                   </button>
                   <button
                     type="button"
                     className={testMode === "batch" ? "btn" : "btn-secondary"}
                     onClick={() => {
+                      if (runningModels.length === 0) {
+                        setError(
+                          "Запустите хотя бы одну языковую модель в разделе администрирования моделей, затем откройте окно проверки промпта.",
+                        );
+                        return;
+                      }
                       setTestMode("batch");
                       setBatchTestModalOpen(true);
                     }}
-                    disabled={busy || promptGenBusy || testBusy}
+                    disabled={busy || promptGenBusy || testBusy || runningModels.length === 0}
+                    title={
+                      runningModels.length === 0
+                        ? "Сначала запустите хотя бы одну языковую модель в разделе администрирования моделей."
+                        : undefined
+                    }
                   >
-                    Пакетный тест
+                    Подгрузить примеры
                   </button>
                 </div>
 
                 {testMode === "single" ? (
                   <div style={{ fontSize: 12, color: "#64748b" }}>
-                    {sampleText.trim()
-                      ? `Текст примера задан (${sampleText.trim().length} символов).`
-                      : "Текст примера не задан."}
+                    {singleSamplesNonEmptyCount > 0
+                      ? `Задано примеров: ${singleSamplesNonEmptyCount} (${singleSamplesTotalChars} символов).`
+                      : "Тексты для примеров не заданы."}
                   </div>
                 ) : null}
 
@@ -1712,7 +1845,6 @@ export default function FeatureExtractionSettingsPage() {
                       zIndex: 1000,
                       padding: 16,
                     }}
-                    onClick={() => setSingleTestModalOpen(false)}
                   >
                     <div
                       style={{
@@ -1737,44 +1869,63 @@ export default function FeatureExtractionSettingsPage() {
                         }}
                       >
                       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
-                        <div style={{ fontWeight: 700, color: "#0f172a" }}>Один пример: ввод текста и проверка</div>
-                        <button type="button" className="btn-secondary" onClick={() => setSingleTestModalOpen(false)}>
-                          Закрыть
-                        </button>
+                        <div style={{ fontWeight: 700, color: "#0f172a" }}>Примеры для анализа</div>
+                        <ModalCloseButton onClick={() => setSingleTestModalOpen(false)} />
                       </div>
+                      <p style={{ margin: 0, fontSize: 13, color: "#64748b", lineHeight: 1.45 }}>
+                        Добавьте одно или несколько полей с текстом документа. Пустые поля при проверке игнорируются.
+                      </p>
                       <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
                         <button
                           type="button"
-                          className="btn"
+                          className="btn-secondary"
                           disabled={busy || promptGenBusy || testBusy}
-                          onClick={() => {
-                            window.requestAnimationFrame(() => {
-                              const el = singleExampleTextareaRef.current;
-                              el?.focus();
-                              el?.scrollIntoView({ block: "nearest", behavior: "smooth" });
-                            });
-                          }}
+                          onClick={() => setSampleTexts((prev) => [...prev, ""])}
+                          title="Добавить ещё одно поле для примера"
+                          aria-label="Добавить поле для примера"
                         >
-                          {sampleText.trim() ? "Открыть пример" : "Добавить пример"}
+                          +
                         </button>
-                        {sampleText.trim() ? (
-                          <span style={{ fontSize: 12, color: "#64748b" }}>
-                            Текст примера задан ({sampleText.trim().length} символов).
-                          </span>
-                        ) : (
-                          <span style={{ fontSize: 12, color: "#64748b" }}>Текст примера пока не задан.</span>
-                        )}
+                        <span style={{ fontSize: 12, color: "#64748b" }}>
+                          {singleSamplesNonEmptyCount > 0
+                            ? `Заполнено полей: ${singleSamplesNonEmptyCount} (${singleSamplesTotalChars} символов).`
+                            : "Поля пока пустые."}
+                        </span>
                       </div>
-                      <label style={{ display: "grid", gap: 6 }}>
-                        <span style={{ fontWeight: 600 }}>Текст для извлечения (документ)</span>
-                        <textarea
-                          ref={singleExampleTextareaRef}
-                          value={sampleText}
-                          onChange={(e) => setSampleText(e.target.value)}
-                          style={{ minHeight: 180, padding: "6px 10px", borderRadius: 8, border: "1px solid #cbd5e1" }}
-                          disabled={busy || promptGenBusy || testBusy}
-                        />
-                      </label>
+                      {sampleTexts.map((text, idx) => (
+                        <div key={`sample-${idx}`} style={{ display: "grid", gap: 6 }}>
+                          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>
+                            <span style={{ fontWeight: 600 }}>
+                              Текст для извлечения{sampleTexts.length > 1 ? ` (пример ${idx + 1})` : ""}
+                            </span>
+                            {sampleTexts.length > 1 ? (
+                              <button
+                                type="button"
+                                className="btn-secondary"
+                                disabled={busy || promptGenBusy || testBusy}
+                                onClick={() =>
+                                  setSampleTexts((prev) => (prev.length <= 1 ? prev : prev.filter((_, j) => j !== idx)))
+                                }
+                              >
+                                Удалить поле
+                              </button>
+                            ) : null}
+                          </div>
+                          <textarea
+                            value={text}
+                            onChange={(e) => {
+                              const v = e.target.value;
+                              setSampleTexts((prev) => {
+                                const next = [...prev];
+                                next[idx] = v;
+                                return next;
+                              });
+                            }}
+                            style={{ minHeight: 160, padding: "6px 10px", borderRadius: 8, border: "1px solid #cbd5e1" }}
+                            disabled={busy || promptGenBusy || testBusy}
+                          />
+                        </div>
+                      ))}
                       <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
                         <button
                           type="button"
@@ -1817,7 +1968,6 @@ export default function FeatureExtractionSettingsPage() {
                       zIndex: 1000,
                       padding: 16,
                     }}
-                    onClick={() => setBatchTestModalOpen(false)}
                   >
                     <div
                       style={{
@@ -1842,10 +1992,8 @@ export default function FeatureExtractionSettingsPage() {
                         }}
                       >
                       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
-                        <div style={{ fontWeight: 700, color: "#0f172a" }}>Пакетный тест: файл, колонка, прогон</div>
-                        <button type="button" className="btn-secondary" onClick={() => setBatchTestModalOpen(false)}>
-                          Закрыть
-                        </button>
+                        <div style={{ fontWeight: 700, color: "#0f172a" }}>Подгрузить примеры: файл, колонка, прогон</div>
+                        <ModalCloseButton onClick={() => setBatchTestModalOpen(false)} />
                       </div>
                       <input
                         type="file"
@@ -1873,7 +2021,7 @@ export default function FeatureExtractionSettingsPage() {
                               setBatchDataRowStart(1);
                               setBatchDataRowEnd(1);
                               setBatchPickerOpen(false);
-                              setError(err?.message ?? "Не удалось прочитать файл");
+                              setPopupError(err?.message ?? "Не удалось прочитать файл");
                             }
                           })();
                         }}
@@ -1888,8 +2036,19 @@ export default function FeatureExtractionSettingsPage() {
                                 type="number"
                                 min={1}
                                 max={Math.max(1, batchTable.rows.length)}
-                                value={batchDataRowStart}
-                                onChange={(e) => setBatchDataRowStart(Number(e.target.value) || 1)}
+                                value={batchDataRowStart === "" ? "" : batchDataRowStart}
+                                onChange={(e) => {
+                                  const v = e.target.value;
+                                  if (v === "") {
+                                    setBatchDataRowStart("");
+                                    return;
+                                  }
+                                  const n = Number(v);
+                                  if (!Number.isNaN(n)) setBatchDataRowStart(n);
+                                }}
+                                onBlur={() =>
+                                  setBatchDataRowStart((prev) => finalizeRowInput(prev, batchTable.rows.length))
+                                }
                                 disabled={busy || promptGenBusy || testBusy || batchTable.rows.length === 0}
                                 style={{ width: 96, padding: "6px 8px", borderRadius: 8, border: "1px solid #cbd5e1" }}
                               />
@@ -1900,8 +2059,19 @@ export default function FeatureExtractionSettingsPage() {
                                 type="number"
                                 min={1}
                                 max={Math.max(1, batchTable.rows.length)}
-                                value={batchDataRowEnd}
-                                onChange={(e) => setBatchDataRowEnd(Number(e.target.value) || 1)}
+                                value={batchDataRowEnd === "" ? "" : batchDataRowEnd}
+                                onChange={(e) => {
+                                  const v = e.target.value;
+                                  if (v === "") {
+                                    setBatchDataRowEnd("");
+                                    return;
+                                  }
+                                  const n = Number(v);
+                                  if (!Number.isNaN(n)) setBatchDataRowEnd(n);
+                                }}
+                                onBlur={() =>
+                                  setBatchDataRowEnd((prev) => finalizeRowInput(prev, batchTable.rows.length))
+                                }
                                 disabled={busy || promptGenBusy || testBusy || batchTable.rows.length === 0}
                                 style={{ width: 96, padding: "6px 8px", borderRadius: 8, border: "1px solid #cbd5e1" }}
                               />
@@ -1935,7 +2105,12 @@ export default function FeatureExtractionSettingsPage() {
                           className="btn"
                           onClick={() => void runBatchPromptTest()}
                           disabled={
-                            busy || promptGenBusy || testBusy || !batchRowRange.items.length || !batchTextColumn
+                            busy ||
+                            promptGenBusy ||
+                            testBusy ||
+                            !batchRowRange.items.length ||
+                            batchRowRange.incomplete ||
+                            !batchTextColumn
                           }
                         >
                           {testBusy ? (
@@ -1973,14 +2148,30 @@ export default function FeatureExtractionSettingsPage() {
                                 Строка {row.rowNumber} · {row.ok ? "ok" : "ошибка"} {row.timing ? `· ${row.timing}` : ""}
                               </summary>
                               <div style={{ display: "grid", gap: 6, marginTop: 6 }}>
-                                <div style={{ fontSize: 12, color: "#334155", whiteSpace: "pre-wrap" }}>
-                                  <strong>Текст:</strong> {row.text.slice(0, 400)}
-                                  {row.text.length > 400 ? "…" : ""}
+                                <div
+                                  style={{
+                                    fontSize: 12,
+                                    color: "#334155",
+                                    whiteSpace: "pre-wrap",
+                                    wordBreak: "break-word",
+                                    maxHeight: "min(50vh, 360px)",
+                                    overflow: "auto",
+                                  }}
+                                >
+                                  <strong>Текст:</strong> {row.text}
                                 </div>
                                 {row.ok ? (
-                                  <div style={{ fontSize: 12, color: "#0f172a", whiteSpace: "pre-wrap" }}>
-                                    <strong>Результат:</strong> {row.parsedText.slice(0, 500)}
-                                    {row.parsedText.length > 500 ? "…" : ""}
+                                  <div
+                                    style={{
+                                      fontSize: 12,
+                                      color: "#0f172a",
+                                      whiteSpace: "pre-wrap",
+                                      wordBreak: "break-word",
+                                      maxHeight: "min(40vh, 280px)",
+                                      overflow: "auto",
+                                    }}
+                                  >
+                                    <strong>Результат:</strong> {row.parsedText}
                                   </div>
                                 ) : (
                                   <div style={{ fontSize: 12, color: "#b91c1c" }}>{row.error}</div>
@@ -2029,8 +2220,19 @@ export default function FeatureExtractionSettingsPage() {
                               type="number"
                               min={1}
                               max={Math.max(1, batchTable.rows.length)}
-                              value={batchDataRowStart}
-                              onChange={(e) => setBatchDataRowStart(Number(e.target.value) || 1)}
+                              value={batchDataRowStart === "" ? "" : batchDataRowStart}
+                              onChange={(e) => {
+                                const v = e.target.value;
+                                if (v === "") {
+                                  setBatchDataRowStart("");
+                                  return;
+                                }
+                                const n = Number(v);
+                                if (!Number.isNaN(n)) setBatchDataRowStart(n);
+                              }}
+                              onBlur={() =>
+                                setBatchDataRowStart((prev) => finalizeRowInput(prev, batchTable.rows.length))
+                              }
                               disabled={busy || promptGenBusy || testBusy || batchTable.rows.length === 0}
                               style={{ width: 96, padding: "6px 8px", borderRadius: 8, border: "1px solid #cbd5e1" }}
                             />
@@ -2041,8 +2243,19 @@ export default function FeatureExtractionSettingsPage() {
                               type="number"
                               min={1}
                               max={Math.max(1, batchTable.rows.length)}
-                              value={batchDataRowEnd}
-                              onChange={(e) => setBatchDataRowEnd(Number(e.target.value) || 1)}
+                              value={batchDataRowEnd === "" ? "" : batchDataRowEnd}
+                              onChange={(e) => {
+                                const v = e.target.value;
+                                if (v === "") {
+                                  setBatchDataRowEnd("");
+                                  return;
+                                }
+                                const n = Number(v);
+                                if (!Number.isNaN(n)) setBatchDataRowEnd(n);
+                              }}
+                              onBlur={() =>
+                                setBatchDataRowEnd((prev) => finalizeRowInput(prev, batchTable.rows.length))
+                              }
                               disabled={busy || promptGenBusy || testBusy || batchTable.rows.length === 0}
                               style={{ width: 96, padding: "6px 8px", borderRadius: 8, border: "1px solid #cbd5e1" }}
                             />
@@ -2070,99 +2283,136 @@ export default function FeatureExtractionSettingsPage() {
                   }
                 />
 
-                {testMode === "single" && testResult ? (
+                {testMode === "single" && singlePromptTestResults?.length ? (
                   <div style={{ display: "grid", gap: 10 }}>
-                    <div>
-                      <div style={{ fontWeight: 600, marginBottom: 6, color: "#0f172a" }}>Распознанный результат</div>
-                      {(() => {
-                        const timingLine = formatExtractionTiming(testResult);
-                        if (!timingLine) return null;
-                        return (
-                          <div style={{ fontSize: 13, color: "#64748b", marginBottom: 10, lineHeight: 1.45 }}>
-                            <span style={{ fontWeight: 600, color: "#475569" }}>Время: </span>
-                            {timingLine}
+                    {singlePromptTestResults.length > 1 ? (
+                      <div style={{ fontWeight: 600, marginBottom: 2, color: "#0f172a" }}>Распознанные результаты</div>
+                    ) : null}
+                    {singlePromptTestResults.map((row, idx) => {
+                      const testResult = row.result;
+                      const timingLine = formatExtractionTiming(testResult);
+                      return (
+                        <div
+                          key={`single-result-${idx}`}
+                          style={{
+                            display: "grid",
+                            gap: 10,
+                            ...(idx > 0
+                              ? { paddingTop: 16, borderTop: "1px solid #e2e8f0" }
+                              : {}),
+                          }}
+                        >
+                          <div>
+                            <div style={{ fontWeight: 600, marginBottom: 6, color: "#0f172a" }}>
+                              {singlePromptTestResults.length > 1
+                                ? `Пример ${idx + 1} из ${singlePromptTestResults.length}`
+                                : "Распознанный результат"}
+                            </div>
+                            {row.sample.length ? (
+                              <div
+                                style={{
+                                  fontSize: 12,
+                                  color: "#64748b",
+                                  marginBottom: 8,
+                                  lineHeight: 1.45,
+                                  whiteSpace: "pre-wrap",
+                                  wordBreak: "break-word",
+                                }}
+                              >
+                                <span style={{ fontWeight: 600, color: "#475569" }}>Входной текст: </span>
+                                {row.sample.length > 400 ? `${row.sample.slice(0, 400)}…` : row.sample}
+                              </div>
+                            ) : null}
+                            {timingLine ? (
+                              <div style={{ fontSize: 13, color: "#64748b", marginBottom: 10, lineHeight: 1.45 }}>
+                                <span style={{ fontWeight: 600, color: "#475569" }}>Время: </span>
+                                {timingLine}
+                              </div>
+                            ) : null}
+                            <div
+                              style={{
+                                display: "grid",
+                                gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 280px), 1fr))",
+                                gap: 16,
+                                alignItems: "stretch",
+                              }}
+                            >
+                              <div style={{ display: "flex", flexDirection: "column", gap: 6, minWidth: 0 }}>
+                                <div style={{ fontWeight: 600, color: "#334155", fontSize: 13 }}>Итог (текстом)</div>
+                                <div
+                                  style={{
+                                    flex: 1,
+                                    minHeight: 200,
+                                    maxHeight: "min(55vh, 520px)",
+                                    overflow: "auto",
+                                    whiteSpace: "pre-wrap",
+                                    wordBreak: "break-word",
+                                    background: "#f8fafc",
+                                    border: "1px solid #e2e8f0",
+                                    borderRadius: 8,
+                                    padding: "8px 12px",
+                                    fontSize: 14,
+                                    lineHeight: 1.45,
+                                    color: "#1e293b",
+                                  }}
+                                >
+                                  {formatParsedExtractionReadable(testResult)}
+                                </div>
+                              </div>
+                              <div style={{ display: "flex", flexDirection: "column", gap: 6, minWidth: 0 }}>
+                                <div style={{ fontWeight: 600, color: "#334155", fontSize: 13 }}>JSON модели</div>
+                                <pre
+                                  className="fe-textarea-code"
+                                  style={{
+                                    flex: 1,
+                                    margin: 0,
+                                    minHeight: 200,
+                                    maxHeight: "min(55vh, 520px)",
+                                    overflow: "auto",
+                                    whiteSpace: "pre-wrap",
+                                    wordBreak: "break-word",
+                                    background: "#f0fdf4",
+                                    border: "1px solid #bbf7d0",
+                                    borderRadius: 8,
+                                    padding: "8px 12px",
+                                    fontSize: 12,
+                                    color: "#14532d",
+                                  }}
+                                >
+                                  {formatParsedExtractionResult(testResult)}
+                                </pre>
+                              </div>
+                            </div>
                           </div>
-                        );
-                      })()}
-                      <div
-                        style={{
-                          display: "grid",
-                          gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 280px), 1fr))",
-                          gap: 16,
-                          alignItems: "stretch",
-                        }}
-                      >
-                        <div style={{ display: "flex", flexDirection: "column", gap: 6, minWidth: 0 }}>
-                          <div style={{ fontWeight: 600, color: "#334155", fontSize: 13 }}>Итог (текстом)</div>
-                          <div
-                            style={{
-                              flex: 1,
-                              minHeight: 200,
-                              maxHeight: "min(55vh, 520px)",
-                              overflow: "auto",
-                              whiteSpace: "pre-wrap",
-                              wordBreak: "break-word",
-                              background: "#f8fafc",
-                              border: "1px solid #e2e8f0",
-                              borderRadius: 8,
-                              padding: "8px 12px",
-                              fontSize: 14,
-                              lineHeight: 1.45,
-                              color: "#1e293b",
-                            }}
-                          >
-                            {formatParsedExtractionReadable(testResult)}
+                          <div>
+                            {typeof testResult.assembled_prompt_preview === "string" && testResult.assembled_prompt_preview ? (
+                              <details style={{ marginBottom: 12 }} open={false}>
+                                <summary style={{ cursor: "pointer", fontWeight: 600, color: "#334155", fontSize: 14 }}>
+                                  Строка, отправленная в модель (полная сборка)
+                                </summary>
+                                <pre
+                                  style={{
+                                    margin: 0,
+                                    whiteSpace: "pre-wrap",
+                                    wordBreak: "break-word",
+                                    background: "#fffbeb",
+                                    border: "1px solid #fcd34d",
+                                    borderRadius: 8,
+                                    padding: "8px 12px",
+                                    fontSize: 11,
+                                    maxHeight: 360,
+                                    overflow: "auto",
+                                  }}
+                                >
+                                  {testResult.assembled_prompt_preview}
+                                </pre>
+                              </details>
+                            ) : null}
                           </div>
                         </div>
-                        <div style={{ display: "flex", flexDirection: "column", gap: 6, minWidth: 0 }}>
-                          <div style={{ fontWeight: 600, color: "#334155", fontSize: 13 }}>JSON модели</div>
-                          <pre
-                            className="fe-textarea-code"
-                            style={{
-                              flex: 1,
-                              margin: 0,
-                              minHeight: 200,
-                              maxHeight: "min(55vh, 520px)",
-                              overflow: "auto",
-                              whiteSpace: "pre-wrap",
-                              wordBreak: "break-word",
-                              background: "#f0fdf4",
-                              border: "1px solid #bbf7d0",
-                              borderRadius: 8,
-                              padding: "8px 12px",
-                              fontSize: 12,
-                              color: "#14532d",
-                            }}
-                          >
-                            {formatParsedExtractionResult(testResult)}
-                          </pre>
-                        </div>
-                      </div>
-                    </div>
+                      );
+                    })}
                     <div>
-                      {typeof testResult.assembled_prompt_preview === "string" && testResult.assembled_prompt_preview ? (
-                        <details style={{ marginBottom: 12 }} open={false}>
-                          <summary style={{ cursor: "pointer", fontWeight: 600, color: "#334155", fontSize: 14 }}>
-                            Строка, отправленная в модель (полная сборка)
-                          </summary>
-                          <pre
-                            style={{
-                              margin: 0,
-                              whiteSpace: "pre-wrap",
-                              wordBreak: "break-word",
-                              background: "#fffbeb",
-                              border: "1px solid #fcd34d",
-                              borderRadius: 8,
-                              padding: "8px 12px",
-                              fontSize: 11,
-                              maxHeight: 360,
-                              overflow: "auto",
-                            }}
-                          >
-                            {testResult.assembled_prompt_preview}
-                          </pre>
-                        </details>
-                      ) : null}
                       <button
                         type="button"
                         className="btn-secondary"
@@ -2185,7 +2435,11 @@ export default function FeatureExtractionSettingsPage() {
                             overflow: "auto",
                           }}
                         >
-                          {JSON.stringify(testResult, null, 2)}
+                          {JSON.stringify(
+                            singlePromptTestResults.map((r) => r.result),
+                            null,
+                            2,
+                          )}
                         </pre>
                       ) : null}
                     </div>
@@ -2195,39 +2449,51 @@ export default function FeatureExtractionSettingsPage() {
             )}
             </div>
 
-            <FewShotPromptAssistant
-              selectedModels={activeConfig.selected_models}
-              prompt={String(activeConfig.prompt ?? "")}
-              rulesPreview={loadedDsl ? buildRulesPreviewFromDsl(loadedDsl) : ""}
-              ruleId={selectedRuleId || undefined}
-              disabled={busy || promptGenBusy || testBusy}
-              expanded={fewShotExpanded}
-              onExpandedChange={setFewShotExpanded}
-              hideToolbarButton
-            />
+            <div
+              style={{
+                marginTop: 18,
+                paddingTop: 4,
+                display: "flex",
+                flexDirection: "column",
+                gap: 16,
+                maxWidth: 720,
+              }}
+            >
+              <FewShotPromptAssistant
+                selectedModels={activeConfig.selected_models}
+                prompt={String(activeConfig.prompt ?? "")}
+                rulesPreview={loadedDsl ? buildRulesPreviewFromDsl(loadedDsl) : ""}
+                ruleId={selectedRuleId || undefined}
+                disabled={busy || promptGenBusy || testBusy}
+                hasRunningLlm={runningModels.length > 0}
+                expanded={fewShotExpanded}
+                onExpandedChange={setFewShotExpanded}
+                hideToolbarButton
+              />
 
-            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-              <button
-                type="button"
-                className="btn"
-                disabled={
-                  busy ||
-                  !activeConfig.selected_models.length ||
-                  !String(activeConfig.prompt ?? "").trim()
-                }
-                onClick={() => void savePromptSettings()}
-              >
-                {busy ? (
-                  <>
-                    Сохранение…{" "}
-                    <span style={{ fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>
-                      · {formatElapsedSec(elapsedCatalogOps)}
-                    </span>
-                  </>
-                ) : (
-                  "Сохранить в справочник"
-                )}
-              </button>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", rowGap: 12, columnGap: 10 }}>
+                <button
+                  type="button"
+                  className="btn"
+                  disabled={
+                    busy ||
+                    !activeConfig.selected_models.length ||
+                    !String(activeConfig.prompt ?? "").trim()
+                  }
+                  onClick={() => void savePromptSettings()}
+                >
+                  {busy ? (
+                    <>
+                      Сохранение…{" "}
+                      <span style={{ fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>
+                        · {formatElapsedSec(elapsedCatalogOps)}
+                      </span>
+                    </>
+                  ) : (
+                    "Сохранить в справочник"
+                  )}
+                </button>
+              </div>
             </div>
           </div>
       ) : catalogSelected && !busy ? (
@@ -2288,24 +2554,13 @@ export default function FeatureExtractionSettingsPage() {
         </div>
       ) : null}
 
-      {catalogSelected && busy ? (
-        <div className="card" style={{ color: "#475569" }}>
-          <p style={{ margin: 0 }}>
-            Загрузка данных справочника…{" "}
-            <span style={{ fontWeight: 600, fontVariantNumeric: "tabular-nums", color: "#334155" }}>
-              {formatElapsedSec(elapsedCatalogOps)}
-            </span>
-          </p>
-        </div>
-      ) : null}
-
       {catalogSelected && !busy && loadedDsl ? (
         <DatasetImportPanel ruleId={selectedRuleId} disabled={promptGenBusy || testBusy} />
       ) : null}
       {catalogSelected && !busy && !loadedDsl ? (
         <div className="card" style={{ color: "#64748b" }}>
           <p style={{ margin: 0 }}>
-            Нет загруженного DSL справочника. Вернитесь на шаг «Справочник» и дождитесь загрузки.
+            Описание справочника ещё не загружено. Вернитесь на шаг «Справочник» и дождитесь загрузки.
           </p>
         </div>
       ) : null}
@@ -2366,9 +2621,67 @@ export default function FeatureExtractionSettingsPage() {
         <FeatureExtractionLlmConsole
           mergedText={mergedLlmConsoleText}
           terminal={llmConsole}
-          onRefreshLogs={() => void loadLlmContainerLogs()}
+          onRefreshLogs={() => {
+            void loadLlmContainerLogs();
+            void loadModelOpHistory();
+          }}
         />
       ) : null}
+
+      {popupError ? (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label="Ошибка ввода данных"
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(15, 23, 42, 0.4)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            zIndex: 1300,
+            padding: 16,
+          }}
+          onClick={() => setPopupError(null)}
+        >
+          <div
+            style={{
+              width: "min(620px, 94vw)",
+              background: "#fff",
+              borderRadius: 12,
+              border: "1px solid #fecaca",
+              boxShadow: "0 20px 40px rgba(15, 23, 42, 0.18)",
+              overflow: "hidden",
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div
+              style={{
+                padding: "12px 14px",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                gap: 10,
+                borderBottom: "1px solid #fee2e2",
+                background: "#fef2f2",
+              }}
+            >
+              <div style={{ fontWeight: 700, color: "#991b1b" }}>Ошибка ввода</div>
+              <ModalCloseButton onClick={() => setPopupError(null)} />
+            </div>
+            <div style={{ padding: "14px 16px", color: "#7f1d1d", lineHeight: 1.5 }}>{popupError}</div>
+          </div>
+        </div>
+      ) : null}
+
+      <LongOperationStatusBar
+        visible={showFeLongOpBar}
+        title={feLongOpTitle}
+        detail={feLongOpDetail}
+        elapsedSec={feLongOpElapsed}
+        progress={busy ? null : llmOpProgress}
+      />
     </div>
   );
 }

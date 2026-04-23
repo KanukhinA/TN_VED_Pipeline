@@ -2,10 +2,16 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import re
+import threading
 import time
 import asyncio
+import uuid
+from collections import deque
+from datetime import datetime, timezone
 from pathlib import Path
+from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any, Optional
 
 from app.pipeline_config import (
@@ -24,6 +30,7 @@ from app.prompt_generator_config import (
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 ORCHESTRATOR_URL = os.getenv("ORCHESTRATOR_URL", "http://orchestrator:8003")
@@ -34,10 +41,176 @@ SEMANTIC_SEARCH_URL = os.getenv("SEMANTIC_SEARCH_URL", "http://semantic-search:8
 LLM_GENERATOR_URL = os.getenv("LLM_GENERATOR_URL", "http://llm-naming:8002")
 PRICE_VALIDATOR_URL = os.getenv("PRICE_VALIDATOR_URL", "http://price-validator:8006")
 CLUSTERING_SERVICE_URL = os.getenv("CLUSTERING_SERVICE_URL", "http://clustering-service:8007")
+# Большие списки: верхняя граница и размер чанка для вызовов clustering-service (тело JSON / память).
+FEW_SHOT_TEXT_ABS_CAP = int(os.getenv("FEW_SHOT_TEXT_ABS_CAP", "20000"))
+CLUSTERING_CHUNK_SIZE = int(os.getenv("FEW_SHOT_CLUSTERING_CHUNK_SIZE", "400"))
+MODEL_OP_HISTORY_MAX = max(50, int(os.getenv("MODEL_OP_HISTORY_MAX", "400")))
 
 app = FastAPI(title="API Gateway", version="0.1.0")
 RETRY_ATTEMPTS = 3
 RETRY_BASE_DELAY_SECONDS = 0.35
+
+_model_op_lock = threading.Lock()
+_model_op_history: deque[dict[str, Any]] = deque(maxlen=MODEL_OP_HISTORY_MAX)
+_model_last_running: set[str] | None = None
+_model_runtime_last_error: str | None = None
+
+
+def _utc_iso() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _parse_model_from_request_body(raw: bytes) -> str:
+    if not raw:
+        return ""
+    try:
+        j = json.loads(raw)
+        if isinstance(j, dict):
+            return str(j.get("model") or "").strip()
+    except Exception:
+        pass
+    return ""
+
+
+def _detail_from_error_json(body_bytes: bytes) -> str:
+    try:
+        j = json.loads(body_bytes)
+        if isinstance(j, dict) and "detail" in j:
+            d = j["detail"]
+            if isinstance(d, str):
+                return d[:4000]
+            return json.dumps(d, ensure_ascii=False)[:4000]
+    except Exception:
+        pass
+    return body_bytes.decode("utf-8", errors="replace")[:4000]
+
+
+def _summarize_model_op_response(kind: str, status: int, body_bytes: bytes) -> str:
+    """Краткое описание для журнала: ошибка HTTP или поля успешного ответа preprocessing."""
+    if not body_bytes:
+        return ""
+    if status >= 400:
+        return _detail_from_error_json(body_bytes)
+    try:
+        j = json.loads(body_bytes)
+    except Exception:
+        return body_bytes.decode("utf-8", errors="replace")[:1200]
+    if not isinstance(j, dict):
+        return ""
+    if kind == "deploy":
+        parts: list[str] = []
+        if j.get("duration_sec") is not None:
+            parts.append(f"duration_sec={j['duration_sec']}")
+        if j.get("pulled"):
+            parts.append("pulled=true")
+        wl = j.get("warm_load")
+        if isinstance(wl, dict) and wl.get("error"):
+            parts.append(f"warm_error={str(wl['error'])[:400]}")
+        return "; ".join(parts) if parts else "ok"
+    if kind in ("pause", "delete"):
+        return "ok"
+    return ""
+
+
+def _record_model_operation(
+    kind: str,
+    model: str,
+    *,
+    ok: bool,
+    http_status: int,
+    detail: str = "",
+) -> None:
+    ev: dict[str, Any] = {
+        "ts_iso": _utc_iso(),
+        "kind": kind,
+        "model": model or "(unknown)",
+        "ok": ok,
+        "http_status": http_status,
+        "detail": (detail or "")[:4000],
+    }
+    with _model_op_lock:
+        _model_op_history.append(ev)
+
+
+async def _probe_and_record_model_runtime_state() -> None:
+    """
+    Снимок состояния рантайма моделей:
+    - runtime-start: модель появилась в running_models
+    - runtime-stop: модель исчезла из running_models
+    - runtime-error: опрос /models/running неуспешен
+    """
+    global _model_last_running, _model_runtime_last_error
+    now = _utc_iso()
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            resp = await client.get(f"{PREPROCESSING_URL}/api/v1/models/running")
+        if resp.status_code >= 400:
+            msg = f"HTTP {resp.status_code}: {resp.text[:500]}"
+            with _model_op_lock:
+                if _model_runtime_last_error != msg:
+                    _model_op_history.append(
+                        {
+                            "ts_iso": now,
+                            "kind": "runtime-error",
+                            "model": "(runtime)",
+                            "ok": False,
+                            "http_status": resp.status_code,
+                            "detail": msg,
+                        }
+                    )
+                    _model_runtime_last_error = msg
+            return
+        body = resp.json()
+        running = {
+            str(x).strip()
+            for x in (body.get("running_models") or [])
+            if str(x).strip()
+        }
+    except Exception as exc:
+        msg = str(exc)[:500]
+        with _model_op_lock:
+            if _model_runtime_last_error != msg:
+                _model_op_history.append(
+                    {
+                        "ts_iso": now,
+                        "kind": "runtime-error",
+                        "model": "(runtime)",
+                        "ok": False,
+                        "http_status": 502,
+                        "detail": msg,
+                    }
+                )
+                _model_runtime_last_error = msg
+        return
+
+    with _model_op_lock:
+        prev = set(_model_last_running or set())
+        started = sorted(running - prev)
+        stopped = sorted(prev - running)
+        for m in started:
+            _model_op_history.append(
+                {
+                    "ts_iso": now,
+                    "kind": "runtime-start",
+                    "model": m,
+                    "ok": True,
+                    "http_status": 200,
+                    "detail": "Модель появилась в running_models",
+                }
+            )
+        for m in stopped:
+            _model_op_history.append(
+                {
+                    "ts_iso": now,
+                    "kind": "runtime-stop",
+                    "model": m,
+                    "ok": False,
+                    "http_status": 200,
+                    "detail": "Модель исчезла из running_models (возможное падение/остановка)",
+                }
+            )
+        _model_last_running = running
+        _model_runtime_last_error = None
 
 
 def effective_extraction_runtime(runtime: dict[str, Any] | None) -> dict[str, Any]:
@@ -100,6 +273,10 @@ class FewShotAssistRequest(BaseModel):
     n_clusters: int = 100
     outlier_k: int = 20
     outlier_percentile: float | None = 95.0
+    rule_id: str | None = Field(
+        default=None,
+        description="UUID справочника: при фоновом запуске задача привязана к каталогу (восстановление после F5).",
+    )
 
 
 class GenerateExtractionPromptRequest(BaseModel):
@@ -148,6 +325,78 @@ async def request_with_retry(
     raise RuntimeError(f"request failed after {retries} attempts: {last_error}")
 
 
+async def _clustering_select_candidates(
+    client: httpx.AsyncClient,
+    *,
+    filtered_lines: list[str],
+    n_clusters: int,
+    max_candidates: int,
+) -> tuple[list[str], dict[str, int], str | None]:
+    """Один или несколько POST в clustering-service, если неразмеченных строк много."""
+    lines = list(filtered_lines)
+    if len(lines) > FEW_SHOT_TEXT_ABS_CAP:
+        lines = random.sample(lines, FEW_SHOT_TEXT_ABS_CAP)
+
+    chunk_sz = max(50, CLUSTERING_CHUNK_SIZE)
+    nc_cap = max(1, min(int(n_clusters), 200))
+
+    async def one_chunk(part: list[str]) -> tuple[list[str], dict[str, int], str | None]:
+        nc = max(1, min(nc_cap, len(part)))
+        mc = max(1, min(max_candidates, len(part)))
+        req_body = {"texts": part, "n_clusters": nc, "max_candidates": mc}
+        cluster_resp = await request_with_retry(
+            client,
+            "POST",
+            f"{CLUSTERING_SERVICE_URL}/api/v1/clustering/select-candidates",
+            json=req_body,
+            timeout=120.0,
+        )
+        cluster_resp.raise_for_status()
+        cluster_data = cluster_resp.json() if cluster_resp.content else {}
+        emb = (
+            str(cluster_data.get("embedding_model")).strip()
+            if cluster_data.get("embedding_model") is not None
+            else None
+        )
+        raw_c = cluster_data.get("candidates")
+        cand_list = [str(x).strip() for x in (raw_c or []) if str(x).strip()]
+        cmap_raw = cluster_data.get("cluster_by_text")
+        cbt = {str(k): int(v) for k, v in (cmap_raw or {}).items() if str(k).strip()}
+        return cand_list, cbt, emb
+
+    if len(lines) <= chunk_sz:
+        cands, cbt, emb = await one_chunk(lines)
+        if not cands:
+            cands = lines[:max_candidates]
+        elif len(cands) > max_candidates:
+            cands = cands[:max_candidates]
+        return cands, cbt, emb
+
+    seen: set[str] = set()
+    merged: list[str] = []
+    cluster_by_text: dict[str, int] = {}
+    emb_model: str | None = None
+    for i in range(0, len(lines), chunk_sz):
+        part = lines[i : i + chunk_sz]
+        cands, cbt, emb = await one_chunk(part)
+        if emb_model is None and emb:
+            emb_model = emb
+        for t in cands:
+            if not t or t in seen:
+                continue
+            seen.add(t)
+            merged.append(t)
+            if t in cbt:
+                cluster_by_text[t] = cbt[t]
+        if len(merged) >= max_candidates:
+            break
+    if not merged:
+        merged = lines[:max_candidates]
+    elif len(merged) > max_candidates:
+        merged = merged[:max_candidates]
+    return merged, cluster_by_text, emb_model
+
+
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok", "service": "api-gateway"}
@@ -173,6 +422,38 @@ async def ready() -> dict[str, Any]:
                 deps[name] = "down"
     status = "ok" if all(v == "ok" for v in deps.values()) else "degraded"
     return {"status": status, "service": "api-gateway", "dependencies": deps}
+
+
+@app.get("/api/validate/preflight")
+async def validate_preflight() -> dict[str, Any]:
+    """
+    Проверка доступности подмодулей для сценария инспектора до запуска /api/validate.
+    Если есть недоступные зависимости — фронт не должен стартовать обработку.
+    """
+    deps: dict[str, str] = {}
+    targets = {
+        "orchestrator": ORCHESTRATOR_URL,
+        "rules-engine": RULES_ENGINE_URL,
+        "preprocessing": PREPROCESSING_URL,
+        "semantic-search": SEMANTIC_SEARCH_URL,
+        "llm-generator": LLM_GENERATOR_URL,
+        "price-validator": PRICE_VALIDATOR_URL,
+    }
+    async with httpx.AsyncClient(timeout=3.0) as client:
+        for name, base_url in targets.items():
+            try:
+                resp = await client.get(f"{base_url}/health")
+                deps[name] = "ok" if resp.status_code == 200 else "down"
+            except Exception:
+                deps[name] = "down"
+    down = [k for k, v in deps.items() if v != "ok"]
+    return {
+        "status": "ok" if not down else "degraded",
+        "service": "api-gateway",
+        "profile": "officer-validation",
+        "dependencies": deps,
+        "down_dependencies": down,
+    }
 
 
 def _build_feature_extraction_prompt(payload: FeatureExtractionTestRequest) -> str:
@@ -336,12 +617,28 @@ async def test_feature_extraction(payload: FeatureExtractionTestRequest) -> dict
     return out
 
 
-@app.post("/api/feature-extraction/few-shot-assist")
-async def few_shot_assist(payload: FewShotAssistRequest) -> dict[str, Any]:
+def _http_exception_detail(exc: HTTPException) -> str:
+    d = exc.detail
+    if isinstance(d, str):
+        return d
+    try:
+        return json.dumps(d, ensure_ascii=False)
+    except Exception:
+        return str(d)
+
+
+FewShotProgressEmit = Optional[Callable[[dict[str, Any]], Awaitable[None]]]
+
+
+async def _execute_few_shot_assist(
+    payload: FewShotAssistRequest,
+    *,
+    emit: FewShotProgressEmit = None,
+) -> dict[str, Any]:
     """
     Несколько запусков модели с sampling (temperature) на каждый текст, затем метрики
     Generation / Format / Content uncertainty и итог 𝒰 = α·𝒰_d + β·𝒰_f + γ·𝒰_c.
-    Высокая неопределённость → сложный пример, удобный для включения в few-shot.
+    emit — опционально: события прогресса для NDJSON-стрима.
     """
     from app.few_shot_uncertainty import (
         best_json_fragment_from_responses,
@@ -368,22 +665,22 @@ async def few_shot_assist(payload: FewShotAssistRequest) -> dict[str, Any]:
     cluster_by_text: dict[str, int] = {}
     clustering_embedding_model: str | None = None
     if strategy == "few_shot_extractor":
-        req_body = {
-            "texts": filtered_lines,
-            "n_clusters": max(1, min(int(payload.n_clusters), 200)),
-            "max_candidates": max_candidates,
-        }
+        if emit:
+            await emit(
+                {
+                    "event": "phase",
+                    "phase": "clustering",
+                    "message": "Кластеризация и отбор кандидатов (embedding + k-means)…",
+                }
+            )
         async with httpx.AsyncClient(timeout=120.0) as client:
             try:
-                cluster_resp = await request_with_retry(
+                candidates, cluster_by_text, clustering_embedding_model = await _clustering_select_candidates(
                     client,
-                    "POST",
-                    f"{CLUSTERING_SERVICE_URL}/api/v1/clustering/select-candidates",
-                    json=req_body,
-                    timeout=120.0,
+                    filtered_lines=filtered_lines,
+                    n_clusters=int(payload.n_clusters),
+                    max_candidates=max_candidates,
                 )
-                cluster_resp.raise_for_status()
-                cluster_data = cluster_resp.json() if cluster_resp.content else {}
             except httpx.HTTPStatusError as exc:
                 raise HTTPException(
                     status_code=502,
@@ -391,22 +688,7 @@ async def few_shot_assist(payload: FewShotAssistRequest) -> dict[str, Any]:
                 ) from exc
             except Exception as exc:
                 raise HTTPException(status_code=502, detail=f"clustering-service: {exc}") from exc
-
-        candidates_raw = cluster_data.get("candidates")
-        cluster_map_raw = cluster_data.get("cluster_by_text")
-        clustering_embedding_model = (
-            str(cluster_data.get("embedding_model")).strip()
-            if cluster_data.get("embedding_model") is not None
-            else None
-        )
-        candidates = [str(x).strip() for x in (candidates_raw or []) if str(x).strip()]
-        cluster_by_text = {
-            str(k): int(v)
-            for k, v in (cluster_map_raw or {}).items()
-            if str(k).strip()
-        }
         if not candidates:
-            # Если сервис вернул пусто, безопасный fallback — первые строки.
             candidates = filtered_lines[:max_candidates]
     else:
         candidates = filtered_lines[:max_candidates]
@@ -430,18 +712,35 @@ async def few_shot_assist(payload: FewShotAssistRequest) -> dict[str, Any]:
 
     await _require_model_running_for_prompt_test(model)
 
+    n_cand = len(candidates)
+    total_llm = n_cand * k
+    if emit:
+        await emit(
+            {
+                "event": "phase",
+                "phase": "evaluating",
+                "candidates_total": n_cand,
+                "llm_calls_total": total_llm,
+                "k": k,
+                "message": f"Опрос модели: {n_cand} кандидатов × {k} вариантов = {total_llm} вызовов к Ollama",
+            }
+        )
+
     top_n = max(1, min(int(payload.top_n), 50))
     results: list[dict[str, Any]] = []
 
+    llm_done = 0
+    cand_pos = 0
     async with httpx.AsyncClient(timeout=LLM_HTTP_TIMEOUT) as client:
         for text in candidates:
+            cand_pos += 1
             responses: list[str] = []
             assembled = _assemble_extraction_prompt(
                 rules_preview=payload.rules_preview,
                 prompt=payload.prompt,
                 sample_text=text,
             )
-            for _ in range(k):
+            for variant in range(k):
                 body = {
                     "model": model,
                     "prompt": assembled,
@@ -471,6 +770,25 @@ async def few_shot_assist(payload: FewShotAssistRequest) -> dict[str, Any]:
                 except Exception as exc:
                     raise HTTPException(status_code=502, detail=f"preprocessing: {exc}") from exc
 
+                llm_done += 1
+                if emit:
+                    await emit(
+                        {
+                            "event": "progress",
+                            "phase": "evaluating",
+                            "candidate_index": cand_pos,
+                            "candidates_total": n_cand,
+                            "variant_index": variant + 1,
+                            "k": k,
+                            "llm_calls_done": llm_done,
+                            "llm_calls_total": total_llm,
+                            "message": (
+                                f"Кандидат {cand_pos}/{n_cand}: вариант ответа {variant + 1}/{k} "
+                                f"(всего вызовов {llm_done}/{total_llm})"
+                            ),
+                        }
+                    )
+
             gen_d = calculate_generation_disagreement(responses)
             r_fail, struct_d = calculate_format_uncertainty(responses)
             format_u = (r_fail + struct_d) / 2.0
@@ -496,6 +814,15 @@ async def few_shot_assist(payload: FewShotAssistRequest) -> dict[str, Any]:
                     "responses_preview": [r[:2000] for r in responses],
                 }
             )
+
+    if emit:
+        await emit(
+            {
+                "event": "phase",
+                "phase": "ranking",
+                "message": "Ранжирование по неопределённости и отбор top-N…",
+            }
+        )
 
     n_evaluated = len(results)
     outlier_enabled = payload.outlier_percentile is not None
@@ -536,6 +863,213 @@ async def few_shot_assist(payload: FewShotAssistRequest) -> dict[str, Any]:
         ),
         "results": results,
     }
+
+
+# --- Фоновые few-shot задачи (привязка к rule_id; статус после обновления страницы) ---
+_FEW_SHOT_JOB_LOCK = asyncio.Lock()
+_FEW_SHOT_JOBS: dict[str, dict[str, Any]] = {}
+_FEW_SHOT_RULE_ACTIVE: dict[str, str] = {}
+_FEW_SHOT_JOB_MAX = 500
+
+
+def _utc_iso() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+async def _few_shot_job_emit(job_id: str, ev: dict[str, Any]) -> None:
+    async with _FEW_SHOT_JOB_LOCK:
+        j = _FEW_SHOT_JOBS.get(job_id)
+        if not j:
+            return
+        j["updated_at"] = _utc_iso()
+        event = ev.get("event")
+        if event == "phase":
+            j["phase"] = ev.get("phase")
+            if isinstance(ev.get("message"), str):
+                j["message"] = ev["message"]
+            if ev.get("phase") == "evaluating":
+                tt = ev.get("llm_calls_total")
+                if isinstance(tt, (int, float)):
+                    j["llm_calls_total"] = int(tt)
+        elif event == "progress":
+            d = ev.get("llm_calls_done")
+            t = ev.get("llm_calls_total")
+            if isinstance(d, (int, float)):
+                j["llm_calls_done"] = int(d)
+            if isinstance(t, (int, float)):
+                j["llm_calls_total"] = int(t)
+            if isinstance(ev.get("message"), str):
+                j["message"] = ev["message"]
+
+
+async def _few_shot_background_worker(job_id: str, payload: FewShotAssistRequest) -> None:
+    rule_key = (payload.rule_id or "").strip() or None
+
+    async def emit(ev: dict[str, Any]) -> None:
+        await _few_shot_job_emit(job_id, ev)
+
+    try:
+        result = await _execute_few_shot_assist(payload, emit=emit)
+        async with _FEW_SHOT_JOB_LOCK:
+            j = _FEW_SHOT_JOBS.get(job_id)
+            if j:
+                j["status"] = "completed"
+                j["result"] = result
+                j["phase"] = "done"
+                j["message"] = "Готово"
+                j["updated_at"] = _utc_iso()
+            if rule_key and _FEW_SHOT_RULE_ACTIVE.get(rule_key) == job_id:
+                del _FEW_SHOT_RULE_ACTIVE[rule_key]
+    except HTTPException as he:
+        async with _FEW_SHOT_JOB_LOCK:
+            j = _FEW_SHOT_JOBS.get(job_id)
+            if j:
+                j["status"] = "failed"
+                err = _http_exception_detail(he)
+                j["error"] = err
+                j["phase"] = "error"
+                j["message"] = err
+                j["updated_at"] = _utc_iso()
+            if rule_key and _FEW_SHOT_RULE_ACTIVE.get(rule_key) == job_id:
+                del _FEW_SHOT_RULE_ACTIVE[rule_key]
+    except Exception as exc:
+        async with _FEW_SHOT_JOB_LOCK:
+            j = _FEW_SHOT_JOBS.get(job_id)
+            if j:
+                j["status"] = "failed"
+                j["error"] = str(exc)
+                j["phase"] = "error"
+                j["message"] = str(exc)
+                j["updated_at"] = _utc_iso()
+            if rule_key and _FEW_SHOT_RULE_ACTIVE.get(rule_key) == job_id:
+                del _FEW_SHOT_RULE_ACTIVE[rule_key]
+
+
+def _prune_few_shot_jobs_unlocked() -> None:
+    if len(_FEW_SHOT_JOBS) <= _FEW_SHOT_JOB_MAX:
+        return
+    done = [(k, v) for k, v in _FEW_SHOT_JOBS.items() if v.get("status") in ("completed", "failed")]
+    done.sort(key=lambda kv: kv[1].get("updated_at") or "")
+    for k, _ in done[: max(0, len(done) - 100)]:
+        _FEW_SHOT_JOBS.pop(k, None)
+
+
+@app.post("/api/feature-extraction/few-shot-assist/jobs")
+async def few_shot_assist_create_job(payload: FewShotAssistRequest) -> dict[str, Any]:
+    """Запуск few-shot в фоне; при том же rule_id возвращает уже идущую задачу."""
+    rule_key = (payload.rule_id or "").strip() or None
+    async with _FEW_SHOT_JOB_LOCK:
+        if rule_key and rule_key in _FEW_SHOT_RULE_ACTIVE:
+            jid = _FEW_SHOT_RULE_ACTIVE[rule_key]
+            ex = _FEW_SHOT_JOBS.get(jid)
+            if ex and ex.get("status") == "running":
+                return {
+                    "job_id": jid,
+                    "rule_id": rule_key,
+                    "resumed": True,
+                    "created_at": ex["created_at"],
+                    "message": "Для этого справочника уже выполняется обработка — показан её статус.",
+                }
+        _prune_few_shot_jobs_unlocked()
+        job_id = str(uuid.uuid4())
+        now = _utc_iso()
+        _FEW_SHOT_JOBS[job_id] = {
+            "job_id": job_id,
+            "rule_id": rule_key,
+            "status": "running",
+            "created_at": now,
+            "updated_at": now,
+            "phase": None,
+            "message": "Запуск…",
+            "llm_calls_done": 0,
+            "llm_calls_total": None,
+            "result": None,
+            "error": None,
+        }
+        if rule_key:
+            _FEW_SHOT_RULE_ACTIVE[rule_key] = job_id
+    asyncio.create_task(_few_shot_background_worker(job_id, payload))
+    return {"job_id": job_id, "rule_id": rule_key, "resumed": False, "created_at": now}
+
+
+@app.get("/api/feature-extraction/few-shot-assist/jobs/by-rule")
+async def few_shot_assist_job_by_rule(rule_id: str) -> dict[str, Any]:
+    """Активная задача few-shot для справочника (обновление страницы)."""
+    rk = (rule_id or "").strip()
+    if not rk:
+        raise HTTPException(status_code=400, detail="Укажите rule_id")
+    async with _FEW_SHOT_JOB_LOCK:
+        jid = _FEW_SHOT_RULE_ACTIVE.get(rk)
+        if not jid:
+            return {"job": None}
+        j = _FEW_SHOT_JOBS.get(jid)
+        if not j or j.get("status") != "running":
+            return {"job": None}
+        return {"job": dict(j)}
+
+
+@app.get("/api/feature-extraction/few-shot-assist/jobs/{job_id}")
+async def few_shot_assist_get_job(job_id: str) -> dict[str, Any]:
+    async with _FEW_SHOT_JOB_LOCK:
+        j = _FEW_SHOT_JOBS.get(job_id)
+        if not j:
+            raise HTTPException(
+                status_code=404,
+                detail="Задача не найдена (устарела или перезапуск api-gateway).",
+            )
+        return dict(j)
+
+
+@app.post("/api/feature-extraction/few-shot-assist")
+async def few_shot_assist(payload: FewShotAssistRequest) -> dict[str, Any]:
+    return await _execute_few_shot_assist(payload)
+
+
+@app.post("/api/feature-extraction/few-shot-assist/stream")
+async def few_shot_assist_stream(payload: FewShotAssistRequest) -> StreamingResponse:
+    """Тот же расчёт, что few-shot-assist, но NDJSON: события phase/progress и финальная строка complete."""
+
+    queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue()
+
+    async def emit(ev: dict[str, Any]) -> None:
+        await queue.put(("ev", ev))
+
+    async def worker() -> None:
+        try:
+            result = await _execute_few_shot_assist(payload, emit=emit)
+            await queue.put(("done", result))
+        except HTTPException as he:
+            await queue.put(("http_err", he))
+        except Exception as exc:
+            await queue.put(("err", str(exc)))
+
+    asyncio.create_task(worker())
+
+    async def ndjson_bytes() -> AsyncIterator[bytes]:
+        while True:
+            kind, data = await queue.get()
+            if kind == "ev":
+                yield (json.dumps(data, ensure_ascii=False) + "\n").encode("utf-8")
+            elif kind == "done":
+                line = json.dumps({"event": "complete", "result": data}, ensure_ascii=False) + "\n"
+                yield line.encode("utf-8")
+                break
+            elif kind == "http_err":
+                he = data
+                err_body = {
+                    "event": "error",
+                    "status_code": he.status_code,
+                    "message": _http_exception_detail(he),
+                }
+                yield (json.dumps(err_body, ensure_ascii=False) + "\n").encode("utf-8")
+                break
+            elif kind == "err":
+                yield (json.dumps({"event": "error", "message": data}, ensure_ascii=False) + "\n").encode(
+                    "utf-8"
+                )
+                break
+
+    return StreamingResponse(ndjson_bytes(), media_type="application/x-ndjson")
 
 
 @app.post("/api/feature-extraction/generate-prompt")
@@ -700,6 +1234,35 @@ async def put_feature_extraction_model_settings(request: Request) -> Any:
             raise HTTPException(status_code=502, detail=f"rules-engine unavailable: {exc}") from exc
 
 
+@app.get("/api/feature-extraction/primary-catalog-settings")
+async def get_primary_catalog_settings() -> Any:
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        try:
+            resp = await request_with_retry(
+                client, "GET", f"{RULES_ENGINE_URL}/api/feature-extraction/primary-catalog-settings"
+            )
+            return Response(content=resp.content, status_code=resp.status_code, media_type=resp.headers.get("content-type"))
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"rules-engine unavailable: {exc}") from exc
+
+
+@app.put("/api/feature-extraction/primary-catalog-settings")
+async def put_primary_catalog_settings(request: Request) -> Any:
+    body = await request.body()
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        try:
+            resp = await request_with_retry(
+                client,
+                "PUT",
+                f"{RULES_ENGINE_URL}/api/feature-extraction/primary-catalog-settings",
+                content=body if body else None,
+                headers={"content-type": request.headers.get("content-type", "application/json")},
+            )
+            return Response(content=resp.content, status_code=resp.status_code, media_type=resp.headers.get("content-type"))
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"rules-engine unavailable: {exc}") from exc
+
+
 @app.post("/api/feature-extraction/few-shot-runs")
 async def post_few_shot_runs(request: Request) -> Any:
     body = await request.body()
@@ -781,9 +1344,23 @@ async def get_feature_extraction_models() -> Any:
             raise HTTPException(status_code=502, detail=f"feature-extraction models unavailable: {exc}") from exc
 
 
+@app.get("/api/feature-extraction/model-operation-history")
+async def get_feature_extraction_model_operation_history() -> dict[str, Any]:
+    """Журнал операций и событий рантайма за время жизни процесса api-gateway (память процесса)."""
+    await _probe_and_record_model_runtime_state()
+    with _model_op_lock:
+        events = list(_model_op_history)
+    return {
+        "events": events,
+        "source": "api-gateway",
+        "max_entries": MODEL_OP_HISTORY_MAX,
+    }
+
+
 @app.post("/api/feature-extraction/deploy")
 async def deploy_feature_extraction_model(request: Request) -> Any:
     body = await request.body()
+    model = _parse_model_from_request_body(body)
     async with httpx.AsyncClient(timeout=LLM_HTTP_TIMEOUT) as client:
         try:
             resp = await request_with_retry(
@@ -793,14 +1370,32 @@ async def deploy_feature_extraction_model(request: Request) -> Any:
                 content=body if body else None,
                 headers={"content-type": request.headers.get("content-type", "application/json")},
             )
-            return Response(content=resp.content, status_code=resp.status_code, media_type=resp.headers.get("content-type"))
+            content = resp.content
+            st = resp.status_code
+            summ = _summarize_model_op_response("deploy", st, content)
+            _record_model_operation(
+                "deploy",
+                model,
+                ok=st < 400,
+                http_status=st,
+                detail=summ,
+            )
+            return Response(content=content, status_code=st, media_type=resp.headers.get("content-type"))
         except Exception as exc:
+            _record_model_operation(
+                "deploy",
+                model,
+                ok=False,
+                http_status=502,
+                detail=str(exc)[:4000],
+            )
             raise HTTPException(status_code=502, detail=f"preprocessing unavailable: {exc}") from exc
 
 
 @app.post("/api/feature-extraction/pause")
 async def pause_feature_extraction_model(request: Request) -> Any:
     body = await request.body()
+    model = _parse_model_from_request_body(body)
     async with httpx.AsyncClient(timeout=30.0) as client:
         try:
             resp = await request_with_retry(
@@ -810,8 +1405,25 @@ async def pause_feature_extraction_model(request: Request) -> Any:
                 content=body if body else None,
                 headers={"content-type": request.headers.get("content-type", "application/json")},
             )
-            return Response(content=resp.content, status_code=resp.status_code, media_type=resp.headers.get("content-type"))
+            content = resp.content
+            st = resp.status_code
+            summ = _summarize_model_op_response("pause", st, content)
+            _record_model_operation(
+                "pause",
+                model,
+                ok=st < 400,
+                http_status=st,
+                detail=summ,
+            )
+            return Response(content=content, status_code=st, media_type=resp.headers.get("content-type"))
         except Exception as exc:
+            _record_model_operation(
+                "pause",
+                model,
+                ok=False,
+                http_status=502,
+                detail=str(exc)[:4000],
+            )
             raise HTTPException(status_code=502, detail=f"preprocessing unavailable: {exc}") from exc
 
 
@@ -837,6 +1449,7 @@ async def ollama_container_logs_proxy(tail: int = 200) -> Any:
 @app.post("/api/feature-extraction/delete")
 async def delete_feature_extraction_model(request: Request) -> Any:
     body = await request.body()
+    model = _parse_model_from_request_body(body)
     async with httpx.AsyncClient(timeout=120.0) as client:
         try:
             resp = await request_with_retry(
@@ -846,8 +1459,25 @@ async def delete_feature_extraction_model(request: Request) -> Any:
                 content=body if body else None,
                 headers={"content-type": request.headers.get("content-type", "application/json")},
             )
-            return Response(content=resp.content, status_code=resp.status_code, media_type=resp.headers.get("content-type"))
+            content = resp.content
+            st = resp.status_code
+            summ = _summarize_model_op_response("delete", st, content)
+            _record_model_operation(
+                "delete",
+                model,
+                ok=st < 400,
+                http_status=st,
+                detail=summ,
+            )
+            return Response(content=content, status_code=st, media_type=resp.headers.get("content-type"))
         except Exception as exc:
+            _record_model_operation(
+                "delete",
+                model,
+                ok=False,
+                http_status=502,
+                detail=str(exc)[:4000],
+            )
             raise HTTPException(status_code=502, detail=f"preprocessing unavailable: {exc}") from exc
 
 
@@ -878,6 +1508,60 @@ async def validate(payload: ValidationRequest) -> Any:
             raise HTTPException(status_code=502, detail=f"orchestrator unavailable: {exc}") from exc
 
 
+@app.post("/api/validate/stream")
+async def validate_stream(payload: ValidationRequest) -> StreamingResponse:
+    async def ndjson_bytes() -> AsyncIterator[bytes]:
+        yield (
+            json.dumps(
+                {
+                    "event": "phase",
+                    "code": "gateway-connect",
+                    "title": "Подключение к оркестратору",
+                    "detail": "Шлюз открыл поток и ожидает первый этап от оркестратора.",
+                },
+                ensure_ascii=False,
+            )
+            + "\n"
+        ).encode("utf-8")
+        async with httpx.AsyncClient(timeout=930.0) as client:
+            try:
+                async with client.stream(
+                    "POST",
+                    f"{ORCHESTRATOR_URL}/api/v1/pipeline/validate/stream",
+                    json=payload.model_dump(),
+                ) as resp:
+                    if resp.status_code >= 400:
+                        text = await resp.aread()
+                        msg = text.decode("utf-8", errors="replace")[:2000]
+                        yield (
+                            json.dumps(
+                                {
+                                    "event": "error",
+                                    "status_code": resp.status_code,
+                                    "message": msg or f"orchestrator http {resp.status_code}",
+                                },
+                                ensure_ascii=False,
+                            )
+                            + "\n"
+                        ).encode("utf-8")
+                        return
+                    async for line in resp.aiter_lines():
+                        s = (line or "").strip()
+                        if not s:
+                            continue
+                        yield (s + "\n").encode("utf-8")
+            except Exception as exc:
+                yield (
+                    json.dumps(
+                        {"event": "error", "status_code": 502, "message": f"orchestrator unavailable: {exc}"},
+                        ensure_ascii=False,
+                    )
+                    + "\n"
+                ).encode("utf-8")
+
+    return StreamingResponse(ndjson_bytes(), media_type="application/x-ndjson")
+
+
 @app.get("/api/jobs/{job_id}")
 async def get_job(job_id: int) -> Any:
     async with httpx.AsyncClient(timeout=20.0) as client:
@@ -898,6 +1582,22 @@ async def proxy_rules(request: Request, path: str = "") -> Any:
             client,
             request.method,
             f"{RULES_ENGINE_URL}/api/rules/{path}" if path else f"{RULES_ENGINE_URL}/api/rules",
+            params=request.query_params,
+            content=body if body else None,
+            headers={"content-type": request.headers.get("content-type", "application/json")},
+        )
+        return Response(content=resp.content, status_code=resp.status_code, media_type=resp.headers.get("content-type"))
+
+
+@app.api_route("/api/expert-decisions", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
+@app.api_route("/api/expert-decisions/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
+async def proxy_expert_decisions(request: Request, path: str = "") -> Any:
+    body = await request.body()
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        resp = await request_with_retry(
+            client,
+            request.method,
+            f"{RULES_ENGINE_URL}/api/expert-decisions/{path}" if path else f"{RULES_ENGINE_URL}/api/expert-decisions",
             params=request.query_params,
             content=body if body else None,
             headers={"content-type": request.headers.get("content-type", "application/json")},

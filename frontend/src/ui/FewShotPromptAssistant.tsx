@@ -1,7 +1,22 @@
-import React, { useCallback, useMemo, useState } from "react";
-import { deleteFewShotAssistRun, listFewShotAssistRuns, runFewShotAssist, saveFewShotAssistRun } from "../api/client";
-import { formatElapsedSec, useElapsedSeconds } from "../hooks/useElapsedSeconds";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  deleteFewShotAssistRun,
+  fewShotJobStorageKey,
+  getFewShotAssistActiveJobForRule,
+  getFewShotAssistJob,
+  type FewShotAssistJobStatus,
+  listFewShotAssistRuns,
+  runFewShotAssistWithProgress,
+  saveFewShotAssistRun,
+  startFewShotAssistJob,
+} from "../api/client";
+import { formatElapsedSec, useElapsedSecondsAnchored } from "../hooks/useElapsedSeconds";
+import { finalizeRowInput, rowRangeBounds, type RowInputValue } from "../utils/rowRangeNumericInput";
 import { normalizeCell, type ParsedTable, parseUploadedTableFile } from "../utils/tableFileParse";
+import { sampleSubset } from "../utils/sampleSubset";
+import { downloadFewShotResultsXlsx } from "../utils/fewShotXlsxExport";
+import { LongOperationStatusBar } from "./LongOperationStatusBar";
+import { ModalCloseButton } from "./ModalCloseButton";
 import { TableColumnPreviewModal } from "./TableColumnPreviewModal";
 
 export type FewShotPromptAssistantProps = {
@@ -12,6 +27,8 @@ export type FewShotPromptAssistantProps = {
   /** UUID справочника — при наличии прогоны сохраняются в БД и показывается история. */
   ruleId?: string;
   disabled?: boolean;
+  /** На сервере запущена хотя бы одна LLM (иначе нельзя открывать предпросмотр и запускать поиск). */
+  hasRunningLlm: boolean;
   /** Раскрытие блока few-shot снаружи (кнопка в родителе). */
   expanded?: boolean;
   onExpandedChange?: (expanded: boolean) => void;
@@ -52,6 +69,7 @@ export default function FewShotPromptAssistant({
   rulesPreview,
   ruleId,
   disabled,
+  hasRunningLlm,
   expanded: expandedProp,
   onExpandedChange,
   hideToolbarButton,
@@ -69,8 +87,8 @@ export default function FewShotPromptAssistant({
   /** Черновик названия колонки в модалке (как в пакетном тесте). */
   const [fewShotColumnDraft, setFewShotColumnDraft] = useState("");
   /** Диапазон строк данных (1-based, включительно), как в пакетном тесте. */
-  const [fewShotRowStart, setFewShotRowStart] = useState(1);
-  const [fewShotRowEnd, setFewShotRowEnd] = useState(1);
+  const [fewShotRowStart, setFewShotRowStart] = useState<RowInputValue>(1);
+  const [fewShotRowEnd, setFewShotRowEnd] = useState<RowInputValue>(1);
   const [analyzeCount, setAnalyzeCount] = useState(100);
   const [targetCount, setTargetCount] = useState(8);
   const [busy, setBusy] = useState(false);
@@ -84,7 +102,46 @@ export default function FewShotPromptAssistant({
   const [selectedResultIndices, setSelectedResultIndices] = useState<Set<number>>(() => new Set());
   const [selectionAnchorIndex, setSelectionAnchorIndex] = useState<number | null>(null);
   const [tablePreviewOpen, setTablePreviewOpen] = useState(false);
-  const elapsedFewShot = useElapsedSeconds(busy);
+  const [fewShotProgress, setFewShotProgress] = useState<{ done: number; total: number } | null>(null);
+  const [fewShotPhaseHint, setFewShotPhaseHint] = useState<string>("");
+  /** Unix ms начала задачи (с сервера) — чтобы таймер не сбрасывался после F5 */
+  const [fewShotAnchorMs, setFewShotAnchorMs] = useState<number | null>(null);
+  const elapsedFewShot = useElapsedSecondsAnchored(busy, fewShotAnchorMs);
+
+  const applyJobStatusToUi = useCallback((st: FewShotAssistJobStatus) => {
+    const msg = String(st.message ?? "").trim();
+    if (msg) setFewShotPhaseHint(msg);
+    const tt = st.llm_calls_total;
+    const dd = st.llm_calls_done;
+    if (typeof tt === "number" && tt > 0 && typeof dd === "number") {
+      setFewShotProgress({ done: dd, total: tt });
+    } else if (typeof tt === "number" && tt > 0) {
+      setFewShotProgress({ done: 0, total: tt });
+    }
+  }, []);
+
+  const pollFewShotJobUntilDone = useCallback(
+    async (jobId: string, isCancelled: () => boolean): Promise<unknown> => {
+      const interval = 1500;
+      while (true) {
+        if (isCancelled()) {
+          throw new Error("aborted");
+        }
+        const st = await getFewShotAssistJob(jobId);
+        if (st.status === "running") {
+          applyJobStatusToUi(st);
+        }
+        if (st.status === "completed") {
+          return st.result;
+        }
+        if (st.status === "failed") {
+          throw new Error(st.error || "Ошибка few-shot");
+        }
+        await new Promise((r) => setTimeout(r, interval));
+      }
+    },
+    [applyJobStatusToUi],
+  );
 
   const refreshSavedRuns = useCallback(async () => {
     const rid = String(ruleId ?? "").trim();
@@ -103,6 +160,79 @@ export default function FewShotPromptAssistant({
     } finally {
       setRunsBusy(false);
     }
+  }, [ruleId]);
+
+  const persistFewShotResult = useCallback(
+    async (res: unknown) => {
+      setData(res);
+      const rid = String(ruleId ?? "").trim();
+      if (rid) {
+        try {
+          const saved = await saveFewShotAssistRun(rid, res as Record<string, unknown>);
+          if (saved?.id) setDataSourceRunId(String(saved.id));
+          setRunsError(null);
+          await refreshSavedRuns();
+        } catch (persistErr: any) {
+          setRunsError(persistErr?.message ?? String(persistErr));
+        }
+      }
+    },
+    [ruleId, refreshSavedRuns],
+  );
+
+  /** После F5: если для справочника уже идёт few-shot — подхватываем опрос статуса. */
+  React.useEffect(() => {
+    const rid = String(ruleId ?? "").trim();
+    if (!rid) return;
+    let cancelled = false;
+    const isCancelled = () => cancelled;
+    const storageKey = fewShotJobStorageKey(rid);
+
+    void (async () => {
+      try {
+        let job: FewShotAssistJobStatus | null = await getFewShotAssistActiveJobForRule(rid);
+        if (!job) {
+          const stored = localStorage.getItem(storageKey);
+          if (stored) {
+            try {
+              const st = await getFewShotAssistJob(stored);
+              if (st.status === "running") job = st;
+              else localStorage.removeItem(storageKey);
+            } catch {
+              localStorage.removeItem(storageKey);
+            }
+          }
+        }
+        if (!job || job.status !== "running") return;
+        localStorage.setItem(storageKey, job.job_id);
+        setBusy(true);
+        setError(null);
+        setFewShotAnchorMs(Date.parse(job.created_at));
+        applyJobStatusToUi(job);
+        const res = await pollFewShotJobUntilDone(job.job_id, isCancelled);
+        if (cancelled) return;
+        await persistFewShotResult(res);
+        localStorage.removeItem(storageKey);
+      } catch (e: any) {
+        if (cancelled) return;
+        if (String(e?.message) === "aborted") return;
+        setError(e?.message ?? String(e));
+        localStorage.removeItem(storageKey);
+      } finally {
+        if (!cancelled) {
+          setBusy(false);
+          setFewShotProgress(null);
+          setFewShotPhaseHint("");
+          setFewShotAnchorMs(null);
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+    // Только смена справочника; колбэки стабильны по смыслу (см. ruleId внутри persist).
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- избегаем повторного resume при каждом render
   }, [ruleId]);
 
   React.useEffect(() => {
@@ -154,12 +284,15 @@ export default function FewShotPromptAssistant({
     (ci: number) => {
       const n = table.rows.length;
       if (ci < 0 || n === 0) {
-        return { items: [] as { rowNumber: number; text: string }[], start: 1, end: 0, rowCount: 0 };
+        return {
+          items: [] as { rowNumber: number; text: string }[],
+          start: 1,
+          end: 0,
+          rowCount: 0,
+          incomplete: false,
+        };
       }
-      const rawS = Number(fewShotRowStart);
-      const rawE = Number(fewShotRowEnd);
-      const s0 = Number.isFinite(rawS) ? rawS : 1;
-      const e0 = Number.isFinite(rawE) ? rawE : n;
+      const { s0, e0, incomplete } = rowRangeBounds(fewShotRowStart, fewShotRowEnd, n);
       let lo = Math.min(Math.max(1, Math.floor(s0)), n);
       let hi = Math.min(Math.max(1, Math.floor(e0)), n);
       if (lo > hi) [lo, hi] = [hi, lo];
@@ -170,7 +303,7 @@ export default function FewShotPromptAssistant({
           text: normalizeCell(table.rows[i][ci]),
         });
       }
-      return { items, start: lo, end: hi, rowCount: n };
+      return { items, start: lo, end: hi, rowCount: n, incomplete };
     },
     [table.rows, fewShotRowStart, fewShotRowEnd],
   );
@@ -198,9 +331,11 @@ export default function FewShotPromptAssistant({
   const canRun =
     !disabled &&
     !busy &&
+    hasRunningLlm &&
     selectedModels.length > 0 &&
     String(prompt ?? "").trim().length > 0 &&
-    sourceTexts.length > 0;
+    sourceTexts.length > 0 &&
+    !fewShotRowRange.incomplete;
 
   const resultsArr = Array.isArray(data?.results) ? data.results : [];
 
@@ -249,44 +384,75 @@ export default function FewShotPromptAssistant({
     if (!canRun) return;
     const analyze = Math.max(1, Math.min(Number.isFinite(analyzeCount) ? analyzeCount : 1, sourceTexts.length));
     const target = Math.max(1, Number.isFinite(targetCount) ? targetCount : 1);
+    /** В API уходит только выборка из `analyze` строк — не весь столбец (иначе гигабайты JSON и 413). */
+    const unlabeledForApi = sourceTexts.length <= analyze ? [...sourceTexts] : sampleSubset(sourceTexts, analyze);
+    const rid = String(ruleId ?? "").trim();
+    const payloadBase = {
+      model,
+      prompt: String(prompt ?? ""),
+      rules_preview: rulesPreview || undefined,
+      unlabeled_texts: unlabeledForApi,
+      k: 2,
+      temperature: 0.7,
+      top_p: 0.95,
+      alpha: 0.33,
+      beta: 0.33,
+      gamma: 0.34,
+      max_candidates: analyze,
+      top_n: target,
+      candidate_strategy: "few_shot_extractor" as const,
+      n_clusters: analyze,
+      outlier_percentile: null,
+    };
     setBusy(true);
+    setFewShotProgress(null);
+    setFewShotPhaseHint("");
+    setFewShotAnchorMs(null);
     setError(null);
     setData(null);
     setDataSourceRunId(null);
     try {
-      const res = await runFewShotAssist({
-        model,
-        prompt: String(prompt ?? ""),
-        rules_preview: rulesPreview || undefined,
-        unlabeled_texts: sourceTexts,
-        k: 2,
-        temperature: 0.7,
-        top_p: 0.95,
-        alpha: 0.33,
-        beta: 0.33,
-        gamma: 0.34,
-        max_candidates: analyze,
-        top_n: target,
-        candidate_strategy: "few_shot_extractor",
-        n_clusters: analyze,
-        outlier_percentile: null,
-      });
-      setData(res);
-      const rid = String(ruleId ?? "").trim();
       if (rid) {
-        try {
-          const saved = await saveFewShotAssistRun(rid, res as Record<string, unknown>);
-          if (saved?.id) setDataSourceRunId(String(saved.id));
-          setRunsError(null);
-          await refreshSavedRuns();
-        } catch (persistErr: any) {
-          setRunsError(persistErr?.message ?? String(persistErr));
-        }
+        const start = await startFewShotAssistJob({ ...payloadBase, rule_id: rid });
+        localStorage.setItem(fewShotJobStorageKey(rid), start.job_id);
+        setFewShotAnchorMs(Date.parse(start.created_at));
+        const res = await pollFewShotJobUntilDone(start.job_id, () => false);
+        await persistFewShotResult(res);
+        localStorage.removeItem(fewShotJobStorageKey(rid));
+      } else {
+        const res = await runFewShotAssistWithProgress(payloadBase, (ev) => {
+          const e = String(ev.event ?? "");
+          if (e === "phase") {
+            const msg = typeof ev.message === "string" ? ev.message.trim() : "";
+            if (msg) setFewShotPhaseHint(msg);
+            if (ev.phase === "evaluating") {
+              const t = ev.llm_calls_total;
+              if (typeof t === "number" && t > 0) {
+                setFewShotProgress({ done: 0, total: t });
+              }
+            }
+            return;
+          }
+          if (e === "progress") {
+            const d = ev.llm_calls_done;
+            const t = ev.llm_calls_total;
+            if (typeof d === "number" && typeof t === "number" && t > 0) {
+              setFewShotProgress({ done: d, total: t });
+            }
+            const msg = typeof ev.message === "string" ? ev.message.trim() : "";
+            if (msg) setFewShotPhaseHint(msg);
+          }
+        });
+        await persistFewShotResult(res);
       }
     } catch (e: any) {
       setError(e?.message ?? String(e));
+      if (rid) localStorage.removeItem(fewShotJobStorageKey(rid));
     } finally {
       setBusy(false);
+      setFewShotProgress(null);
+      setFewShotPhaseHint("");
+      setFewShotAnchorMs(null);
     }
   }
 
@@ -299,7 +465,19 @@ export default function FewShotPromptAssistant({
 
       {!hideToolbarButton ? (
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-          <button type="button" className="btn-secondary" disabled={disabled || busy} onClick={() => setExpanded(!expanded)}>
+          <button
+            type="button"
+            className="btn-secondary"
+            disabled={disabled || busy || (!expanded && !hasRunningLlm)}
+            title={!expanded && !hasRunningLlm ? "Сначала запустите хотя бы одну языковую модель в разделе администрирования моделей." : undefined}
+            onClick={() => {
+              if (!expanded && !hasRunningLlm) {
+                setError("Запустите хотя бы одну языковую модель в разделе администрирования моделей, затем откройте этот блок.");
+                return;
+              }
+              setExpanded(!expanded);
+            }}
+          >
             {expanded ? "Скрыть блок генерации few-shot" : "Сгенерировать few-shot примеры"}
           </button>
         </div>
@@ -307,6 +485,11 @@ export default function FewShotPromptAssistant({
 
       {expanded ? (
         <div style={{ marginTop: 12, display: "grid", gap: 10 }}>
+          {!hasRunningLlm ? (
+            <p style={{ color: "#b45309", fontSize: 14, margin: 0 }}>
+              Нет запущенных языковых моделей. Запустите хотя бы одну LLM в администрировании моделей — без этого поиск few-shot недоступен.
+            </p>
+          ) : null}
           {selectedModels.length === 0 ? (
             <p style={{ color: "#b45309", fontSize: 14, margin: 0 }}>Отметьте модели в конфигурации, чтобы запустить оценку.</p>
           ) : (
@@ -332,10 +515,16 @@ export default function FewShotPromptAssistant({
             <input
               type="file"
               accept=".txt,.csv,.xls,.xlsx"
-              disabled={disabled || busy}
+              disabled={disabled || busy || !hasRunningLlm}
+              title={!hasRunningLlm ? "Сначала запустите хотя бы одну языковую модель на сервере." : undefined}
               onChange={(e) => {
                 const file = e.target.files?.[0];
                 if (!file) return;
+                if (!hasRunningLlm) {
+                  setError("Запустите хотя бы одну языковую модель в разделе администрирования моделей, затем загрузите файл.");
+                  e.target.value = "";
+                  return;
+                }
                 void (async () => {
                   try {
                     setError(null);
@@ -364,8 +553,13 @@ export default function FewShotPromptAssistant({
               <button
                 type="button"
                 className="btn-secondary"
-                disabled={disabled || busy}
+                disabled={disabled || busy || !hasRunningLlm}
+                title={!hasRunningLlm ? "Сначала запустите хотя бы одну языковую модель на сервере." : undefined}
                 onClick={() => {
+                  if (!hasRunningLlm) {
+                    setError("Запустите хотя бы одну языковую модель в разделе администрирования моделей, затем откройте предпросмотр.");
+                    return;
+                  }
                   setFewShotColumnDraft(table.columns[activeColumnIndex] ?? table.columns[0] ?? "");
                   setTablePreviewOpen(true);
                 }}
@@ -412,8 +606,9 @@ export default function FewShotPromptAssistant({
 
           {table.rows.length > 0 ? (
             <span style={{ fontSize: 12, color: "#64748b" }}>
-              В файле строк данных: {table.rows.length}. В выбранном диапазоне непустых текстов: {sourceTexts.length}. Для
-              кластеризации будет отобрано до {Math.min(analyzeCount, sourceTexts.length || 0)}.
+              В файле строк данных: {table.rows.length}. В выбранном диапазоне непустых текстов: {sourceTexts.length}. В
+              расчёт берётся случайная выборка не более чем из {Math.min(analyzeCount, sourceTexts.length || 0)} строк (не вся
+              колонка целиком).
             </span>
           ) : null}
 
@@ -456,8 +651,17 @@ export default function FewShotPromptAssistant({
                         type="number"
                         min={1}
                         max={Math.max(1, table.rows.length)}
-                        value={fewShotRowStart}
-                        onChange={(e) => setFewShotRowStart(Number(e.target.value) || 1)}
+                        value={fewShotRowStart === "" ? "" : fewShotRowStart}
+                        onChange={(e) => {
+                          const v = e.target.value;
+                          if (v === "") {
+                            setFewShotRowStart("");
+                            return;
+                          }
+                          const n = Number(v);
+                          if (!Number.isNaN(n)) setFewShotRowStart(n);
+                        }}
+                        onBlur={() => setFewShotRowStart((prev) => finalizeRowInput(prev, table.rows.length))}
                         disabled={disabled || busy || table.rows.length === 0}
                         style={{ width: 96, padding: "6px 8px", borderRadius: 8, border: "1px solid #cbd5e1" }}
                       />
@@ -468,8 +672,17 @@ export default function FewShotPromptAssistant({
                         type="number"
                         min={1}
                         max={Math.max(1, table.rows.length)}
-                        value={fewShotRowEnd}
-                        onChange={(e) => setFewShotRowEnd(Number(e.target.value) || 1)}
+                        value={fewShotRowEnd === "" ? "" : fewShotRowEnd}
+                        onChange={(e) => {
+                          const v = e.target.value;
+                          if (v === "") {
+                            setFewShotRowEnd("");
+                            return;
+                          }
+                          const n = Number(v);
+                          if (!Number.isNaN(n)) setFewShotRowEnd(n);
+                        }}
+                        onBlur={() => setFewShotRowEnd((prev) => finalizeRowInput(prev, table.rows.length))}
                         disabled={disabled || busy || table.rows.length === 0}
                         style={{ width: 96, padding: "6px 8px", borderRadius: 8, border: "1px solid #cbd5e1" }}
                       />
@@ -534,8 +747,8 @@ export default function FewShotPromptAssistant({
             </button>
             {sourceTexts.length > 0 ? (
               <span style={{ fontSize: 12, color: "#64748b" }}>
-                Диапазон строк {fewShotRowRange.start}–{fewShotRowRange.end}: {sourceTexts.length} непустых текстов, в кластеризацию до{" "}
-                {Math.min(analyzeCount, sourceTexts.length)}.
+                Диапазон {fewShotRowRange.start}–{fewShotRowRange.end}: {sourceTexts.length} непустых; в кластеризацию — случайная
+                выборка до {Math.min(analyzeCount, sourceTexts.length)} строк.
               </span>
             ) : null}
           </div>
@@ -556,7 +769,7 @@ export default function FewShotPromptAssistant({
             <p style={{ fontSize: 13, color: "#64748b", margin: 0 }}>Загрузка истории…</p>
           ) : savedRuns.length === 0 ? (
             <p style={{ fontSize: 13, color: "#64748b", margin: 0 }}>
-              Пока нет сохранённых прогонов для этого справочника. После успешного поиска примеров результат будет записан в БД.
+              Пока нет сохранённых прогонов для этого справочника. После успешного поиска примеров результат появится в этом списке.
             </p>
           ) : (
             <ul style={{ margin: 0, paddingLeft: 18, display: "grid", gap: 8 }}>
@@ -615,6 +828,20 @@ export default function FewShotPromptAssistant({
             <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
               <button
                 type="button"
+                className="btn-secondary"
+                style={{ fontSize: 12, padding: "6px 10px" }}
+                disabled={!data || resultsArr.length === 0}
+                title="Сохранить метаданные прогона и все строки таблицы (текст, метрики, JSON, варианты ответов модели) в файл Excel"
+                onClick={() => {
+                  const rid = String(ruleId ?? "").trim();
+                  const base = rid ? `few-shot-${rid.slice(0, 8)}` : "few-shot";
+                  downloadFewShotResultsXlsx(data as Record<string, unknown>, base);
+                }}
+              >
+                Сохранить в XLSX (полный результат)
+              </button>
+              <button
+                type="button"
                 className="btn"
                 style={{ fontSize: 12, padding: "6px 10px" }}
                 disabled={selectedResultIndices.size === 0}
@@ -660,9 +887,18 @@ export default function FewShotPromptAssistant({
                   {typeof row.cluster === "number" ? ` · cluster=${row.cluster}` : ""}
                   {row.is_outlier ? ` · outlier (score=${Number(row.outlier_score).toFixed(4)})` : ""}
                 </div>
-                <div style={{ fontSize: 13, color: "#0f172a", marginBottom: 8, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
-                  {String(row.text ?? "").slice(0, 1200)}
-                  {String(row.text ?? "").length > 1200 ? "…" : ""}
+                <div
+                  style={{
+                    fontSize: 13,
+                    color: "#0f172a",
+                    marginBottom: 8,
+                    whiteSpace: "pre-wrap",
+                    wordBreak: "break-word",
+                    maxHeight: "min(55vh, 420px)",
+                    overflow: "auto",
+                  }}
+                >
+                  {String(row.text ?? "")}
                 </div>
                 <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
                   <button
@@ -685,85 +921,108 @@ export default function FewShotPromptAssistant({
     </>
   );
 
+  const fewShotBarDetail = String(ruleId ?? "").trim()
+    ? "Кластеризация и опрос LLM. Задача привязана к этому справочнику — можно обновить страницу: статус и таймер подтянутся с сервера, пока расчёт не завершён."
+    : "Сначала кластеризация кандидатов, затем несколько вызовов LLM на каждый текст; при большом числе строк это может занять несколько минут.";
+
+  const fewShotStatusBar = (
+    <LongOperationStatusBar
+      visible={busy}
+      title="Поиск few-shot примеров"
+      phaseHint={fewShotPhaseHint || null}
+      detail={fewShotBarDetail}
+      elapsedSec={elapsedFewShot}
+      progress={fewShotProgress}
+      progressLabel="Вызовы к модели"
+    />
+  );
+
   if (hideToolbarButton) {
-    if (!expanded) return null;
+    if (!expanded) {
+      return busy ? <>{fewShotStatusBar}</> : null;
+    }
     return (
-      <div
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="fewshot-main-dialog-title"
-        style={{
-          position: "fixed",
-          inset: 0,
-          background: "rgba(15, 23, 42, 0.45)",
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          zIndex: 999,
-          padding: 16,
-        }}
-        onClick={() => setExpanded(false)}
-      >
+      <>
         <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="fewshot-main-dialog-title"
           style={{
-            width: "min(1320px, 96vw)",
-            maxHeight: "92vh",
+            position: "fixed",
+            inset: 0,
+            background: "rgba(15, 23, 42, 0.45)",
             display: "flex",
-            flexDirection: "column",
-            overflow: "hidden",
-            borderRadius: 12,
-            border: "1px solid #c7d2fe",
-            background: "linear-gradient(180deg, #f8fafc 0%, #ffffff 100%)",
-            boxShadow: "0 12px 40px rgba(15, 23, 42, 0.12)",
+            alignItems: "center",
+            justifyContent: "center",
+            zIndex: 999,
+            padding: 16,
+            paddingBottom: busy ? 88 : 16,
           }}
-          onClick={(e) => e.stopPropagation()}
         >
           <div
             style={{
-              flexShrink: 0,
+              width: "min(1320px, 96vw)",
+              maxHeight: "92vh",
               display: "flex",
-              justifyContent: "space-between",
-              alignItems: "center",
-              gap: 10,
-              padding: "12px 14px",
-              borderBottom: "1px solid #e2e8f0",
+              flexDirection: "column",
+              overflow: "hidden",
+              borderRadius: 12,
+              border: "1px solid #c7d2fe",
+              background: "linear-gradient(180deg, #f8fafc 0%, #ffffff 100%)",
+              boxShadow: "0 12px 40px rgba(15, 23, 42, 0.12)",
             }}
+            onClick={(e) => e.stopPropagation()}
           >
-            <div id="fewshot-main-dialog-title" style={{ fontWeight: 700, color: "#1e3a8a" }}>
-              Генератор few-shot примеров
+            <div
+              style={{
+                flexShrink: 0,
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+                gap: 10,
+                padding: "12px 14px",
+                borderBottom: "1px solid #e2e8f0",
+              }}
+            >
+              <div id="fewshot-main-dialog-title" style={{ fontWeight: 700, color: "#1e3a8a" }}>
+                Генератор few-shot примеров
+              </div>
+              <ModalCloseButton onClick={() => setExpanded(false)} />
             </div>
-            <button type="button" className="btn-secondary" onClick={() => setExpanded(false)}>
-              Закрыть
-            </button>
-          </div>
-          <div
-            style={{
-              flex: 1,
-              minHeight: 0,
-              maxHeight: "calc(92vh - 56px)",
-              overflow: "auto",
-              WebkitOverflowScrolling: "touch",
-              padding: 14,
-            }}
-          >
-            {content}
+            <div
+              style={{
+                flex: 1,
+                minHeight: 0,
+                maxHeight: "calc(92vh - 56px)",
+                overflow: "auto",
+                WebkitOverflowScrolling: "touch",
+                padding: 14,
+              }}
+            >
+              {content}
+            </div>
           </div>
         </div>
-      </div>
+        {fewShotStatusBar}
+      </>
     );
   }
 
   return (
-    <div
-      className="card"
-      style={{
-        marginTop: 20,
-        marginBottom: 8,
-        border: "1px solid #c7d2fe",
-        background: "linear-gradient(180deg, #f8fafc 0%, #ffffff 100%)",
-      }}
-    >
-      {content}
-    </div>
+    <>
+      <div
+        className="card"
+        style={{
+          marginTop: 20,
+          marginBottom: 8,
+          border: "1px solid #c7d2fe",
+          background: "linear-gradient(180deg, #f8fafc 0%, #ffffff 100%)",
+          paddingBottom: busy ? 72 : undefined,
+        }}
+      >
+        {content}
+      </div>
+      {fewShotStatusBar}
+    </>
   );
 }

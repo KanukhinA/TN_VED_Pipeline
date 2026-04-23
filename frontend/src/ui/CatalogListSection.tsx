@@ -3,6 +3,8 @@ import React from "react";
 
 export interface CatalogListSectionProps {
   catalogs: any[];
+  /** Соответствие кода группы ТН ВЭД → rule_id основного справочника (как на сервере). */
+  primaryByGroup?: Record<string, string> | null;
   catalogQuery: string;
   onCatalogQueryChange: (q: string) => void;
   includeArchived: boolean;
@@ -20,6 +22,7 @@ export interface CatalogListSectionProps {
 export default function CatalogListSection(props: CatalogListSectionProps) {
   const {
     catalogs,
+    primaryByGroup,
     catalogQuery,
     onCatalogQueryChange,
     includeArchived,
@@ -66,71 +69,165 @@ export default function CatalogListSection(props: CatalogListSectionProps) {
       {catalogs.length === 0 ? (
         <div>Справочников не найдено.</div>
       ) : (
-        catalogs.map((c) => (
-          <div
-            key={c.rule_id}
-            style={{
-              border: "1px solid #e5e7eb",
-              borderRadius: 8,
-              padding: 10,
-              marginBottom: 8,
-              opacity: c.is_archived ? 0.85 : 1,
-              background: c.is_archived ? "#f8fafc" : undefined,
-            }}
-          >
-            <div>
-              {c.tn_ved_group_code ? (
-                <span
-                  title="Группа ТН ВЭД ЕАЭС"
+        <div
+          style={{
+            maxHeight: "min(52vh, 480px)",
+            overflow: "auto",
+            borderRadius: 8,
+            border: "1px solid #e5e7eb",
+            background: "#fafafa",
+          }}
+        >
+          {catalogs.map((c, rowIdx) => {
+            const groupCode = String(c.tn_ved_group_code ?? "").trim();
+            const primaryId =
+              groupCode && primaryByGroup ? String(primaryByGroup[groupCode] ?? "").trim() : "";
+            const ruleIdStr = String(c.rule_id ?? "").trim().toLowerCase();
+            const isPrimaryForCategory = Boolean(
+              groupCode && primaryId && ruleIdStr && primaryId.toLowerCase() === ruleIdStr,
+            );
+
+            return (
+              <div
+                key={c.rule_id}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  gap: 10,
+                  flexWrap: "nowrap",
+                  padding: "8px 10px",
+                  borderBottom: rowIdx < catalogs.length - 1 ? "1px solid #e5e7eb" : undefined,
+                  opacity: c.is_archived ? 0.85 : 1,
+                  background: c.is_archived ? "#f1f5f9" : "#fff",
+                  minHeight: 44,
+                  boxSizing: "border-box",
+                }}
+              >
+                <div
                   style={{
-                    display: "inline-block",
-                    marginRight: 8,
-                    padding: "2px 8px",
-                    borderRadius: 6,
-                    background: "#e0f2fe",
-                    color: "#0369a1",
-                    fontWeight: 600,
-                    fontSize: 13,
+                    flex: "1 1 0",
+                    minWidth: 0,
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 8,
+                    overflow: "hidden",
                   }}
                 >
-                  ТН ВЭД {c.tn_ved_group_code}
-                </span>
-              ) : null}
-              <strong>{c.name || "(без названия)"}</strong>
-              {" · "}
-              <code>{c.model_id}</code>
-              {" · "}v{c.version}
-              {c.is_archived ? (
-                <span style={{ marginLeft: 8, fontSize: 12, color: "#64748b" }}>в архиве</span>
-              ) : null}
-            </div>
-            <div style={{ display: "flex", gap: 8, marginTop: 6, flexWrap: "wrap", alignItems: "center", width: "100%" }}>
-              <button type="button" className="btn-secondary" disabled={busy} onClick={() => void onOpenPrimary(c.rule_id)}>
-                {openPrimaryLabel}
-              </button>
-              <button type="button" className="btn-secondary" disabled={busy} onClick={() => void onClone(c.rule_id)}>
-                Клонировать
-              </button>
-              {c.is_archived ? (
-                <button type="button" className="btn-secondary" disabled={busy} onClick={() => void onUnarchive(c.rule_id)}>
-                  Из архива
-                </button>
-              ) : (
-                <button type="button" className="btn-secondary" disabled={busy} onClick={() => void onArchive(c.rule_id)}>
-                  В архив
-                </button>
-              )}
-              <button
-                type="button"
-                className="btn-danger btn-align-end"
-                disabled={busy}
-                onClick={() => void onDelete(c.rule_id)}
-              >
-                Удалить
-              </button>
-            </div>
-          </div>
-        ))
+                  {c.tn_ved_group_code ? (
+                    <span
+                      title="Группа ТН ВЭД ЕАЭС"
+                      style={{
+                        flexShrink: 0,
+                        padding: "2px 8px",
+                        borderRadius: 6,
+                        background: "#e0f2fe",
+                        color: "#0369a1",
+                        fontWeight: 600,
+                        fontSize: 12,
+                        whiteSpace: "nowrap",
+                      }}
+                    >
+                      ТН ВЭД {c.tn_ved_group_code}
+                    </span>
+                  ) : null}
+                  {isPrimaryForCategory ? (
+                    <span
+                      title="Этот справочник задан как основной для данной категории (группы ТН ВЭД). Сменить выбор: раздел «Извлечение признаков» → «Другие настройки сервисов» → блок «Основной справочник по категории ТН ВЭД»."
+                      style={{
+                        flexShrink: 0,
+                        padding: "2px 8px",
+                        borderRadius: 6,
+                        background: "#ecfdf5",
+                        color: "#047857",
+                        fontWeight: 600,
+                        fontSize: 12,
+                        whiteSpace: "nowrap",
+                      }}
+                    >
+                      Основной
+                    </span>
+                  ) : null}
+                  <span
+                    style={{
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
+                      minWidth: 0,
+                      fontSize: 14,
+                      color: "#0f172a",
+                    }}
+                  >
+                    <strong>{c.name || "(без названия)"}</strong>
+                    <span style={{ color: "#64748b", fontWeight: 400 }}>
+                      {" "}
+                      · <code style={{ fontSize: 13 }}>{c.model_id}</code> · v{c.version}
+                      {c.is_archived ? <span style={{ fontSize: 12 }}> · в архиве</span> : null}
+                    </span>
+                  </span>
+                </div>
+                <div
+                  style={{
+                    display: "flex",
+                    flexShrink: 0,
+                    alignItems: "center",
+                    gap: 6,
+                    flexWrap: "nowrap",
+                  }}
+                >
+                  <button
+                    type="button"
+                    className="btn-secondary"
+                    disabled={busy}
+                    style={{ padding: "4px 10px", fontSize: 13, whiteSpace: "nowrap" }}
+                    onClick={() => void onOpenPrimary(c.rule_id)}
+                  >
+                    {openPrimaryLabel}
+                  </button>
+                  <button
+                    type="button"
+                    className="btn-secondary"
+                    disabled={busy}
+                    style={{ padding: "4px 10px", fontSize: 13, whiteSpace: "nowrap" }}
+                    onClick={() => void onClone(c.rule_id)}
+                  >
+                    Клонировать
+                  </button>
+                  {c.is_archived ? (
+                    <button
+                      type="button"
+                      className="btn-secondary"
+                      disabled={busy}
+                      style={{ padding: "4px 10px", fontSize: 13, whiteSpace: "nowrap" }}
+                      onClick={() => void onUnarchive(c.rule_id)}
+                    >
+                      Из архива
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      className="btn-secondary"
+                      disabled={busy}
+                      style={{ padding: "4px 10px", fontSize: 13, whiteSpace: "nowrap" }}
+                      onClick={() => void onArchive(c.rule_id)}
+                    >
+                      В архив
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    className="btn-danger"
+                    disabled={busy}
+                    style={{ padding: "4px 10px", fontSize: 13, whiteSpace: "nowrap" }}
+                    onClick={() => void onDelete(c.rule_id)}
+                  >
+                    Удалить
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
       )}
     </div>
   );

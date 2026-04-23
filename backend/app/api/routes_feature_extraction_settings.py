@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import json
+import os
 import uuid
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -16,120 +19,6 @@ router = APIRouter(prefix="/api/feature-extraction", tags=["feature-extraction-s
 
 SETTINGS_KEY = "feature_extraction_model_settings_v1"
 
-DEFAULT_MODEL_SETTINGS: Dict[str, Any] = {
-    "models": {
-        "gemma2:2b-instruct-q4_K_M": {
-            "num_ctx": 8192,
-            "max_new_tokens": 3904,
-            "repetition_penalty": 1.0,
-            "max_length": 4096,
-            "enable_thinking": False,
-            "temperature": 0.0,
-        },
-        "qwen2.5:3b-instruct-q4_K_M": {
-            "num_ctx": 8192,
-            "max_new_tokens": 3904,
-            "repetition_penalty": 1.0,
-            "max_length": 4096,
-            "enable_thinking": False,
-            "temperature": 0.0,
-        },
-        "qwen3:4b-q4_K_M": {
-            "num_ctx": 8192,
-            "max_new_tokens": 3904,
-            "repetition_penalty": 1.0,
-            "max_length": 4096,
-            "enable_thinking": False,
-            "temperature": 0.0,
-        },
-        "qwen3:8b-q4_K_M": {
-            "num_ctx": 8192,
-            "max_new_tokens": 3904,
-            "repetition_penalty": 1.0,
-            "max_length": 4096,
-            "enable_thinking": False,
-            "temperature": 0.0,
-        },
-        "qwen3:14b-q4_K_M": {
-            "num_ctx": 8192,
-            "max_new_tokens": 3904,
-            "repetition_penalty": 1.0,
-            "max_length": 4096,
-            "enable_thinking": False,
-            "temperature": 0.0,
-        },
-        "gemma3:4b-it-q4_K_M": {
-            "num_ctx": 8192,
-            "max_new_tokens": 3904,
-            "repetition_penalty": 1.0,
-            "max_length": 4096,
-            "enable_thinking": False,
-            "temperature": 0.0,
-        },
-        "codegemma:7b-instruct-q4_K_M": {
-            "num_ctx": 8192,
-            "max_new_tokens": 3904,
-            "repetition_penalty": 1.0,
-            "max_length": 4096,
-            "enable_thinking": False,
-            "temperature": 0.0,
-        },
-        "gemma3:12b-it-q4_K_M": {
-            "num_ctx": 8192,
-            "max_new_tokens": 3904,
-            "repetition_penalty": 1.0,
-            "max_length": 4096,
-            "enable_thinking": False,
-            "temperature": 0.0,
-        },
-        "ministral-3:8b-instruct-2512-q4_K_M": {
-            "num_ctx": 8192,
-            "max_new_tokens": 3904,
-            "repetition_penalty": 1.0,
-            "max_length": 4096,
-            "enable_thinking": False,
-            "temperature": 0.0,
-        },
-        "ministral-3:14b-instruct-2512-q4_K_M": {
-            "num_ctx": 8192,
-            "max_new_tokens": 3904,
-            "repetition_penalty": 1.0,
-            "max_length": 4096,
-            "enable_thinking": False,
-            "temperature": 0.0,
-        },
-        "ministral-3:3b-instruct-2512-q4_K_M": {
-            "num_ctx": 8192,
-            "max_new_tokens": 3904,
-            "repetition_penalty": 1.0,
-            "max_length": 4096,
-            "enable_thinking": False,
-            "temperature": 0.0,
-        },
-        "forzer/GigaChat3-10B-A1.8B": {
-            "num_ctx": 8192,
-            "max_new_tokens": 3904,
-            "repetition_penalty": 1.0,
-            "max_length": 4096,
-            "enable_thinking": False,
-            "temperature": 0.0,
-        },
-        "gigachat-20b-a3b-instruct-v1.5:q4_K_M": {
-            "num_ctx": 8192,
-            "max_new_tokens": 3904,
-            "repetition_penalty": 1.0,
-            "max_length": 4096,
-            "enable_thinking": False,
-            "temperature": 0.0,
-        },
-    },
-}
-
-
-class ModelRuntimeSettingsPayload(BaseModel):
-    models: dict[str, dict[str, Any]] = Field(default_factory=dict)
-    model_config = ConfigDict(extra="ignore")
-
 
 def _normalize_settings(payload: Dict[str, Any]) -> Dict[str, Any]:
     models = payload.get("models")
@@ -138,11 +27,35 @@ def _normalize_settings(payload: Dict[str, Any]) -> Dict[str, Any]:
     return {"models": models}
 
 
+def _defaults_file_path() -> Path:
+    raw = (os.getenv("FEATURE_EXTRACTION_MODEL_DEFAULTS_PATH") or "").strip()
+    if raw:
+        return Path(raw)
+    return Path(__file__).resolve().parents[3] / "config" / "llm_models.json"
+
+
+def file_default_model_settings() -> Dict[str, Any]:
+    """Справочник моделей по умолчанию (без записи в БД). Источник: config/llm_models.json."""
+    p = _defaults_file_path()
+    if not p.is_file():
+        return {"models": {}}
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return {"models": {}}
+    return _normalize_settings(data if isinstance(data, dict) else {})
+
+
+class ModelRuntimeSettingsPayload(BaseModel):
+    models: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    model_config = ConfigDict(extra="ignore")
+
+
 @router.get("/model-settings")
 def get_feature_extraction_model_settings(db: Session = Depends(get_db_session)) -> Dict[str, Any]:
     row: AppSetting | None = db.query(AppSetting).filter(AppSetting.key == SETTINGS_KEY).one_or_none()
     if not row:
-        return dict(DEFAULT_MODEL_SETTINGS)
+        return file_default_model_settings()
     return _normalize_settings(row.value_json)
 
 

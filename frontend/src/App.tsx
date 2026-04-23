@@ -5,6 +5,7 @@ import OfficerValidationPage from "./pages/OfficerValidationPage";
 
 /** Ленивая загрузка: страница тянет xlsx и тяжёлые зависимости — не должна ломать /catalog при старте. */
 const FeatureExtractionSettingsPage = lazy(() => import("./pages/FeatureExtractionSettingsPage"));
+const ExpertDecisionsPage = lazy(() => import("./pages/ExpertDecisionsPage"));
 
 const expertNavTextBtnBase: React.CSSProperties = {
   margin: 0,
@@ -24,9 +25,20 @@ const expertNavTextBtnBase: React.CSSProperties = {
 function ExpertTabs({ basePath }: { basePath: "" | "/expert" }) {
   const navigate = useNavigate();
   const location = useLocation();
-  const expertPage = location.pathname.includes("feature-extraction") ? "feature-extraction" : "catalog";
-  const catalogPath = `${basePath}/catalog` || "/catalog";
-  const featurePath = `${basePath}/feature-extraction` || "/feature-extraction";
+  const catalogPath = basePath ? `${basePath}/catalog` : "/catalog";
+  const featurePath = basePath ? `${basePath}/feature-extraction` : "/feature-extraction";
+  const decisionsPath = basePath ? `${basePath}/decisions` : "/decisions";
+
+  const p = location.pathname;
+  const onFeatureExtraction =
+    p === featurePath || p.startsWith(`${featurePath}/`);
+  const onDecisions = p === decisionsPath || p.startsWith(`${decisionsPath}/`);
+  let expertPage: "catalog" | "feature-extraction" | "decisions" = "catalog";
+  if (onFeatureExtraction) {
+    expertPage = "feature-extraction";
+  } else if (onDecisions) {
+    expertPage = "decisions";
+  }
 
   return (
     <div className="expert-shell">
@@ -55,12 +67,28 @@ function ExpertTabs({ basePath }: { basePath: "" | "/expert" }) {
         >
           Настройки сервисов
         </button>
+        <button
+          type="button"
+          style={{
+            ...expertNavTextBtnBase,
+            color: expertPage === "decisions" ? "#0f172a" : "#64748b",
+            fontWeight: expertPage === "decisions" ? 600 : 400,
+            borderBottomColor: expertPage === "decisions" ? "#2563eb" : "transparent",
+          }}
+          onClick={() => navigate(decisionsPath)}
+        >
+          Решение спорных ситуаций
+        </button>
       </div>
       {expertPage === "catalog" ? (
         <CatalogUnifiedWizard />
-      ) : (
+      ) : expertPage === "feature-extraction" ? (
         <Suspense fallback={<div style={{ padding: 16, color: "#64748b" }}>Загрузка настроек извлечения…</div>}>
           <FeatureExtractionSettingsPage />
+        </Suspense>
+      ) : (
+        <Suspense fallback={<div style={{ padding: 16, color: "#64748b" }}>Загрузка очереди решений…</div>}>
+          <ExpertDecisionsPage />
         </Suspense>
       )}
     </div>

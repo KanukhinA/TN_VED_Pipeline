@@ -8,6 +8,7 @@ from fastapi import FastAPI
 from pydantic import BaseModel, Field
 
 from app.ollama_client import OLLAMA_BASE_URL, ollama_generate_simple, ollama_list_models
+from shared.llm_runtime.config import is_vllm
 
 app = FastAPI(title="LLM naming", version="0.3.0")
 
@@ -108,7 +109,7 @@ def suggest_class_name(payload: SuggestRequest) -> dict[str, Any]:
             token = _normalize_class_token(raw)
             return {
                 "suggested_class_name": token,
-                "mode": "ollama",
+                "mode": "vllm" if is_vllm() else "ollama",
                 "model": model_name,
                 "ollama_base_url": OLLAMA_BASE_URL,
                 "requires_expert_confirmation": True,

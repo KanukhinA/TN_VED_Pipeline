@@ -149,7 +149,7 @@ export async function listReferenceExamples(ruleId: string): Promise<{ examples:
 
 export async function bulkSaveReferenceExamples(
   ruleId: string,
-  items: { description_text: string; data: unknown }[],
+  items: { description_text: string; data: unknown; assigned_class_id?: string | null }[],
 ): Promise<{ inserted: number; skipped: any[] }> {
   const res = await fetchWithRetry(`${API_BASE}/rules/${encodeURIComponent(ruleId)}/reference-examples/bulk`, {
     method: "POST",
@@ -227,6 +227,8 @@ export type OfficerValidationPayload = {
   graph35: number;
   graph38: number;
   graph42: number;
+  /** Один и тот же id для повторных проверок с корректировкой признаков и записей в БД. */
+  declaration_id?: string | null;
   /** Если задан — сервер пропускает вызов модели извлечения и использует этот JSON. */
   extracted_features_override?: Record<string, unknown> | null;
 };
@@ -236,7 +238,10 @@ export async function validateDeclarationByOfficer(
   options?: { signal?: AbortSignal },
 ): Promise<any> {
   const body: Record<string, unknown> = {
-    declaration_id: `OFFICER-${Date.now()}`,
+    declaration_id:
+      payload.declaration_id != null && String(payload.declaration_id).trim() !== ""
+        ? String(payload.declaration_id).trim()
+        : `OFFICER-${Date.now()}`,
     description: payload.graph31,
     tnved_code: payload.graph33,
     gross_weight_kg: payload.graph35,
@@ -257,6 +262,109 @@ export async function validateDeclarationByOfficer(
     throw new Error(json?.detail ?? "Не удалось запустить проверку декларации");
   }
   return json;
+}
+
+export async function preflightOfficerValidation(): Promise<{
+  status: "ok" | "degraded";
+  dependencies: Record<string, string>;
+  down_dependencies: string[];
+}> {
+  const res = await fetchWithRetry(`${API_BASE}/validate/preflight`, { method: "GET" });
+  const json = await parseJsonSafe(res);
+  if (!res.ok) {
+    throw new Error(formatFastApiDetail(json?.detail) ?? "Не удалось проверить готовность сервисов");
+  }
+  const depsRaw = json?.dependencies;
+  const deps: Record<string, string> =
+    depsRaw && typeof depsRaw === "object" && !Array.isArray(depsRaw)
+      ? Object.fromEntries(Object.entries(depsRaw).map(([k, v]) => [String(k), String(v)]))
+      : {};
+  const down = Array.isArray(json?.down_dependencies) ? json.down_dependencies.map((x: unknown) => String(x)) : [];
+  return {
+    status: json?.status === "ok" ? "ok" : "degraded",
+    dependencies: deps,
+    down_dependencies: down,
+  };
+}
+
+export type OfficerValidationProgressEvent =
+  | { event: "phase"; code?: string; title?: string; detail?: string }
+  | { event: "partial"; step?: string; result?: any }
+  | { event: "complete"; result: any }
+  | { event: "error"; status_code?: number; message?: string };
+
+export async function validateDeclarationByOfficerWithProgress(
+  payload: OfficerValidationPayload,
+  onProgress?: (ev: OfficerValidationProgressEvent) => void,
+  options?: { signal?: AbortSignal },
+): Promise<any> {
+  const body: Record<string, unknown> = {
+    declaration_id:
+      payload.declaration_id != null && String(payload.declaration_id).trim() !== ""
+        ? String(payload.declaration_id).trim()
+        : `OFFICER-${Date.now()}`,
+    description: payload.graph31,
+    tnved_code: payload.graph33,
+    gross_weight_kg: payload.graph35,
+    net_weight_kg: payload.graph38,
+    price: payload.graph42,
+  };
+  if (payload.extracted_features_override != null) {
+    body.extracted_features_override = payload.extracted_features_override;
+  }
+  const res = await fetch(`${API_BASE}/validate/stream`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    signal: options?.signal,
+  });
+  if (!res.ok) {
+    const t = await res.text();
+    throw new Error(t.slice(0, 1200) || `HTTP ${res.status}`);
+  }
+  const reader = res.body?.getReader();
+  if (!reader) throw new Error("Нет тела ответа (stream validate)");
+  const dec = new TextDecoder();
+  let buf = "";
+  let finalResult: unknown = null;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, { stream: true });
+    const lines = buf.split("\n");
+    buf = lines.pop() ?? "";
+    for (const line of lines) {
+      const s = line.trim();
+      if (!s) continue;
+      let j: Record<string, unknown>;
+      try {
+        j = JSON.parse(s) as Record<string, unknown>;
+      } catch {
+        continue;
+      }
+      onProgress?.(j as OfficerValidationProgressEvent);
+      if (j.event === "complete" && "result" in j) {
+        finalResult = j.result;
+      } else if (j.event === "error") {
+        throw new Error(String(j.message ?? "Ошибка валидации (stream)"));
+      }
+    }
+  }
+  const tail = buf.trim();
+  if (tail) {
+    try {
+      const j = JSON.parse(tail) as Record<string, unknown>;
+      onProgress?.(j as OfficerValidationProgressEvent);
+      if (j.event === "complete" && "result" in j) finalResult = j.result;
+      if (j.event === "error") throw new Error(String(j.message ?? "Ошибка валидации"));
+    } catch (e) {
+      if (e instanceof Error && e.message.startsWith("Ошибка валидации")) throw e;
+    }
+  }
+  if (finalResult == null) {
+    throw new Error("Поток валидации завершён без результата");
+  }
+  return finalResult;
 }
 
 export async function getPrimaryCatalogSettings(): Promise<{ by_group_code: Record<string, string> }> {
@@ -395,16 +503,126 @@ export type FewShotAssistPayload = {
   n_clusters?: number;
   outlier_k?: number;
   outlier_percentile?: number | null;
+  /** При фоновом запуске — привязка к справочнику (восстановление после обновления страницы). */
+  rule_id?: string;
 };
 
-/** Долгий запрос: без повторов retry, одна попытка (как deploy). */
-export async function runFewShotAssist(payload: FewShotAssistPayload): Promise<any> {
-  const res = await fetch(`${API_BASE}/feature-extraction/few-shot-assist`, {
+export type FewShotAssistJobStatus = {
+  job_id: string;
+  rule_id?: string | null;
+  status: "running" | "completed" | "failed";
+  created_at: string;
+  updated_at?: string;
+  phase?: string | null;
+  message?: string | null;
+  llm_calls_done?: number;
+  llm_calls_total?: number | null;
+  result?: unknown;
+  error?: string | null;
+};
+
+const FEW_SHOT_JOB_STORAGE_PREFIX = "pipeline.few_shot_job.";
+
+export function fewShotJobStorageKey(ruleId: string): string {
+  return `${FEW_SHOT_JOB_STORAGE_PREFIX}${ruleId.trim()}`;
+}
+
+/** Старт фоновой задачи few-shot (api-gateway); при активной задаче для того же rule_id вернёт её. */
+export async function startFewShotAssistJob(
+  payload: FewShotAssistPayload,
+): Promise<{ job_id: string; rule_id: string | null; resumed: boolean; created_at: string; message?: string }> {
+  const res = await fetch(`${API_BASE}/feature-extraction/few-shot-assist/jobs`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
-  return readJsonOrThrow(res, "Не удалось выполнить оценку few-shot");
+  return readJsonOrThrow(res, "Не удалось запустить few-shot");
+}
+
+export async function getFewShotAssistJob(jobId: string): Promise<FewShotAssistJobStatus> {
+  const res = await fetch(`${API_BASE}/feature-extraction/few-shot-assist/jobs/${encodeURIComponent(jobId)}`, {
+    method: "GET",
+  });
+  return readJsonOrThrow(res, "Не удалось получить статус few-shot");
+}
+
+/** Активная running-задача для справочника (после F5). */
+export async function getFewShotAssistActiveJobForRule(ruleId: string): Promise<FewShotAssistJobStatus | null> {
+  const qs = new URLSearchParams({ rule_id: ruleId.trim() });
+  const res = await fetch(`${API_BASE}/feature-extraction/few-shot-assist/jobs/by-rule?${qs.toString()}`, {
+    method: "GET",
+  });
+  const json = await readJsonOrThrow(res, "Не удалось проверить активный few-shot");
+  const j = json?.job;
+  return j && typeof j === "object" ? (j as FewShotAssistJobStatus) : null;
+}
+
+/**
+ * Few-shot assist по NDJSON-стриму: phase / progress и финальный complete.
+ * Без callback — только итог (совместимо со старым вызовом).
+ */
+export async function runFewShotAssistWithProgress(
+  payload: FewShotAssistPayload,
+  onProgress?: (ev: Record<string, unknown>) => void,
+): Promise<any> {
+  const res = await fetch(`${API_BASE}/feature-extraction/few-shot-assist/stream`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const t = await res.text();
+    throw new Error(t.slice(0, 1200) || `HTTP ${res.status}`);
+  }
+  const reader = res.body?.getReader();
+  if (!reader) throw new Error("Нет тела ответа (stream few-shot)");
+  const dec = new TextDecoder();
+  let buf = "";
+  let finalResult: unknown = null;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, { stream: true });
+    const lines = buf.split("\n");
+    buf = lines.pop() ?? "";
+    for (const line of lines) {
+      const s = line.trim();
+      if (!s) continue;
+      let j: Record<string, unknown>;
+      try {
+        j = JSON.parse(s) as Record<string, unknown>;
+      } catch {
+        continue;
+      }
+      onProgress?.(j);
+      if (j.event === "complete" && "result" in j) {
+        finalResult = j.result;
+      }
+      if (j.event === "error") {
+        throw new Error(String(j.message ?? "Ошибка few-shot (stream)"));
+      }
+    }
+  }
+  const tail = buf.trim();
+  if (tail) {
+    try {
+      const j = JSON.parse(tail) as Record<string, unknown>;
+      onProgress?.(j);
+      if (j.event === "complete" && "result" in j) finalResult = j.result;
+      if (j.event === "error") throw new Error(String(j.message ?? "Ошибка few-shot"));
+    } catch (e) {
+      if (e instanceof Error && e.message.startsWith("Ошибка few-shot")) throw e;
+    }
+  }
+  if (finalResult === null) {
+    throw new Error("Поток few-shot завершён без результата");
+  }
+  return finalResult;
+}
+
+/** Долгий запрос: без повторов retry, одна попытка (как deploy). */
+export async function runFewShotAssist(payload: FewShotAssistPayload): Promise<any> {
+  return runFewShotAssistWithProgress(payload);
 }
 
 export async function saveFewShotAssistRun(ruleId: string, result: Record<string, unknown>): Promise<any> {
@@ -550,5 +768,109 @@ export async function fetchLlmContainerLogs(tail: number = 300): Promise<LlmCont
     throw new Error((json as { detail?: string })?.detail ?? "Не удалось получить логи контейнера с моделью");
   }
   return json;
+}
+
+export type ModelOperationHistoryEvent = {
+  ts_iso: string;
+  kind: "deploy" | "pause" | "delete" | "runtime-start" | "runtime-stop" | "runtime-error";
+  model: string;
+  ok: boolean;
+  http_status: number;
+  detail: string;
+};
+
+/** Журнал deploy/pause/delete в памяти api-gateway (до перезапуска контейнера шлюза). */
+export async function fetchFeatureExtractionModelOperationHistory(): Promise<{
+  events: ModelOperationHistoryEvent[];
+  source?: string;
+  max_entries?: number;
+}> {
+  const res = await fetchWithRetry(`${API_BASE}/feature-extraction/model-operation-history`, { method: "GET" });
+  const json = await parseJsonSafe(res);
+  if (!res.ok) {
+    throw new Error(formatFastApiDetail(json?.detail) ?? "Не удалось загрузить журнал операций с моделями");
+  }
+  const raw = json?.events;
+  const events: ModelOperationHistoryEvent[] = Array.isArray(raw)
+    ? raw
+        .filter((x: unknown) => x && typeof x === "object")
+        .map((x: any) => ({
+          ts_iso: String(x.ts_iso ?? ""),
+          kind:
+            x.kind === "pause" ||
+            x.kind === "delete" ||
+            x.kind === "runtime-start" ||
+            x.kind === "runtime-stop" ||
+            x.kind === "runtime-error"
+              ? x.kind
+              : "deploy",
+          model: String(x.model ?? ""),
+          ok: Boolean(x.ok),
+          http_status: typeof x.http_status === "number" ? x.http_status : 0,
+          detail: String(x.detail ?? ""),
+        }))
+    : [];
+  return { events, source: json?.source, max_entries: json?.max_entries };
+}
+
+export type ExpertDecisionItem = {
+  id: string;
+  category: string;
+  rule_id?: string | null;
+  declaration_id: string;
+  status: string;
+  summary_ru: string;
+  payload_json: Record<string, unknown>;
+  resolution_json?: Record<string, unknown> | null;
+  created_at: string;
+  resolved_at?: string | null;
+};
+
+export async function createExpertDecision(payload: {
+  category: string;
+  declaration_id: string;
+  summary_ru?: string;
+  payload?: Record<string, unknown>;
+  rule_id?: string | null;
+}): Promise<ExpertDecisionItem> {
+  const res = await fetchWithRetry(`${API_BASE}/expert-decisions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const json = await parseJsonSafe(res);
+  if (!res.ok) {
+    throw new Error(formatFastApiDetail(json?.detail) ?? "Не удалось сохранить запись");
+  }
+  return json as ExpertDecisionItem;
+}
+
+export async function listExpertDecisions(params?: { status?: string; category?: string }): Promise<ExpertDecisionItem[]> {
+  const sp = new URLSearchParams();
+  if (params?.status?.trim()) sp.set("status", params.status.trim());
+  if (params?.category?.trim()) sp.set("category", params.category.trim());
+  const qs = sp.toString();
+  const res = await fetchWithRetry(`${API_BASE}/expert-decisions${qs ? `?${qs}` : ""}`, { method: "GET" });
+  const json = await parseJsonSafe(res);
+  if (!res.ok) {
+    throw new Error(formatFastApiDetail(json?.detail) ?? "Не удалось загрузить очередь решений");
+  }
+  return Array.isArray(json) ? (json as ExpertDecisionItem[]) : [];
+}
+
+export async function patchExpertDecision(
+  id: string,
+  body: { status: "resolved" | "dismissed"; resolution?: Record<string, unknown> },
+): Promise<ExpertDecisionItem> {
+  const res = await fetchWithRetry(`${API_BASE}/expert-decisions/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const json = await parseJsonSafe(res);
+  if (!res.ok) {
+    throw new Error(formatFastApiDetail(json?.detail) ?? "Не удалось обновить запись");
+  }
+  return json as ExpertDecisionItem;
 }
 

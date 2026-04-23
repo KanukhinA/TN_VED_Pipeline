@@ -233,7 +233,7 @@ def test_rule_conditions_support_and_inside_group_or_between_groups():
     assert ok_other and cls_other == "other" and not err_other
 
 
-def test_exactly_one_fails_when_zero_or_many():
+def test_exactly_one_multiple_comma_join_and_zero_no_error():
     row_azot_high = RowIndicatorCondition(
         type="rowIndicator",
         array_path="показатели",
@@ -259,14 +259,24 @@ def test_exactly_one_fails_when_zero_or_many():
             ClassificationRule(class_id="y", priority=1, conditions=[row_azot_low]),
         ],
     )
-    # Два правила пересекаются: азот 15 удовлетворяет и ≥10, и ≤20
+    # Два правила пересекаются: азот 15 удовлетворяет и ≥10, и ≤20 — список class_id через запятую
     ok, cls, err = evaluate_classification({"показатели": [_row("азот", 15.0)]}, cfg)
-    assert not ok and cls is None and len(err) == 1
+    assert ok and cls == "x,y" and not err
 
-    # Нет строки «азот»; ни одно правило не выполняется
+    # Нет строки «азот»; ни одно правило не выполняется — без ошибки, класс не назначен
     ok2, cls2, err2 = evaluate_classification({"показатели": [_row("калий", 1.0)]}, cfg)
-    assert not ok2 and cls2 is None and len(err2) == 1
-    assert err2[0].details and err2[0].details.get("matched_count") == 0
+    assert ok2 and cls2 is None and not err2
+
+    cfg_with_default = ClassificationConfig(
+        strategy="exactly_one",
+        default_class_id="fallback",
+        rules=[
+            ClassificationRule(class_id="x", priority=0, conditions=[row_azot_high]),
+            ClassificationRule(class_id="y", priority=1, conditions=[row_azot_low]),
+        ],
+    )
+    ok3, cls3, err3 = evaluate_classification({"показатели": [_row("калий", 1.0)]}, cfg_with_default)
+    assert ok3 and cls3 == "fallback" and not err3
 
 
 def test_exactly_one_ambiguous_by_priority():

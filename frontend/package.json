@@ -10,13 +10,10 @@
     "build:tn-ved": "python ../scripts/build_tn_ved_tree.py"
   },
   "dependencies": {
-    "@rjsf/core": "^5.3.3",
-    "@rjsf/validator-ajv8": "^5.3.3",
-    "ajv": "^8.17.1",
+    "json5": "^2.2.3",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-router-dom": "^7.5.1",
-    "react-jsonschema-form": "^1.0.0",
     "xlsx": "^0.18.5"
   },
   "devDependencies": {

@@ -16,14 +16,7 @@
 - при проверке данных backend достает активную версию, компилирует (или берет из кеша) и выполняет проверку;
 - в ответ возвращаются `ok/errors`, нормализованные данные и `assigned_class`.
 
-## Технологический стек и фреймворки
-
-- `FastAPI` - HTTP API и OpenAPI/Swagger;
-- `Pydantic v2` - DSL-модели и runtime-валидация данных;
-- `SQLAlchemy 2` - ORM-слой и работа с БД;
-- `PostgreSQL` (в docker-compose) - основное хранилище правил и версий;
-- `Uvicorn` - ASGI-сервер;
-- `Docker / Docker Compose` - контейнерный запуск и окружение.
+## ну 
 
 Зависимости зафиксированы в `backend/requirements.docker.txt`.
 

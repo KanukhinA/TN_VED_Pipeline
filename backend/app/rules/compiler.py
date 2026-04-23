@@ -93,8 +93,9 @@ def _compile_field_type(schema: FieldSchema, *, model_name_prefix: str, counter:
             if c.pattern is not None:
                 constraints["pattern"] = c.pattern
             if c.enum is not None and len(c.enum) > 0:
-                enum_type = _make_dynamic_enum(c.enum, name_prefix=model_name_prefix)
-                return (enum_type, {})  # enum обрабатывается типом
+                # enum в DSL — подсказка для UI и нормализации регистра ( см. lowercase_enum_constrained_strings ),
+                # не жёсткий список: новые коды (вещества и т.д.) не должны ломать валидацию и классификацию.
+                return (str, constraints)
 
         return (str, constraints)
 

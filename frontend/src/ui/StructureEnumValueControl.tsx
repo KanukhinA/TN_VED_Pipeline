@@ -11,7 +11,28 @@ type Props = {
   enumLabel?: string;
 };
 
-const STRING_OPS = new Set(["equals", "notEquals", "in", "regex", "notRegex"]);
+const STRING_OPS = new Set([
+  "equals",
+  "notEquals",
+  "in",
+  "regex",
+  "notRegex",
+  "contains",
+  "notContains",
+  "startsWith",
+  "endsWith",
+  "iEquals",
+  "iContains",
+  "iStartsWith",
+  "iEndsWith",
+]);
+
+function splitTextValues(raw: string): string[] {
+  return raw
+    .split(/\r?\n|,/g)
+    .map((x) => x.trim())
+    .filter(Boolean);
+}
 
 /**
  * Значение для path-условия: перечень со структуры, либо (для regex) свободный шаблон.
@@ -58,12 +79,38 @@ export default function StructureEnumValueControl({
     );
   }
 
-  if (!ef || !STRING_OPS.has(op)) {
+  if (!STRING_OPS.has(op)) {
     return null;
   }
 
   if (op === "in") {
     const arr = Array.isArray(value) ? value.map(String) : value != null && value !== "" ? [String(value)] : [];
+    if (!ef) {
+      return (
+        <label style={{ flex: "1 1 min(22rem, 100%)", display: "block" }}>
+          <span style={{ fontSize: 13, color: "#64748b" }}>Значения (через запятую или с новой строки)</span>
+          <textarea
+            spellCheck={false}
+            value={arr.join("\n")}
+            onChange={(e) => {
+              const vals = splitTextValues(e.target.value);
+              onValueChange(vals.length ? vals : undefined);
+            }}
+            placeholder={"например:\nту\nгост\niso"}
+            className="fe-textarea-code"
+            style={{
+              display: "block",
+              width: "100%",
+              marginTop: 4,
+              minHeight: 72,
+              padding: 8,
+              borderRadius: 8,
+              border: "1px solid #cbd5e1",
+            }}
+          />
+        </label>
+      );
+    }
     return (
       <label style={{ flex: "1 1 200px", display: "block" }}>
         <span style={{ fontSize: 13, color: "#64748b" }}>{enumLabel} (несколько, Ctrl или ⌘ + клик)</span>
@@ -83,6 +130,33 @@ export default function StructureEnumValueControl({
             </option>
           ))}
         </select>
+      </label>
+    );
+  }
+
+  if (!ef) {
+    return (
+      <label style={{ flex: "1 1 min(20rem, 100%)", display: "block" }}>
+        <span style={{ fontSize: 13, color: "#64748b" }}>Значение</span>
+        <input
+          type="text"
+          spellCheck={false}
+          value={value === undefined || value === null ? "" : String(value)}
+          onChange={(e) => {
+            const t = e.target.value;
+            onValueChange(t === "" ? undefined : t);
+          }}
+          placeholder="введите текст"
+          className="fe-textarea-code"
+          style={{
+            display: "block",
+            width: "100%",
+            marginTop: 4,
+            padding: 8,
+            borderRadius: 8,
+            border: "1px solid #cbd5e1",
+          }}
+        />
       </label>
     );
   }

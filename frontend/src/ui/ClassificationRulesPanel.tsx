@@ -88,21 +88,52 @@ export type UiClassification = {
   rules: UiClassRule[];
 };
 
-const PATH_OPS_LABEL: { value: string; label: string }[] = [
+const TEXT_PATH_OPS_LABEL: { value: string; label: string }[] = [
   { value: "equals", label: "равно" },
   { value: "notEquals", label: "не равно" },
-  { value: "in", label: "одно из перечня" },
+  { value: "in", label: "одно из" },
+  { value: "contains", label: "содержит" },
+  { value: "notContains", label: "не содержит" },
+  { value: "startsWith", label: "начинается с" },
+  { value: "endsWith", label: "заканчивается на" },
+  { value: "iEquals", label: "равно (регистр не важен)" },
+  { value: "iContains", label: "содержит (регистр не важен)" },
+  { value: "iStartsWith", label: "начинается с (регистр не важен)" },
+  { value: "iEndsWith", label: "заканчивается на (регистр не важен)" },
   { value: "regex", label: "соответствует regex" },
   { value: "notRegex", label: "не соответствует regex" },
   { value: "exists", label: "значение указано" },
   { value: "notExists", label: "значения нет" },
 ];
 
-const PATH_STRING_OPS = new Set(["equals", "notEquals", "in", "regex", "notRegex"]);
+const PATH_STRING_OPS = new Set([
+  "equals",
+  "notEquals",
+  "in",
+  "regex",
+  "notRegex",
+  "contains",
+  "notContains",
+  "startsWith",
+  "endsWith",
+  "iEquals",
+  "iContains",
+  "iStartsWith",
+  "iEndsWith",
+]);
 
 const DEFAULT_MISC_CLASS_PRIORITY = 1000;
 
-type UiCheckKind = "numberInRow" | "labelValue" | "sectionPresent" | "rowPairRatio" | "rowFormula";
+type UiCheckKind =
+  | "numberInRow"
+  | "labelValue"
+  | "sectionPresent"
+  | "rowPairRatio"
+  | "rowFormula"
+  /** Одно число на корне JSON: условие path с gte/lte/equals */
+  | "scalarNumber"
+  /** Одно текстовое значение на корне JSON: path-условия строки. */
+  | "scalarText";
 
 const FORMULA_VAR_ID_RE = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
 
@@ -113,6 +144,18 @@ const ROW_FORMULA_OPS_LABEL: { value: RowFormulaCond["op"]; label: string }[] = 
   { value: "lt", label: "меньше" },
   { value: "lte", label: "не больше" },
 ];
+
+/** Сравнение одного числа на корне (скалярное поле структуры). */
+const SCALAR_PATH_OPS_LABEL: { value: string; label: string }[] = [
+  { value: "equals", label: "равно" },
+  { value: "gt", label: "больше" },
+  { value: "gte", label: "не меньше" },
+  { value: "lt", label: "меньше" },
+  { value: "lte", label: "не больше" },
+];
+
+const ROW_INDICATOR_MIN_MAX_HINT =
+  "Если заданы и минимум, и максимум — сравнение с их средним арифметическим (относительный допуск 0,1%, как у «отношения двух показателей»). Только минимум — значение не ниже него; только максимум — не выше.";
 
 /** Все правила с непустым class_id имеют выбранный код ТН ВЭД ЕАЭС */
 export function classificationHasTnVedForAllRules(ui: UiClassification): boolean {
@@ -201,11 +244,13 @@ function parseCondition(raw: any): UiCondition | null {
     };
   }
   if (raw.type === "path") {
+    const parsedOp = String(raw.op ?? "equals");
+    const recovered = recoverUiTextOpFromRegexDsl(parsedOp, raw.value);
     return {
       type: "path",
       path: String(raw.path ?? ""),
-      op: String(raw.op ?? "equals"),
-      value: raw.value,
+      op: recovered?.op ?? parsedOp,
+      value: recovered?.value ?? raw.value,
       ...condGroupIdFromDsl(raw),
       ...condConjunctionFromDsl(raw),
       ...condPrimaryFromDsl(raw),
@@ -426,8 +471,17 @@ export function classificationToDslPayload(ui: UiClassification): Record<string,
       const conditions = r.conditions.filter(isConditionReadyForDsl).map((c) => {
         if (c.type === "path") {
           const path = c.path.trim();
-          const o: Record<string, unknown> = { type: "path", path, op: c.op };
-          if (c.value !== undefined && c.value !== "") o.value = c.value;
+          let opForDsl = c.op;
+          let valueForDsl: unknown = c.value;
+          if (PATH_STRING_OPS.has(c.op) && typeof c.value === "string") {
+            const mapped = buildRegexFromUiTextOp(c.op, c.value);
+            if (mapped) {
+              opForDsl = mapped.op;
+              valueForDsl = mapped.value;
+            }
+          }
+          const o: Record<string, unknown> = { type: "path", path, op: opForDsl };
+          if (valueForDsl !== undefined && valueForDsl !== "") o.value = valueForDsl;
           if (c.group_id) o.group_id = c.group_id;
           if (c.conjunction === "or") o.conjunction = "or";
           if (c.primary === false) o.primary = false;
@@ -524,7 +578,7 @@ export function classificationToDslPayload(ui: UiClassification): Record<string,
   return {
     strategy: "exactly_one",
     rules,
-    ambiguous_match_resolution: "by_priority",
+    ambiguous_match_resolution: "comma_join",
   };
 }
 
@@ -546,6 +600,109 @@ function normalizeUiRule(rule: UiClassRule): UiClassRule {
 
 function normPath(p: string): string {
   return p.trim().toLowerCase().replace(/\[\]/g, "[*]");
+}
+
+function textPathForDescriptor(d: StructureRowFieldDescriptor): string {
+  return d.structureKind === "scalar_text" ? d.listKey : d.wildcardComponentPath;
+}
+
+function availableKindsForDescriptor(d: StructureRowFieldDescriptor): UiCheckKind[] {
+  if (d.structureKind === "scalar_number") return ["sectionPresent", "scalarNumber"];
+  if (d.structureKind === "scalar_text") return ["sectionPresent", "scalarText"];
+  if (d.structureKind === "text_array") return ["sectionPresent", "labelValue"];
+  const out: UiCheckKind[] = ["sectionPresent", "labelValue"];
+  if (d.allowedValues.length) out.push("numberInRow", "rowPairRatio", "rowFormula");
+  return out;
+}
+
+function defaultKindForDescriptor(d: StructureRowFieldDescriptor): UiCheckKind {
+  if (d.structureKind === "scalar_number") return "scalarNumber";
+  if (d.structureKind === "scalar_text") return "scalarText";
+  if (d.structureKind === "text_array") return "labelValue";
+  return d.allowedValues.length ? "numberInRow" : "sectionPresent";
+}
+
+function escapeRegexLiteral(raw: string): string {
+  return raw.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function unescapeRegexLiteral(raw: string): string {
+  return raw.replace(/\\([.*+?^${}()|[\]\\])/g, "$1");
+}
+
+function isEscapedLiteralBody(raw: string): boolean {
+  let i = 0;
+  while (i < raw.length) {
+    const ch = raw[i]!;
+    if (ch === "\\") {
+      const next = raw[i + 1];
+      if (!next) return false;
+      if (!".*+?^${}()|[]\\".includes(next)) return false;
+      i += 2;
+      continue;
+    }
+    if (".*+?^${}()|[]\\".includes(ch)) return false;
+    i += 1;
+  }
+  return true;
+}
+
+function recoverUiTextOpFromRegexDsl(op: string, value: unknown): { op: string; value: string } | null {
+  if ((op !== "regex" && op !== "notRegex") || typeof value !== "string") return null;
+  const src = value.trim();
+  if (!src) return null;
+
+  if (op === "notRegex" && isEscapedLiteralBody(src)) {
+    return { op: "notContains", value: unescapeRegexLiteral(src) };
+  }
+
+  let ci = false;
+  let body = src;
+  if (body.startsWith("(?i)")) {
+    ci = true;
+    body = body.slice(4);
+  }
+
+  const hasStart = body.startsWith("^");
+  const hasEnd = body.endsWith("$");
+  const core = body.slice(hasStart ? 1 : 0, hasEnd ? -1 : undefined);
+  if (!isEscapedLiteralBody(core)) return null;
+  const literal = unescapeRegexLiteral(core);
+
+  if (ci && hasStart && hasEnd) return { op: "iEquals", value: literal };
+  if (ci && hasStart) return { op: "iStartsWith", value: literal };
+  if (ci && hasEnd) return { op: "iEndsWith", value: literal };
+  if (ci) return { op: "iContains", value: literal };
+  if (hasStart && hasEnd) return { op: "equals", value: literal };
+  if (hasStart) return { op: "startsWith", value: literal };
+  if (hasEnd) return { op: "endsWith", value: literal };
+  return { op: "contains", value: literal };
+}
+
+function buildRegexFromUiTextOp(op: string, rawValue: string): { op: "regex" | "notRegex"; value: string } | null {
+  const v = rawValue.trim();
+  if (!v) return null;
+  const lit = escapeRegexLiteral(v);
+  switch (op) {
+    case "contains":
+      return { op: "regex", value: lit };
+    case "notContains":
+      return { op: "notRegex", value: lit };
+    case "startsWith":
+      return { op: "regex", value: `^${lit}` };
+    case "endsWith":
+      return { op: "regex", value: `${lit}$` };
+    case "iEquals":
+      return { op: "regex", value: `(?i)^${lit}$` };
+    case "iContains":
+      return { op: "regex", value: `(?i)${lit}` };
+    case "iStartsWith":
+      return { op: "regex", value: `(?i)^${lit}` };
+    case "iEndsWith":
+      return { op: "regex", value: `(?i)${lit}$` };
+    default:
+      return null;
+  }
 }
 
 /** Индексы условий по дескриптору поля; отдельно «несопоставимые» с текущей структурой. */
@@ -598,7 +755,7 @@ function getConditionUiModel(
     const nf = cond.name_field.trim().toLowerCase();
     const idx = descList.findIndex((d) => d.listKey === ap && d.componentColumnKey === nf);
     if (idx < 0) return { kind: "legacy", descriptorIndex: -1 };
-    if (!descList[idx].allowedValues.length) return { kind: "legacy", descriptorIndex: -1 };
+    if (!descList[idx].allowedValues.length || descList[idx].structureKind !== "array_row") return { kind: "legacy", descriptorIndex: -1 };
     if (cond.op === "gt" || cond.op === "lt") return { kind: "legacy", descriptorIndex: -1 };
     return { kind: "numberInRow", descriptorIndex: idx };
   }
@@ -608,10 +765,17 @@ function getConditionUiModel(
     const idx = descList.findIndex((d) => d.listKey.toLowerCase() === p);
     if (idx >= 0) return { kind: "sectionPresent", descriptorIndex: idx };
   }
-  const idx = descList.findIndex((d) => d.wildcardComponentPath.toLowerCase() === p);
-  if (idx >= 0) {
-    if (!descList[idx].allowedValues.length) return { kind: "legacy", descriptorIndex: -1 };
-    return { kind: "labelValue", descriptorIndex: idx };
+  if (cond.type === "path" && ["equals", "gt", "gte", "lt", "lte"].includes(cond.op)) {
+    const sidx = descList.findIndex(
+      (d) => d.structureKind === "scalar_number" && d.listKey.toLowerCase() === p,
+    );
+    if (sidx >= 0) return { kind: "scalarNumber", descriptorIndex: sidx };
+  }
+  if (cond.type === "path" && PATH_STRING_OPS.has(cond.op)) {
+    const scalarTextIdx = descList.findIndex((d) => d.structureKind === "scalar_text" && d.listKey.toLowerCase() === p);
+    if (scalarTextIdx >= 0) return { kind: "scalarText", descriptorIndex: scalarTextIdx };
+    const idx = descList.findIndex((d) => d.wildcardComponentPath.toLowerCase() === p);
+    if (idx >= 0) return { kind: "labelValue", descriptorIndex: idx };
   }
 
   return { kind: "legacy", descriptorIndex: -1 };
@@ -635,7 +799,7 @@ function buildConditionForKind(kind: UiCheckKind, d: StructureRowFieldDescriptor
       prev.array_path.trim().toLowerCase() === d.listKey.toLowerCase() &&
       prev.name_field.trim().toLowerCase() === d.componentColumnKey.toLowerCase();
     const prevF = keep ? prev : undefined;
-    const defaultVars =
+    const defaultVars: Record<string, string> =
       d.allowedValues.length >= 3
         ? { n: v0, s: v1, k: v2 }
         : d.allowedValues.length >= 2
@@ -701,12 +865,48 @@ function buildConditionForKind(kind: UiCheckKind, d: StructureRowFieldDescriptor
       ...keepPrimaryFromPrev(prev),
     };
   }
-  if (kind === "labelValue") {
+  if (kind === "scalarNumber") {
     const keep =
-      prev?.type === "path" && normPath(prev.path) === d.wildcardComponentPath.toLowerCase() && PATH_STRING_OPS.has(prev.op);
+      prev?.type === "path" &&
+      normPath(prev.path) === d.listKey.toLowerCase() &&
+      ["equals", "gt", "gte", "lt", "lte"].includes(prev.op);
+    const prevP = keep && prev?.type === "path" ? prev : undefined;
+    const numVal =
+      prevP && typeof prevP.value === "number" && Number.isFinite(prevP.value)
+        ? prevP.value
+        : prevP && prevP.value !== undefined && prevP.value !== null && prevP.value !== ""
+          ? Number(prevP.value)
+          : NaN;
     return {
       type: "path",
-      path: d.wildcardComponentPath,
+      path: d.listKey,
+      op: prevP ? prevP.op : "gte",
+      value: Number.isFinite(numVal) ? numVal : 0,
+      ...keepGroupIdFromPrev(prev),
+      ...keepPrimaryFromPrev(prev),
+    };
+  }
+  if (kind === "scalarText") {
+    const keep =
+      prev?.type === "path" &&
+      normPath(prev.path) === d.listKey.toLowerCase() &&
+      (PATH_STRING_OPS.has(prev.op) || prev.op === "exists" || prev.op === "notExists");
+    const prevP = keep && prev?.type === "path" ? prev : undefined;
+    return {
+      type: "path",
+      path: d.listKey,
+      op: prevP ? prevP.op : "equals",
+      value: prevP ? prevP.value : undefined,
+      ...keepGroupIdFromPrev(prev),
+      ...keepPrimaryFromPrev(prev),
+    };
+  }
+  if (kind === "labelValue") {
+    const keep =
+      prev?.type === "path" && normPath(prev.path) === normPath(textPathForDescriptor(d)) && (PATH_STRING_OPS.has(prev.op) || prev.op === "exists" || prev.op === "notExists");
+    return {
+      type: "path",
+      path: textPathForDescriptor(d),
       op: keep && prev ? prev.op : "equals",
       value: keep && prev ? prev.value : undefined,
       ...keepGroupIdFromPrev(prev),
@@ -742,9 +942,10 @@ function StructuredConditionRow(props: {
   kind: UiCheckKind;
   descList: StructureRowFieldDescriptor[];
   cb: ConditionRowCallbacks;
+  showPrimaryToggle?: boolean;
 }) {
-  const { ri, ci, cond, d, kind, descList, cb } = props;
-  const hasEnum = d.allowedValues.length > 0;
+  const { ri, ci, cond, d, kind, descList, cb, showPrimaryToggle = true } = props;
+  const availableKinds = availableKindsForDescriptor(d);
 
   return (
     <div
@@ -756,8 +957,8 @@ function StructuredConditionRow(props: {
         background: "#fff",
       }}
     >
-      <div style={{ display: "flex", gap: 10, maxWidth: 760, alignItems: "flex-end", flexWrap: "wrap" }}>
-        <label style={{ fontSize: 13, color: "#64748b", flex: "1 1 420px", minWidth: 260 }}>
+      <div style={{ display: "flex", flexDirection: "column", gap: 10, maxWidth: 760, alignItems: "stretch" }}>
+        <label style={{ fontSize: 13, color: "#64748b", width: "100%", minWidth: 0 }}>
           Что проверяем
           <select
             value={kind}
@@ -774,13 +975,31 @@ function StructuredConditionRow(props: {
               border: "1px solid #cbd5e1",
             }}
           >
-            <option
-              value="sectionPresent"
-              title="Проверяем, есть ли на корне документа массив с выбранным ключом поля (или что его нет)."
-            >
-              Наличие поля в документе
-            </option>
-            {hasEnum ? (
+            {availableKinds.includes("sectionPresent") ? (
+              <option
+                value="sectionPresent"
+                title="Проверяем, есть ли на корне документа поле с выбранным ключом."
+              >
+                Наличие поля в документе
+              </option>
+            ) : null}
+            {availableKinds.includes("scalarNumber") ? (
+              <option
+                value="scalarNumber"
+                title="Одно число на корне JSON: сравнение с порогом (≥, ≤, = и т.д.)."
+              >
+                Числовое сравнение
+              </option>
+            ) : null}
+            {availableKinds.includes("scalarText") ? (
+              <option
+                value="scalarText"
+                title="Одно текстовое значение на корне JSON: проверка равенства, подстроки, regex и т.д."
+              >
+                Текст на корне
+              </option>
+            ) : null}
+            {availableKinds.includes("numberInRow") ? (
               <>
                 <option
                   value="numberInRow"
@@ -790,9 +1009,9 @@ function StructuredConditionRow(props: {
                 </option>
                 <option
                   value="labelValue"
-                  title="Проверка значения текстового поля: «равно», «не равно», «одно из перечня» и т.д. Значения только из перечня на шаге «Структура»."
+                  title="Проверка текстового значения: равенство, подстрока, регулярное выражение."
                 >
-                  Проверить текст значения в массиве
+                  Проверить текстовое значение
                 </option>
                 <option
                   value="rowPairRatio"
@@ -807,37 +1026,44 @@ function StructuredConditionRow(props: {
                   Формула по нескольким показателям
                 </option>
               </>
+            ) : availableKinds.includes("labelValue") ? (
+              <option
+                value="labelValue"
+                title="Проверка текстового значения: равенство, подстрока, регулярное выражение."
+              >
+                Проверить текстовое значение
+              </option>
             ) : null}
           </select>
         </label>
-        <label
-          title="Должно выполняться, чтобы по декларации можно было подтвердить класс. Без галки условие необязательно и служит для уточнения классификации при выполнении основных."
-          style={{
-            display: "inline-flex",
-            alignItems: "center",
-            gap: 8,
-            cursor: "pointer",
-            paddingBottom: 8,
-            whiteSpace: "nowrap",
-          }}
-        >
-          <input
-            type="checkbox"
-            checked={cond.primary !== false}
-            onChange={(e) => cb.updateCond(ri, ci, { primary: e.target.checked ? true : false })}
-            style={{ marginTop: 0, flexShrink: 0 }}
-          />
-          <span style={{ fontSize: 13, lineHeight: 1.35, color: "#334155" }}>
-            <strong>Основное условие</strong>
-          </span>
-        </label>
+        {showPrimaryToggle ? (
+          <label
+            title="Должно выполняться, чтобы по декларации можно было подтвердить класс. Без галки условие необязательно и служит для уточнения классификации при выполнении основных."
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 8,
+              cursor: "pointer",
+              alignSelf: "flex-start",
+              paddingBottom: 0,
+              whiteSpace: "nowrap",
+            }}
+          >
+            <input
+              type="checkbox"
+              checked={cond.primary !== false}
+              onChange={(e) => cb.updateCond(ri, ci, { primary: e.target.checked ? true : false })}
+              style={{ marginTop: 0, flexShrink: 0 }}
+            />
+            <span style={{ fontSize: 13, lineHeight: 1.35, color: "#334155" }}>
+              <strong>Основное условие</strong>
+            </span>
+          </label>
+        ) : null}
       </div>
 
       {kind === "numberInRow" && cond.type === "rowIndicator" && (
         <div style={{ marginTop: 10, display: "flex", flexWrap: "wrap", gap: 10, alignItems: "flex-end" }}>
-          <p style={{ width: "100%", margin: "0 0 2px 0", fontSize: 12, color: "#64748b", lineHeight: 1.45 }}>
-            Если заданы и минимум, и максимум — сравнение с их средним арифметическим (относительный допуск 0,1%, как у «отношения двух показателей»). Только минимум — значение не ниже него; только максимум — не выше.
-          </p>
           <label style={{ flex: "1 1 200px" }}>
             <span style={{ fontSize: 13, color: "#64748b" }}>Значение поля</span>
             <select
@@ -866,7 +1092,7 @@ function StructuredConditionRow(props: {
             </select>
           </label>
           <label>
-            <span style={{ fontSize: 13, color: "#64748b" }} title="Только мин.: нижняя граница (≥). Вместе с макс.: участвует в среднем (мин+макс)/2.">
+            <span style={{ fontSize: 13, color: "#64748b", cursor: "help", borderBottom: "1px dotted #94a3b8" }} title={ROW_INDICATOR_MIN_MAX_HINT}>
               Минимум
             </span>
             <input
@@ -883,7 +1109,7 @@ function StructuredConditionRow(props: {
             />
           </label>
           <label>
-            <span style={{ fontSize: 13, color: "#64748b" }} title="Только макс.: верхняя граница (≤). Вместе с мин.: участвует в среднем (мин+макс)/2.">
+            <span style={{ fontSize: 13, color: "#64748b", cursor: "help", borderBottom: "1px dotted #94a3b8" }} title={ROW_INDICATOR_MIN_MAX_HINT}>
               Максимум
             </span>
             <input
@@ -1204,7 +1430,7 @@ function StructuredConditionRow(props: {
         </div>
       )}
 
-      {kind === "labelValue" && cond.type === "path" && (
+      {(kind === "labelValue" || kind === "scalarText") && cond.type === "path" && (
         <div style={{ marginTop: 10, display: "flex", flexWrap: "wrap", gap: 10, alignItems: "flex-end" }}>
           <label>
             <span style={{ fontSize: 13, color: "#64748b" }}>Условие</span>
@@ -1218,6 +1444,17 @@ function StructuredConditionRow(props: {
                   value = undefined;
                 } else if (op === "regex" || op === "notRegex") {
                   value = typeof cond.value === "string" ? cond.value : "";
+                } else if (
+                  op === "contains" ||
+                  op === "notContains" ||
+                  op === "startsWith" ||
+                  op === "endsWith" ||
+                  op === "iEquals" ||
+                  op === "iContains" ||
+                  op === "iStartsWith" ||
+                  op === "iEndsWith"
+                ) {
+                  value = typeof cond.value === "string" ? cond.value : "";
                 } else if (op === "in") {
                   if (cond.op !== "in") value = undefined;
                 } else if (Array.isArray(cond.value)) {
@@ -1226,7 +1463,7 @@ function StructuredConditionRow(props: {
                 cb.updateCond(ri, ci, { op, value });
               }}
             >
-              {PATH_OPS_LABEL.map((o) => (
+              {TEXT_PATH_OPS_LABEL.map((o) => (
                 <option key={o.value} value={o.value}>
                   {o.label}
                 </option>
@@ -1258,6 +1495,43 @@ function StructuredConditionRow(props: {
               <option value="exists">Поле присутствует</option>
               <option value="notExists">Поля нет</option>
             </select>
+          </label>
+        </div>
+      )}
+
+      {kind === "scalarNumber" && cond.type === "path" && (
+        <div style={{ marginTop: 10, display: "flex", flexWrap: "wrap", gap: 12, alignItems: "flex-end" }}>
+          <label>
+            <span style={{ fontSize: 13, color: "#64748b" }}>Условие</span>
+            <select
+              style={{ display: "block", marginTop: 4, padding: 8, borderRadius: 8, border: "1px solid #cbd5e1", minWidth: 200 }}
+              value={cond.op}
+              onChange={(e) => {
+                const op = e.target.value;
+                cb.updateCond(ri, ci, { op, value: typeof cond.value === "number" ? cond.value : 0 });
+              }}
+            >
+              {SCALAR_PATH_OPS_LABEL.map((o) => (
+                <option key={o.value} value={o.value}>
+                  {o.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            <span style={{ fontSize: 13, color: "#64748b" }}>Число</span>
+            <input
+              type="number"
+              step="any"
+              style={{ display: "block", width: 140, marginTop: 4, padding: 8, borderRadius: 8, border: "1px solid #cbd5e1" }}
+              value={typeof cond.value === "number" && Number.isFinite(cond.value) ? String(cond.value) : ""}
+              onChange={(e) => {
+                const t = e.target.value;
+                cb.updateCond(ri, ci, {
+                  value: t === "" ? undefined : Number(t),
+                });
+              }}
+            />
           </label>
         </div>
       )}
@@ -1363,8 +1637,7 @@ export default function ClassificationRulesPanel({ value, onChange, structureRow
     if (!rule) return;
     const d = descList[descriptorIndex];
     if (!d) return;
-    const hasEnum = d.allowedValues.length > 0;
-    const kind: UiCheckKind = hasEnum ? "numberInRow" : "sectionPresent";
+    const kind: UiCheckKind = defaultKindForDescriptor(d);
     const cond = { ...buildConditionForKind(kind, d), group_id: groupId };
     updateRuleAt(ruleIndex, { conditions: [...rule.conditions, cond] });
   };
@@ -1684,15 +1957,61 @@ export default function ClassificationRulesPanel({ value, onChange, structureRow
                               .map(({ localIndex }) => localIndex);
                             return (
                               <div
-                                key={`${groupId}-${d.listKey}-${d.componentColumnKey}-${di}`}
+                                key={`${groupId}-${d.listKey}-${d.structureKind ?? "row"}-${di}`}
                                 style={{
                                   marginBottom: 14,
                                   paddingLeft: 12,
                                   borderLeft: "3px solid #cbd5e1",
                                 }}
                               >
-                                <div style={{ fontWeight: 600, fontSize: 13, color: "#475569", marginBottom: 8 }}>
-                                  {d.listKey} / {d.componentColumnKey}
+                                <div
+                                  style={{
+                                    display: "flex",
+                                    alignItems: "center",
+                                    justifyContent: "flex-start",
+                                    gap: 12,
+                                    flexWrap: "wrap",
+                                    marginBottom: 8,
+                                  }}
+                                >
+                                  <div style={{ fontWeight: 600, fontSize: 13, color: "#475569" }}>
+                                    {d.structureKind === "scalar_number"
+                                      ? `${d.listKey} · одно число на корне`
+                                      : d.structureKind === "scalar_text"
+                                        ? `${d.listKey} · один текст на корне`
+                                      : d.structureKind === "text_array"
+                                        ? `${d.listKey} · массив из допустимых значений`
+                                        : `${d.listKey} / ${d.componentColumnKey}`}
+                                  </div>
+                                  {(() => {
+                                    const firstEntry = groupConditionIndices[localIndices[0]];
+                                    const firstCond = firstEntry?.cond;
+                                    const firstCi = firstEntry?.index;
+                                    if (!firstCond || firstCi == null) return null;
+                                    return (
+                                      <label
+                                        title="Должно выполняться, чтобы по декларации можно было подтвердить класс. Без галки условие необязательно и служит для уточнения классификации при выполнении основных."
+                                        style={{
+                                          display: "inline-flex",
+                                          alignItems: "center",
+                                          gap: 8,
+                                          cursor: "pointer",
+                                          whiteSpace: "nowrap",
+                                          fontSize: 13,
+                                          color: "#334155",
+                                          marginLeft: 8,
+                                        }}
+                                      >
+                                        <input
+                                          type="checkbox"
+                                          checked={firstCond.primary !== false}
+                                          onChange={(e) => updateCond(ri, firstCi, { primary: e.target.checked ? true : false })}
+                                          style={{ marginTop: 0, flexShrink: 0 }}
+                                        />
+                                        <strong>Основное условие</strong>
+                                      </label>
+                                    );
+                                  })()}
                                 </div>
                                 {localIndices.map((localIndex) => {
                                   const entry = groupConditionIndices[localIndex];
@@ -1712,6 +2031,7 @@ export default function ClassificationRulesPanel({ value, onChange, structureRow
                                       kind={kind}
                                       descList={descList}
                                       cb={condCb}
+                                      showPrimaryToggle={localIndex !== localIndices[0]}
                                     />
                                   );
                                 })}

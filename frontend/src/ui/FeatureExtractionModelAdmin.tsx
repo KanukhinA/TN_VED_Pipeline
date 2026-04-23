@@ -358,7 +358,7 @@ export default function FeatureExtractionModelAdmin({
         warm && typeof warm === "object" ? `--- запуск в памяти (generate) ---\n${JSON.stringify(warm, null, 2)}` : "";
       const combinedLog = [
         pullConsole.trim()
-          ? `=== События подкачки (как в консоли preprocessing) ===\n${pullConsole}`
+          ? `=== События подкачки модели ===\n${pullConsole}`
           : null,
         pullLog.trim() ? `=== Сырой поток загрузки (NDJSON) ===\n${pullLog}` : null,
         warmBlock || null,

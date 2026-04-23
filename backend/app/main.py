@@ -6,6 +6,7 @@ from pydantic import BaseModel
 from .api.routes_rules import router as rules_router
 from .api.routes_feature_extraction_settings import router as feature_extraction_settings_router
 from .api.routes_officer_pipeline import router as officer_pipeline_router
+from .api.routes_expert_decisions import router as expert_decisions_router
 from .db.session import create_db_and_tables
 
 
@@ -25,6 +26,7 @@ def create_app() -> FastAPI:
     app.include_router(rules_router)
     app.include_router(feature_extraction_settings_router)
     app.include_router(officer_pipeline_router)
+    app.include_router(expert_decisions_router)
 
     @app.get("/health")
     def health() -> dict[str, str]:

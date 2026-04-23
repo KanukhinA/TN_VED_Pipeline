@@ -107,3 +107,16 @@ def test_validate_accepts_mixed_case_enum_values():
     assert errors == []
     assert validated is not None
     assert validated["показатели"][0]["вещество"] == "p2o5"
+
+
+def test_validate_accepts_string_not_in_schema_enum():
+    """Коды вне перечня в DSL (новые вещества) не блокируют проверку — enum в схеме не жёсткий."""
+    compiled = compile_rule(_dsl_with_substance_enum())
+    ok, errors, validated, _assigned = compiled.validate(
+        {"показатели": [{"вещество": "SO4", "показатели": 1.0}, {"вещество": "cl", "показатели": 2.0}]}
+    )
+    assert ok is True
+    assert errors == []
+    assert validated is not None
+    assert validated["показатели"][0]["вещество"] == "so4"
+    assert validated["показатели"][1]["вещество"] == "cl"

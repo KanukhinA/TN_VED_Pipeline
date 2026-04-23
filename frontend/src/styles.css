@@ -97,6 +97,13 @@ select {
   background: #ffffff;
 }
 
+/* Чекбоксы/радио не должны наследовать full-width инпутов. */
+input[type="checkbox"],
+input[type="radio"] {
+  width: auto;
+  padding: 0;
+}
+
 .btn {
   appearance: none;
   border: 1px solid rgba(11, 94, 215, 0.35);
@@ -293,7 +300,7 @@ select {
   font-size: 0.95rem;
   color: #64748b;
   line-height: 1.5;
-  max-width: 52ch;
+  max-width: 72ch;
 }
 
 .officer-card {
@@ -482,6 +489,13 @@ select {
   border-radius: 10px;
   font-size: 0.9rem;
   line-height: 1.5;
+  margin-bottom: 0.85rem;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.officer-alert:last-child {
+  margin-bottom: 0;
 }
 
 .officer-alert--error {

@@ -391,12 +391,13 @@ class ClassificationConfig(BaseModel):
     """Если для first_match ни одно правило не сработало, назначить этот класс (иначе ошибка)."""
     default_class_id: Optional[str] = None
     """
-    Для strategy exactly_one, когда подходит больше одного правила:
-    reject: ошибка (поведение по умолчанию для старых правил);
-    by_priority: один класс с наилучшим приоритетом (меньше число, раньше), при равенстве порядок в списке;
-    comma_join: в результат попадает строка из уникальных class_id через запятую (порядок: порядок правил в конфиге).
+    Для strategy exactly_one при нескольких подошедших правилах:
+    by_priority: один class_id с наилучшим приоритетом (меньше число), при равенстве — порядок в списке;
+    comma_join: строка из уникальных class_id через запятую (порядок правил в конфиге);
+    reject: устарело — обрабатывается как comma_join (ошибка не возвращается).
+    При нуле совпадений: default_class_id, иначе итоговый класс не назначен (ok, без ошибки валидации).
     """
-    ambiguous_match_resolution: AmbiguousMatchResolution = "reject"
+    ambiguous_match_resolution: AmbiguousMatchResolution = "comma_join"
 
     model_config = ConfigDict(extra="forbid")
 

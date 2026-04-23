@@ -1,50 +1,21 @@
 from __future__ import annotations
 
-import random
+import hashlib
 
 from fastapi import FastAPI
 from pydantic import BaseModel
 
-app = FastAPI(title="Price Validator", version="0.1.0")
-
-# При предсказанном классе — несколько нейтральных формулировок (случайный выбор).
-_STATUS_WHEN_CLASS: list[str] = ["accepted_info_only", "ok"]
+app = FastAPI(title="Price Validator", version="0.2.0")
 
 
-def _status_ru_when_class(*, declared: float | None) -> str:
-    p_str = "—" if declared is None else str(declared)
-    templates = [
-        (
-            "Проверка рыночной цены не подключена. "
-            f"Заявленная стоимость (графа 42): {p_str} — запись без сопоставления с внешними данными."
-        ),
-        (
-            "Класс товара определён; внешний эталон цены не запрашивался. "
-            f"Сумма по графе 42 ({p_str}) отражена в карточке."
-        ),
-        (
-            "Каталоги рыночных цен в контуре не задействованы. "
-            f"Значение {p_str} принято для информационного учёта."
-        ),
-        (
-            "Сопоставление с рыночными данными не выполнялось. "
-            f"Заявленная стоимость {p_str} (графа 42) зафиксирована."
-        ),
-        (
-            "После классификации выполнена фиксация графы 42. "
-            f"Сумма {p_str}."
-        ),
-    ]
-    return random.choice(templates)
+def _stable_hash01(s: str) -> float:
+    h = hashlib.sha256(s.encode("utf-8")).hexdigest()
+    x = int(h[:8], 16)
+    return x / 0xFFFFFFFF
 
 
-def _status_ru_no_class(*, declared: float | None) -> str:
-    if declared is not None:
-        return (
-            "Проверка рыночной цены не подключена. "
-            f"Заявленная стоимость (графа 42): {declared} — запись без сопоставления с внешними данными."
-        )
-    return "Проверка рыночной цены не подключена; заявленная стоимость принята для информации."
+def _round2(v: float) -> float:
+    return round(float(v), 2)
 
 
 class PriceValidationRequest(BaseModel):
@@ -52,6 +23,8 @@ class PriceValidationRequest(BaseModel):
     description: str
     class_id: str | None = None
     declared_price: float | None = None
+    gross_weight_kg: float | None = None
+    net_weight_kg: float | None = None
 
 
 @app.get("/health")
@@ -61,21 +34,49 @@ def health() -> dict[str, str]:
 
 @app.post("/api/v1/price/validate")
 def validate_price(payload: PriceValidationRequest) -> dict[str, object]:
-    has_class = bool(payload.class_id and str(payload.class_id).strip())
-    if has_class:
-        status = random.choice(_STATUS_WHEN_CLASS)
-        status_ru = _status_ru_when_class(declared=payload.declared_price)
-        source = "no_external_price_service"
+    declared = float(payload.declared_price or 0.0)
+    # Для оценки используем нетто, иначе брутто, иначе fallback.
+    mass_kg = (
+        float(payload.net_weight_kg)
+        if payload.net_weight_kg is not None and payload.net_weight_kg > 0
+        else float(payload.gross_weight_kg)
+        if payload.gross_weight_kg is not None and payload.gross_weight_kg > 0
+        else 1000.0
+    )
+
+    seed = f"{payload.class_id or ''}|{payload.description[:120]}"
+    k = _stable_hash01(seed)
+    # Заглушка расценок: базовая ставка 80..320 у.е./кг.
+    rate_per_kg = 80.0 + 240.0 * k
+    expected_avg = mass_kg * rate_per_kg
+
+    if expected_avg <= 0:
+        dev_pct = 0.0
     else:
-        status = "accepted_info_only"
-        status_ru = _status_ru_no_class(declared=payload.declared_price)
-        source = "no_external_price_service"
+        dev_pct = (declared - expected_avg) / expected_avg * 100.0
+    dev_abs = declared - expected_avg
+    mismatch = abs(dev_pct) > 15.0
+    status = "price_mismatch" if mismatch else "ok"
+
+    if mismatch:
+        verdict = "Стоимость заметно отклоняется от ориентировочной средней для данного объёма."
+    else:
+        verdict = "Стоимость находится в допустимом диапазоне относительно ориентировочной средней."
+    status_ru = (
+        f"{verdict} Средняя оценка: {_round2(expected_avg)}; "
+        f"отклонение: {_round2(dev_abs)} ({_round2(dev_pct)}%)."
+    )
 
     return {
         "declaration_id": payload.declaration_id,
         "status": status,
         "status_ru": status_ru,
-        "source": source,
+        "source": "stub_rate_card",
         "class_id": payload.class_id,
         "declared_price": payload.declared_price,
+        "basis_mass_kg": _round2(mass_kg),
+        "rate_per_kg": _round2(rate_per_kg),
+        "expected_average_price": _round2(expected_avg),
+        "deviation_abs": _round2(dev_abs),
+        "deviation_pct": _round2(dev_pct),
     }

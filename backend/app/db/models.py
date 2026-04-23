@@ -96,3 +96,33 @@ class AppSetting(Base):
     value_json: Mapped[Dict[str, Any]] = mapped_column(JSON, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
 
+
+class ExpertDecisionItem(Base):
+    """
+    Очередь решений эксперта по пайплайну: спорная классификация, подтверждение имени класса от LLM и т.д.
+    Категории: classification_ambiguous | classification_none | class_name_confirmation | …
+    """
+
+    __tablename__ = "expert_decision_items"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    category: Mapped[str] = mapped_column(String(64), nullable=False)
+    rule_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        ForeignKey("rules.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    declaration_id: Mapped[str] = mapped_column(String(512), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending")
+    summary_ru: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    payload_json: Mapped[Dict[str, Any]] = mapped_column(JSON, nullable=False)
+    resolution_json: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
+    resolved_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    rule: Mapped[Optional["Rule"]] = relationship()
+
+    __table_args__ = (
+        Index("ix_expert_decision_items_status_created", "status", "created_at"),
+        Index("ix_expert_decision_items_category_status", "category", "status"),
+    )
+

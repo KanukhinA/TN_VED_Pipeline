@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import socket
 import threading
@@ -10,10 +11,13 @@ from fastapi import FastAPI
 from pydantic import BaseModel, Field
 import numpy as np
 import psycopg2
+import torch
 from sentence_transformers import SentenceTransformer
 from sklearn.cluster import MiniBatchKMeans
 
 app = FastAPI(title="Clustering Service", version="0.1.0")
+
+logger = logging.getLogger(__name__)
 
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://rules_user:rules_pass@postgres:5432/rules")
 POLL_INTERVAL_SECONDS = float(os.getenv("POLL_INTERVAL_SECONDS", "5"))
@@ -24,8 +28,26 @@ _worker_thread: threading.Thread | None = None
 _last_job: dict[str, Any] | None = None
 _encoder_lock = threading.Lock()
 _encoder: SentenceTransformer | None = None
+_embedding_device_resolved: str | None = None
 
 E5_MODEL_NAME = os.getenv("CLUSTERING_EMBEDDING_MODEL", "intfloat/multilingual-e5-base")
+# auto | cuda | cpu — для эмбеддингов SentenceTransformer (K-means по-прежнему на CPU).
+CLUSTERING_DEVICE = os.getenv("CLUSTERING_DEVICE", "auto").strip().lower()
+
+
+def _resolve_embedding_device() -> str:
+    """Устройство для расчёта эмбеддингов: CUDA при наличии GPU, иначе CPU."""
+    if CLUSTERING_DEVICE == "cpu":
+        return "cpu"
+    if CLUSTERING_DEVICE == "cuda":
+        if not torch.cuda.is_available():
+            logger.warning("CLUSTERING_DEVICE=cuda, но torch.cuda.is_available()=False — используем CPU")
+            return "cpu"
+        return "cuda"
+    # auto
+    if torch.cuda.is_available():
+        return "cuda"
+    return "cpu"
 
 
 class ClusterSelectRequest(BaseModel):
@@ -45,12 +67,21 @@ class ClusterSelectResponse(BaseModel):
 
 
 def _get_encoder() -> SentenceTransformer:
-    global _encoder
+    global _encoder, _embedding_device_resolved
     if _encoder is not None:
         return _encoder
     with _encoder_lock:
         if _encoder is None:
-            _encoder = SentenceTransformer(E5_MODEL_NAME)
+            device = _resolve_embedding_device()
+            _embedding_device_resolved = device
+            logger.info(
+                "Loading SentenceTransformer %s on device=%s (CLUSTERING_DEVICE=%s, cuda_available=%s)",
+                E5_MODEL_NAME,
+                device,
+                CLUSTERING_DEVICE or "auto",
+                torch.cuda.is_available(),
+            )
+            _encoder = SentenceTransformer(E5_MODEL_NAME, device=device)
     return _encoder
 
 
@@ -234,12 +265,18 @@ def health() -> dict[str, str]:
 
 @app.get("/ready")
 def ready() -> dict[str, Any]:
+    dev = _embedding_device_resolved
+    if dev is None:
+        dev = _resolve_embedding_device()
     return {
         "status": "ok",
         "service": "clustering-service",
         "worker_id": WORKER_ID,
         "poll_interval_seconds": POLL_INTERVAL_SECONDS,
         "last_job": _last_job,
+        "embedding_device": dev,
+        "cuda_available": torch.cuda.is_available(),
+        "clustering_device_env": CLUSTERING_DEVICE or "auto",
     }
 
 

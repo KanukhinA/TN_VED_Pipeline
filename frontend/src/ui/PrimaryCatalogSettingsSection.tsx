@@ -81,7 +81,7 @@ export default function PrimaryCatalogSettingsSection() {
       setServerMap({});
       const detail = String(e?.message ?? "").trim() || "Неизвестная ошибка";
       setStatus(
-        `${detail}. Список справочников загружен; сохранённые привязки основного недоступны — проверьте backend (маршрут GET /api/feature-extraction/primary-catalog-settings) и прокси.`,
+        `${detail}. Список справочников загружен; сохранённые привязки основного справочника недоступны — проверьте настройки сервера или обратитесь к администратору.`,
       );
     }
 
@@ -223,7 +223,7 @@ export default function PrimaryCatalogSettingsSection() {
                 status.includes("Не удалось") ||
                 /not\s*found/i.test(status) ||
                 status.includes("404") ||
-                status.includes("проверьте backend")
+                status.includes("администратору")
                   ? "#b91c1c"
                   : "#166534",
               fontWeight: 600,

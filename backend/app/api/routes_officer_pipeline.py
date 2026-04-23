@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
@@ -9,9 +10,12 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from ..db.models import Rule, RuleVersion
+from ..db.models import ExpertDecisionItem, Rule, RuleVersion
 from ..db.session import get_db_session
-from ..rules.classification import find_first_matching_classification_rule
+from ..rules.classification import (
+    find_first_matching_classification_rule,
+    semantic_candidate_matches_class_rule,
+)
 from ..rules.compiler import compile_rule
 from ..primary_catalog_settings import get_effective_primary_catalog_map
 from ..rules.dsl_models import ObjectFieldSchema, RuleDSL, normalize_tn_ved_eaeu_code_value
@@ -276,31 +280,69 @@ def _catalog_classification_entries(dsl: RuleDSL) -> List[Dict[str, str]]:
     return out
 
 
-def _extract_exactly_one_conflict(errors: List[Any]) -> Optional[Dict[str, Any]]:
+def _extract_classification_expert_review(errors: List[Any]) -> Optional[Dict[str, Any]]:
+    """
+    Разбор устаревших/редких ошибок классификации с полем details.matched_class_ids.
+    Текущий движок при strategy exactly_one не возвращает таких ошибок (несколько классов — в assigned_class_id).
+    """
     for e in errors:
         if not isinstance(e, dict):
             continue
-        msg = str(e.get("message") or "")
-        if "exactly_one" not in msg:
-            continue
         details = e.get("details")
-        if not isinstance(details, dict):
+        if not isinstance(details, dict) or "matched_class_ids" not in details:
             continue
         matched = details.get("matched_class_ids")
         if not isinstance(matched, list):
-            continue
+            matched = []
         class_ids = [str(x).strip() for x in matched if str(x).strip()]
-        if len(class_ids) <= 1:
-            continue
-        return {
-            "matched_count": len(class_ids),
-            "matched_class_ids": class_ids,
-            "error_ru": (
-                "Ошибка в справочнике: для стратегии exactly_one сработало несколько правил одновременно. "
-                "Декларация требует экспертного рассмотрения."
-            ),
-        }
+        mc_raw = details.get("matched_count")
+        try:
+            mc = int(mc_raw) if mc_raw is not None else len(class_ids)
+        except (TypeError, ValueError):
+            mc = len(class_ids)
+
+        if mc >= 2 or len(class_ids) >= 2:
+            return {
+                "kind": "ambiguous",
+                "matched_count": max(mc, len(class_ids)),
+                "matched_class_ids": class_ids,
+                "error_ru": (
+                    "Сработало несколько правил классификации — нужно выбрать один класс "
+                    "или скорректировать условия в справочнике."
+                ),
+            }
+        if mc == 0 or len(class_ids) == 0:
+            return {
+                "kind": "none_match",
+                "matched_count": 0,
+                "matched_class_ids": [],
+                "error_ru": (
+                    "Ни одно правило классификации не подошло. "
+                    "Уточните условия в справочнике или назначьте класс вручную."
+                ),
+            }
     return None
+
+
+def _persist_expert_decision(
+    db: Session,
+    *,
+    rule_id: uuid.UUID,
+    declaration_id: str,
+    category: str,
+    summary_ru: str,
+    payload: Dict[str, Any],
+) -> None:
+    row = ExpertDecisionItem(
+        category=category,
+        rule_id=rule_id,
+        declaration_id=declaration_id.strip(),
+        status="pending",
+        summary_ru=summary_ru[:8000],
+        payload_json=payload,
+    )
+    db.add(row)
+    db.commit()
 
 
 class OfficerRunRequest(BaseModel):
@@ -314,6 +356,57 @@ class OfficerRunRequest(BaseModel):
         default=None,
         description="Если задан — используется вместо результата LLM-извлечения (корректировка инспектором).",
     )
+
+
+class SemanticClassConsistencyRequest(BaseModel):
+    rule_id: str
+    class_id: str
+    validated_features: Dict[str, Any] = Field(
+        ...,
+        description="Проверенные по схеме признаки (как после officer-run), для проверки RuleMatch2.",
+    )
+
+
+@router.post("/api/pipeline/semantic-class-consistency")
+def semantic_class_consistency(
+    payload: SemanticClassConsistencyRequest,
+    db: Session = Depends(get_db_session),
+) -> Dict[str, Any]:
+    """
+    Схема README: после семантического кандидата — проверить, что извлечённые данные
+    не противоречат условиям классификации для этого class_id.
+    """
+    try:
+        rid = uuid.UUID(str(payload.rule_id).strip())
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=f"Некорректный rule_id: {e}") from e
+
+    rv: RuleVersion | None = (
+        db.query(RuleVersion)
+        .filter(RuleVersion.rule_id == rid, RuleVersion.is_active.is_(True))
+        .order_by(RuleVersion.version.desc())
+        .first()
+    )
+    if rv is None:
+        raise HTTPException(status_code=404, detail="Active rule version not found")
+
+    try:
+        dsl = RuleDSL.model_validate(rv.dsl_json)
+        compiled = compile_rule(dsl)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Ошибка компиляции справочника: {e}") from e
+
+    ok, msg_ru = semantic_candidate_matches_class_rule(
+        payload.validated_features,
+        compiled.classification,
+        payload.class_id,
+    )
+    return {
+        "consistent": ok,
+        "message_ru": msg_ru,
+        "class_id": (payload.class_id or "").strip(),
+        "rule_id": str(rid),
+    }
 
 
 @router.post("/api/pipeline/officer-run")
@@ -439,7 +532,27 @@ def officer_run(
     )
 
     ok, errors, validated_dict, assigned_class = compiled.validate(merged)
-    exactly_one_conflict = _extract_exactly_one_conflict(errors)
+    classification_expert_review = _extract_classification_expert_review(errors)
+    exactly_one_conflict = classification_expert_review
+    if classification_expert_review:
+        cat = (
+            "classification_ambiguous"
+            if classification_expert_review.get("kind") == "ambiguous"
+            else "classification_none"
+        )
+        _persist_expert_decision(
+            db,
+            rule_id=rule.id,
+            declaration_id=payload.declaration_id,
+            category=cat,
+            summary_ru=str(classification_expert_review.get("error_ru") or "Классификация: требуется решение эксперта"),
+            payload={
+                "source": "officer_run",
+                "review": classification_expert_review,
+                "deterministic_errors": errors,
+                "catalog": {"rule_id": str(rule.id), "name": catalog_name, "model_id": rule.model_id},
+            },
+        )
 
     clf_cfg = compiled.classification
     matched_rule = None
@@ -486,11 +599,12 @@ def officer_run(
     errors_ru = humanize_officer_error_list(errors) if errors else []
     if errors:
         summary_lines.append("Ошибки (пояснение): " + json.dumps(errors_ru, ensure_ascii=False))
-    if exactly_one_conflict:
+    if classification_expert_review:
         summary_lines.append(
-            "Конфликт классификации: " + json.dumps(exactly_one_conflict["matched_class_ids"], ensure_ascii=False)
+            "Классификация (эксперт): подходящие class_id — "
+            + json.dumps(classification_expert_review.get("matched_class_ids") or [], ensure_ascii=False)
         )
-        summary_lines.append(str(exactly_one_conflict["error_ru"]))
+        summary_lines.append(str(classification_expert_review["error_ru"]))
 
     out: Dict[str, Any] = {
         "declaration_id": payload.declaration_id,
@@ -509,14 +623,21 @@ def officer_run(
             "errors_ru": errors_ru,
             "class_note_ru": class_note,
             "assigned_class_id": assigned_class,
+            "validated_features": validated_dict,
             "matched_classification_rule_title": rule_title,
             "matched_classification_class_id": matched_rule.class_id if matched_rule else None,
+            "classification_expert_review": classification_expert_review,
             "exactly_one_conflict": exactly_one_conflict,
-            "candidate_class_ids": exactly_one_conflict["matched_class_ids"] if exactly_one_conflict else [],
-            "requires_expert_review": bool(exactly_one_conflict),
+            "candidate_class_ids": (
+                (classification_expert_review.get("matched_class_ids") or [])
+                if classification_expert_review
+                else []
+            ),
+            "requires_expert_review": bool(classification_expert_review),
         },
         "final_class_id": assigned_class,
         "catalog_classification_classes": _catalog_classification_entries(dsl),
-        "requires_expert_review": bool(exactly_one_conflict),
+        "classification_expert_review": classification_expert_review,
+        "requires_expert_review": bool(classification_expert_review),
     }
     return out

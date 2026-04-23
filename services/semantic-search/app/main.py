@@ -13,6 +13,7 @@ app = FastAPI(title="Semantic search", version="0.2.0")
 E5_MODEL_NAME = os.getenv("SEMANTIC_SEARCH_EMBEDDING_MODEL", "intfloat/multilingual-e5-base")
 # Для тестов: всегда вести себя как старая заглушка (игнор эталонов).
 FORCE_STUB = os.getenv("SEMANTIC_SEARCH_FORCE_STUB", "").strip().lower() in ("1", "true", "yes")
+SPACE_MAX_POINTS = max(20, int(os.getenv("SEMANTIC_SEARCH_SPACE_MAX_POINTS", "250")))
 
 _encoder: SentenceTransformer | None = None
 
@@ -55,7 +56,23 @@ def _stub_response(payload: SearchRequest, *, service_mode: str, note_ru: str) -
         "embedding_model": None,
         "n_reference_examples_total": 0,
         "n_reference_examples_used": 0,
+        "feature_space_points": [],
     }
+
+
+def _project_to_2d(emb: np.ndarray) -> np.ndarray:
+    """PCA до 2D через SVD; на выходе shape (n,2)."""
+    if emb.ndim != 2 or emb.shape[0] == 0:
+        return np.zeros((0, 2), dtype=np.float32)
+    x = emb.astype(np.float32, copy=False)
+    x = x - np.mean(x, axis=0, keepdims=True)
+    if x.shape[0] == 1:
+        return np.array([[0.0, 0.0]], dtype=np.float32)
+    u, s, _vt = np.linalg.svd(x, full_matrices=False)
+    k = min(2, u.shape[1])
+    out = np.zeros((x.shape[0], 2), dtype=np.float32)
+    out[:, :k] = u[:, :k] * s[:k]
+    return out
 
 
 def _embedding_search(payload: SearchRequest, valid: list[tuple[str, str]]) -> dict[str, Any]:
@@ -79,6 +96,34 @@ def _embedding_search(payload: SearchRequest, valid: list[tuple[str, str]]) -> d
     best_i = int(np.argmax(sims))
     best_sim = float(sims[best_i])
     class_id = valid[best_i][1]
+    # Для визуализации пространства: ограничиваем число точек самыми похожими к запросу.
+    n_all = len(valid)
+    keep_n = min(n_all, SPACE_MAX_POINTS)
+    top_idx = np.argsort(sims)[::-1][:keep_n]
+    kept_emb = pv[top_idx]
+    proj_input = np.vstack([qv[0:1], kept_emb])
+    xy = _project_to_2d(proj_input)
+    feature_space_points: list[dict[str, Any]] = [
+        {
+            "kind": "query",
+            "x": float(xy[0, 0]),
+            "y": float(xy[0, 1]),
+            "text": query,
+            "class_id": None,
+            "similarity": 1.0,
+        }
+    ]
+    for k, idx in enumerate(top_idx, start=1):
+        feature_space_points.append(
+            {
+                "kind": "reference",
+                "x": float(xy[k, 0]),
+                "y": float(xy[k, 1]),
+                "text": valid[int(idx)][0],
+                "class_id": valid[int(idx)][1],
+                "similarity": float(sims[int(idx)]),
+            }
+        )
     thr = payload.similarity_threshold
     return {
         "matched": True,
@@ -95,6 +140,8 @@ def _embedding_search(payload: SearchRequest, valid: list[tuple[str, str]]) -> d
         "n_reference_examples_total": len(payload.reference_examples or []),
         "n_reference_examples_used": len(valid),
         "best_example_index": best_i,
+        "feature_space_points": feature_space_points,
+        "feature_space_points_total": n_all + 1,  # + запрос инспектора
     }
 
 

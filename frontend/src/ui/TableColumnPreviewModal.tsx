@@ -1,5 +1,6 @@
 import React, { useMemo, useState } from "react";
 import { createPortal } from "react-dom";
+import { ModalCloseButton } from "./ModalCloseButton";
 
 export type TablePreviewData = {
   columns: string[];
@@ -86,7 +87,6 @@ export function TableColumnPreviewModal({
         zIndex: overlayZIndex,
         padding: 16,
       }}
-      onClick={onClose}
     >
       <div
         style={{
@@ -116,9 +116,7 @@ export function TableColumnPreviewModal({
               </div>
             ) : null}
           </div>
-          <button type="button" className="btn-secondary" onClick={onClose}>
-            Закрыть
-          </button>
+          <ModalCloseButton onClick={onClose} />
         </div>
 
         {controls != null ? (

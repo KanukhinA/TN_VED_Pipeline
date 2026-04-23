@@ -1,6 +1,15 @@
-import React, { useEffect, useRef, useState } from "react";
-import { validateDeclarationByOfficer } from "../api/client";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  createExpertDecision,
+  preflightOfficerValidation,
+  validateDeclarationByOfficerWithProgress,
+  type OfficerValidationProgressEvent,
+} from "../api/client";
+import { formatClassColumnDisplay } from "../utils/formatClassColumn";
+import { deepEqualJson } from "../utils/deepEqualJson";
+import { ExtractedFeaturesEditor, deepClone } from "../ui/ExtractedFeaturesEditor";
 import TnVedEaeuPicker from "../ui/TnVedEaeuPicker";
+import { ModalCloseButton } from "../ui/ModalCloseButton";
 
 function formatDurationMs(ms: number): string {
   const s = ms / 1000;
@@ -63,19 +72,41 @@ function priceValidatorPayloadFromResult(raw: any): Record<string, unknown> | nu
   return orchestratorStepFromResult(raw, "price-validator");
 }
 
-function priceStatusLabel(status: unknown): string {
-  const s = typeof status === "string" ? status : "";
-  if (s === "accepted_info_only") return "Принято к сведению";
-  if (s === "ok") return "Проверка выполнена";
-  return s || "Ответ получен";
+function formatMoney(v: unknown): string {
+  if (typeof v !== "number" || !Number.isFinite(v)) return "—";
+  return new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 2 }).format(v);
 }
 
-function priceSourceLabel(source: unknown): string | null {
-  if (source === "no_external_price_service") {
-    return "Внешняя рыночная сверка не выполнялась";
+function formatPct(v: unknown): string {
+  if (typeof v !== "number" || !Number.isFinite(v)) return "—";
+  const sign = v > 0 ? "+" : "";
+  return `${sign}${v.toFixed(2)}%`;
+}
+
+type FeatureSpacePoint = {
+  kind: "query" | "reference";
+  x: number;
+  y: number;
+  text: string;
+  class_id?: string | null;
+  similarity?: number;
+};
+
+/** Подпись класса из справочника (catalog_classification_classes) для KPI. */
+function catalogTitleForClassId(catalogClasses: unknown, classId: string | null | undefined): string | null {
+  if (classId == null || String(classId).trim() === "") return null;
+  if (!Array.isArray(catalogClasses)) return null;
+  const id = String(classId).trim();
+  for (const c of catalogClasses) {
+    if (!c || typeof c !== "object") continue;
+    const row = c as Record<string, unknown>;
+    const cid = String(row.class_id ?? "").trim();
+    if (cid === id) {
+      const t = String(row.title ?? "").trim();
+      return t.length > 0 ? t : null;
+    }
   }
-  if (source == null || source === "") return null;
-  return String(source);
+  return null;
 }
 
 export default function OfficerValidationPage() {
@@ -84,9 +115,19 @@ export default function OfficerValidationPage() {
   const [result, setResult] = useState<any>(null);
   const [error, setError] = useState<string | null>(null);
   const [elapsedMs, setElapsedMs] = useState(0);
+  const [lastServerElapsedMs, setLastServerElapsedMs] = useState<number | null>(null);
   const abortRef = useRef<AbortController | null>(null);
-  const [featuresDraft, setFeaturesDraft] = useState("");
-  const [featuresDraftError, setFeaturesDraftError] = useState<string | null>(null);
+  /** Один id на сессию проверок (в т.ч. перепроверка с правками признаков и запись в expert-decisions). */
+  const declarationSessionRef = useRef<string | null>(null);
+  const [featuresEditMode, setFeaturesEditMode] = useState(false);
+  const [editedFeatures, setEditedFeatures] = useState<Record<string, unknown> | null>(null);
+  const [correctionLogError, setCorrectionLogError] = useState<string | null>(null);
+  const [correctionLogOk, setCorrectionLogOk] = useState(false);
+  const [serverPhase, setServerPhase] = useState<{ title: string; detail: string } | null>(null);
+  const [featureSpaceOpen, setFeatureSpaceOpen] = useState(false);
+  const [featureSpaceZoom, setFeatureSpaceZoom] = useState(1);
+  const [featureSpacePan, setFeatureSpacePan] = useState({ x: 0, y: 0 });
+  const [featureSpaceHovered, setFeatureSpaceHovered] = useState<FeatureSpacePoint | null>(null);
 
   useEffect(() => {
     if (!busy) return;
@@ -98,13 +139,9 @@ export default function OfficerValidationPage() {
 
   useEffect(() => {
     if (!result) return;
-    const payload = officerPayloadFromResult(result);
-    const fe = payload?.feature_extraction;
-    const raw = fe?.parsed;
-    const parsed =
-      raw != null && typeof raw === "object" && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
-    setFeaturesDraft(JSON.stringify(parsed, null, 2));
-    setFeaturesDraftError(null);
+    setFeaturesEditMode(false);
+    setEditedFeatures(null);
+    setCorrectionLogError(null);
   }, [result]);
 
   function setField<K extends keyof OfficerForm>(key: K, value: OfficerForm[K]) {
@@ -117,30 +154,95 @@ export default function OfficerValidationPage() {
     form.graph35.trim().length > 0 &&
     form.graph38.trim().length > 0 &&
     form.graph42.trim().length > 0;
+  const busyStageUi = serverPhase ?? { title: "Ожидание статуса этапа от сервера", detail: "Запрос отправлен, ждём первое событие phase." };
 
   function onStop() {
     abortRef.current?.abort();
   }
 
-  async function runValidation(extracted_features_override?: Record<string, unknown>) {
+  async function runValidation(
+    extracted_features_override?: Record<string, unknown>,
+    logParsedBeforeOverride?: Record<string, unknown>,
+  ) {
     if (!canSubmit || busy) return;
     const ac = new AbortController();
     abortRef.current = ac;
+    const requestStartedAt = Date.now();
+    // Во время нового запроса скрываем предыдущий результат, чтобы не показывать устаревшие данные.
+    setResult(null);
     setBusy(true);
+    setServerPhase(null);
     setError(null);
+    setCorrectionLogError(null);
+    setCorrectionLogOk(false);
+    if (!declarationSessionRef.current) {
+      declarationSessionRef.current = `OFFICER-${Date.now()}`;
+    }
     try {
-      const response = await validateDeclarationByOfficer(
+      const preflight = await preflightOfficerValidation();
+      if (preflight.status !== "ok") {
+        const down = preflight.down_dependencies.length
+          ? preflight.down_dependencies
+          : Object.entries(preflight.dependencies)
+              .filter(([, st]) => st !== "ok")
+              .map(([name]) => name);
+        throw new Error(
+          `Сервер не готов к проверке декларации. Недоступны сервисы: ${down.join(", ") || "неизвестно"}.`,
+        );
+      }
+      const response = await validateDeclarationByOfficerWithProgress(
         {
           graph31: form.graph31.trim(),
           graph33: form.graph33.trim(),
           graph35: Number(form.graph35),
           graph38: Number(form.graph38),
           graph42: Number(form.graph42),
+          declaration_id: declarationSessionRef.current,
           ...(extracted_features_override != null ? { extracted_features_override } : {}),
+        },
+        (ev: OfficerValidationProgressEvent) => {
+          if (ev.event === "phase") {
+            setServerPhase({
+              title: String(ev.title ?? "Этап валидации ДТ"),
+              detail: String(ev.detail ?? ""),
+            });
+          } else if (ev.event === "partial" && ev.result) {
+            setResult(ev.result);
+          }
         },
         { signal: ac.signal },
       );
       setResult(response);
+      setLastServerElapsedMs(Math.max(0, Date.now() - requestStartedAt));
+      if (
+        extracted_features_override != null &&
+        logParsedBeforeOverride != null &&
+        !deepEqualJson(logParsedBeforeOverride, extracted_features_override)
+      ) {
+        const officer = officerPayloadFromResult(response);
+        const declId = typeof officer?.declaration_id === "string" ? officer.declaration_id.trim() : "";
+        const ruleRaw = officer?.catalog && typeof officer.catalog === "object" ? (officer.catalog as Record<string, unknown>).rule_id : null;
+        const ruleId = ruleRaw != null && String(ruleRaw).trim() ? String(ruleRaw).trim() : undefined;
+        if (declId) {
+          try {
+            await createExpertDecision({
+              category: "inspector_feature_correction",
+              declaration_id: declId,
+              rule_id: ruleId,
+              summary_ru: `Инспектор скорректировал извлечённые признаки (декларация ${declId})`,
+              payload: {
+                source: "officer_validation",
+                parsed_before_override: logParsedBeforeOverride,
+                parsed_after_override: extracted_features_override,
+                recorded_at: new Date().toISOString(),
+              },
+            });
+            setCorrectionLogOk(true);
+          } catch (e: any) {
+            setCorrectionLogError(e?.message ?? String(e));
+          }
+        }
+      }
     } catch (e: any) {
       if (isAbortError(e)) {
         setError("Запрос остановлен.");
@@ -149,70 +251,152 @@ export default function OfficerValidationPage() {
       }
     } finally {
       setBusy(false);
+      setServerPhase(null);
       abortRef.current = null;
     }
   }
 
   function onSubmit() {
+    declarationSessionRef.current = null;
+    setCorrectionLogOk(false);
+    setCorrectionLogError(null);
+    setLastServerElapsedMs(null);
     void runValidation();
   }
 
-  function onRevalidateWithCorrectedFeatures() {
+  function onApplyFeatureEdits(parsedBefore: Record<string, unknown>, next: Record<string, unknown>) {
     if (!canSubmit || busy) return;
-    let parsed: Record<string, unknown>;
-    try {
-      const t = featuresDraft.trim();
-      if (!t) {
-        setFeaturesDraftError("Введите JSON объекта с признаками.");
-        return;
-      }
-      const raw = JSON.parse(t) as unknown;
-      if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
-        setFeaturesDraftError("Нужен JSON-объект { … }, не массив.");
-        return;
-      }
-      parsed = raw as Record<string, unknown>;
-    } catch {
-      setFeaturesDraftError("Некорректный JSON.");
+    if (deepEqualJson(parsedBefore, next)) {
+      setCorrectionLogError("Изменений нет — скорректируйте значения или нажмите «Отмена».");
       return;
     }
-    setFeaturesDraftError(null);
-    void runValidation(parsed);
+    setCorrectionLogError(null);
+    void runValidation(next, parsedBefore);
   }
 
   const core = result ? officerPayloadFromResult(result) : null;
   const semanticPayload = result ? orchestratorStepFromResult(result, "semantic-search") : null;
+  const semanticRuleCheckPayload = result ? orchestratorStepFromResult(result, "semantic-class-rule-check") : null;
   const llmNamingPayload = result ? orchestratorStepFromResult(result, "llm-class-name-suggestion") : null;
   const expertRoutingPayload = result ? orchestratorStepFromResult(result, "expert-review-routing") : null;
   const pricePayload = result ? priceValidatorPayloadFromResult(result) : null;
-  const priceSourceFootnote = pricePayload ? priceSourceLabel(pricePayload.source) : null;
 
   const det = core?.deterministic;
   const catalog = core?.catalog;
   const validationOk = det?.validation_ok === true;
-  const finalClass = core?.final_class_id ?? result?.final_class ?? result?.final_class_id;
-  const summaryText =
-    (typeof result?.summary_ru === "string" && result.summary_ru.trim()
-      ? result.summary_ru
-      : typeof core?.summary_ru === "string" && core.summary_ru.trim()
-        ? core.summary_ru
-        : "") || "";
+  const orchestratorFinalRaw =
+    typeof result?.final_class === "string"
+      ? result.final_class.trim()
+      : typeof result?.final_class_id === "string"
+        ? result.final_class_id.trim()
+        : "";
+  const coreClassRaw =
+    core?.final_class_id != null && String(core.final_class_id).trim() !== ""
+      ? String(core.final_class_id).trim()
+      : "";
+  const effectiveFinalClassId = orchestratorFinalRaw !== "" ? orchestratorFinalRaw : coreClassRaw;
+  const finalClass = effectiveFinalClassId !== "" ? effectiveFinalClassId : undefined;
+  const semanticRuleContradiction = Boolean(
+    semanticRuleCheckPayload &&
+      semanticRuleCheckPayload.consistent === false &&
+      semanticRuleCheckPayload.skipped !== true,
+  );
+  const semanticAboveThreshold = Boolean(
+    semanticPayload &&
+      semanticPayload.below_threshold === false &&
+      typeof semanticPayload.similarity === "number" &&
+      typeof semanticPayload.similarity_threshold === "number" &&
+      semanticPayload.similarity > semanticPayload.similarity_threshold,
+  );
+  const semanticCandidateNoClass = semanticAboveThreshold && (finalClass == null || finalClass === "");
+  const semanticNoClassReasonRu =
+    typeof semanticRuleCheckPayload?.message_ru === "string" && semanticRuleCheckPayload.message_ru.trim()
+      ? semanticRuleCheckPayload.message_ru.trim()
+      : "Семантический кандидат найден (схожесть выше порога), но итоговый класс не назначен: извлечённые значения противоречат правилу справочника для класса-кандидата.";
+  const llmSuggestedClassNameRaw =
+    llmNamingPayload && llmNamingPayload.suggested_class_name != null
+      ? String(llmNamingPayload.suggested_class_name).trim()
+      : "";
+  const hasMeaningfulLlmClassSuggestion = Boolean(
+    llmSuggestedClassNameRaw &&
+      !["CLASS", "GENERATION_FAILED", "-", "—", "N/A", "UNKNOWN"].includes(llmSuggestedClassNameRaw.toUpperCase()),
+  );
+  const featureSpacePoints = useMemo(() => {
+    const raw = semanticPayload?.feature_space_points;
+    if (!Array.isArray(raw)) return [] as FeatureSpacePoint[];
+    return raw
+      .filter((p) => p && typeof p === "object")
+      .map((p: any) => ({
+        kind: (p.kind === "query" ? "query" : "reference") as FeatureSpacePoint["kind"],
+        x: typeof p.x === "number" ? p.x : Number(p.x ?? 0),
+        y: typeof p.y === "number" ? p.y : Number(p.y ?? 0),
+        text: String(p.text ?? "").trim(),
+        class_id: p.class_id != null ? String(p.class_id) : null,
+        similarity: typeof p.similarity === "number" ? p.similarity : undefined,
+      }))
+      .filter((p) => Number.isFinite(p.x) && Number.isFinite(p.y));
+  }, [semanticPayload]);
+  const featureSpaceExtent = useMemo(() => {
+    if (featureSpacePoints.length === 0) return { minX: -1, maxX: 1, minY: -1, maxY: 1 };
+    const xs = featureSpacePoints.map((p) => p.x);
+    const ys = featureSpacePoints.map((p) => p.y);
+    const minX = Math.min(...xs);
+    const maxX = Math.max(...xs);
+    const minY = Math.min(...ys);
+    const maxY = Math.max(...ys);
+    return {
+      minX,
+      maxX: maxX === minX ? minX + 1 : maxX,
+      minY,
+      maxY: maxY === minY ? minY + 1 : maxY,
+    };
+  }, [featureSpacePoints]);
+  const projectFeatureSpacePoint = useCallback(
+    (p: FeatureSpacePoint) => {
+      const W = 860;
+      const H = 480;
+      const pad = 42;
+      const nx = (p.x - featureSpaceExtent.minX) / (featureSpaceExtent.maxX - featureSpaceExtent.minX);
+      const ny = (p.y - featureSpaceExtent.minY) / (featureSpaceExtent.maxY - featureSpaceExtent.minY);
+      const x0 = pad + nx * (W - 2 * pad);
+      const y0 = H - pad - ny * (H - 2 * pad);
+      return {
+        x: W / 2 + (x0 - W / 2) * featureSpaceZoom + featureSpacePan.x,
+        y: H / 2 + (y0 - H / 2) * featureSpaceZoom + featureSpacePan.y,
+      };
+    },
+    [featureSpaceExtent, featureSpaceZoom, featureSpacePan.x, featureSpacePan.y],
+  );
   const errorsRu = Array.isArray(det?.errors_ru) ? (det.errors_ru as string[]) : [];
   const classNoteRu =
-    typeof det?.class_note_ru === "string" && det.class_note_ru.trim() ? det.class_note_ru.trim() : "";
+    semanticCandidateNoClass
+      ? semanticNoClassReasonRu
+      : semanticRuleContradiction || (finalClass != null && finalClass !== "")
+        ? ""
+      : typeof det?.class_note_ru === "string" && det.class_note_ru.trim()
+        ? det.class_note_ru.trim()
+        : "";
   const candidateClassIds = Array.isArray(det?.candidate_class_ids)
     ? (det.candidate_class_ids as unknown[])
         .map((x) => String(x ?? "").trim())
         .filter((x) => x.length > 0)
     : [];
+  const classTitleForUi = catalogTitleForClassId(core?.catalog_classification_classes, finalClass ?? null);
+  const classKpiDisplay = formatClassColumnDisplay(classTitleForUi ?? finalClass ?? "", candidateClassIds);
+  const classificationReview =
+    (det?.classification_expert_review as { kind?: string; error_ru?: string } | undefined) ??
+    (det?.exactly_one_conflict as { kind?: string; error_ru?: string } | undefined);
   const exactlyOneConflictMessage =
-    typeof det?.exactly_one_conflict?.error_ru === "string" && det.exactly_one_conflict.error_ru.trim()
-      ? det.exactly_one_conflict.error_ru.trim()
-      : "";
+    typeof classificationReview?.error_ru === "string" && classificationReview.error_ru.trim()
+      ? classificationReview.error_ru.trim()
+      : typeof det?.exactly_one_conflict?.error_ru === "string" && det.exactly_one_conflict.error_ru.trim()
+        ? det.exactly_one_conflict.error_ru.trim()
+        : "";
+  const reviewNeedsExpert = Boolean(det?.requires_expert_review) && Boolean(classificationReview);
   const hasKpiTiles = Boolean(
     det ||
       catalog?.name ||
-      (finalClass != null && String(finalClass).trim() !== "") ||
+      classKpiDisplay !== "" ||
       (det?.matched_classification_rule_title != null && String(det.matched_classification_rule_title).trim() !== "") ||
       catalog?.tn_ved_group_code != null ||
       catalog?.rule_id != null,
@@ -222,10 +406,21 @@ export default function OfficerValidationPage() {
       (result.status ||
         catalog ||
         det ||
-        (finalClass != null && String(finalClass).trim() !== "") ||
+        classKpiDisplay !== "" ||
         hasKpiTiles),
   );
 
+  const feBlock = core?.feature_extraction as Record<string, unknown> | undefined;
+  const parsedFeaturesRaw = feBlock?.parsed;
+  const parsedFeatures: Record<string, unknown> =
+    parsedFeaturesRaw != null && typeof parsedFeaturesRaw === "object" && !Array.isArray(parsedFeaturesRaw)
+      ? (parsedFeaturesRaw as Record<string, unknown>)
+      : {};
+  const extractedSummaryRu =
+    typeof feBlock?.extracted_document_ru === "string" && String(feBlock.extracted_document_ru).trim()
+      ? String(feBlock.extracted_document_ru).trim()
+      : "";
+  const featureExtractionStatus = typeof feBlock?.status === "string" ? feBlock.status : "";
   return (
     <div className="container officer-page">
       <header className="officer-hero">
@@ -336,8 +531,12 @@ export default function OfficerValidationPage() {
               setForm(initialForm);
               setResult(null);
               setError(null);
-              setFeaturesDraft("");
-              setFeaturesDraftError(null);
+              setLastServerElapsedMs(null);
+              declarationSessionRef.current = null;
+              setFeaturesEditMode(false);
+              setEditedFeatures(null);
+              setCorrectionLogError(null);
+              setCorrectionLogOk(false);
             }}
           >
             Очистить форму
@@ -371,7 +570,10 @@ export default function OfficerValidationPage() {
                 {formatDurationMs(elapsedMs)}
               </span>
             </div>
-            <p className="officer-progress__hint">Повторная проверка на сервере…</p>
+            <p className="officer-progress__hint" style={{ marginBottom: 4 }}>
+              {busyStageUi.title}
+            </p>
+            <p style={{ margin: 0, fontSize: "0.8125rem", color: "#475569", lineHeight: 1.4 }}>{busyStageUi.detail}</p>
           </div>
         ) : null}
 
@@ -382,7 +584,10 @@ export default function OfficerValidationPage() {
                 {formatDurationMs(elapsedMs)}
               </span>
             </div>
-            <p className="officer-progress__hint">Запрос выполняется на сервере. Отображается фактическое время текущего запроса.</p>
+            <p className="officer-progress__hint" style={{ marginBottom: 4 }}>
+              {busyStageUi.title}
+            </p>
+            <p style={{ margin: 0, fontSize: "0.8125rem", color: "#475569", lineHeight: 1.4 }}>{busyStageUi.detail}</p>
           </div>
         ) : null}
 
@@ -403,9 +608,23 @@ export default function OfficerValidationPage() {
                   ) : null}
                 </div>
                 {classNoteRu ? (
-                  <div className="officer-alert officer-alert--info" role="status">
-                    <span aria-hidden>ℹ</span>
+                  <div
+                    className={semanticCandidateNoClass ? "officer-alert officer-alert--warn" : "officer-alert officer-alert--info"}
+                    role={semanticCandidateNoClass ? "alert" : "status"}
+                  >
+                    <span aria-hidden>{semanticCandidateNoClass ? "⚠" : "ℹ"}</span>
                     <span>{classNoteRu}</span>
+                  </div>
+                ) : null}
+                {semanticRuleContradiction ? (
+                  <div className="officer-alert officer-alert--error" role="alert">
+                    <span aria-hidden>⚠</span>
+                    <span>
+                      {typeof semanticRuleCheckPayload?.message_ru === "string" &&
+                      semanticRuleCheckPayload.message_ru.trim()
+                        ? semanticRuleCheckPayload.message_ru.trim()
+                        : "Семантический кандидат отклонён: извлечённые значения противоречат правилам классификации справочника для этого класса."}
+                    </span>
                   </div>
                 ) : null}
                 {errorsRu.length > 0 ? (
@@ -420,26 +639,18 @@ export default function OfficerValidationPage() {
                     </ul>
                   </div>
                 ) : null}
-                {candidateClassIds.length > 1 ? (
+                {reviewNeedsExpert ? (
                   <div className="officer-alert officer-alert--warn" role="alert" style={{ marginBottom: "0.85rem" }}>
                     <span aria-hidden>⚠</span>
                     <span>
-                      {exactlyOneConflictMessage || "Ошибка в справочнике: для стратегии exactly_one найдено несколько классов."}
+                      {exactlyOneConflictMessage ||
+                        "Требуется экспертное решение по классификации — см. раздел «Решение спорных ситуаций» у эксперта."}
                     </span>
                   </div>
                 ) : null}
-                {candidateClassIds.length > 1 ? (
-                  <div style={{ marginBottom: "0.85rem" }}>
-                    <div className="officer-kpi__label" style={{ marginBottom: "0.35rem" }}>
-                      Подходящие классы (несколько совпадений)
-                    </div>
-                    <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-                      {candidateClassIds.map((cid) => (
-                        <span key={cid} className="officer-pill officer-pill--warn">
-                          {cid}
-                        </span>
-                      ))}
-                    </div>
+                {classificationReview?.kind === "none_match" ? (
+                  <div style={{ marginBottom: "0.85rem", fontSize: 14, color: "#92400e" }}>
+                    Ни одно правило классификации не подошло. Запись уйдёт в очередь «Решение спорных ситуаций».
                   </div>
                 ) : null}
                 {hasKpiTiles ? (
@@ -455,16 +666,16 @@ export default function OfficerValidationPage() {
                         <div className="officer-kpi__label">Класс</div>
                         <div
                           className={`officer-kpi__value ${
-                            finalClass == null || String(finalClass).trim() === "" ? "officer-kpi__value--empty" : ""
+                            classKpiDisplay === "" ? "officer-kpi__value--empty" : ""
                           }`}
                         >
-                          {finalClass != null && String(finalClass).trim() !== "" ? String(finalClass) : "не назначен"}
+                          {classKpiDisplay !== "" ? classKpiDisplay : "не назначен"}
                         </div>
                       </div>
-                    ) : finalClass != null && String(finalClass).trim() ? (
+                    ) : classKpiDisplay !== "" ? (
                       <div className="officer-kpi">
                         <div className="officer-kpi__label">Класс</div>
-                        <div className="officer-kpi__value">{String(finalClass)}</div>
+                        <div className="officer-kpi__value">{classKpiDisplay}</div>
                       </div>
                     ) : null}
                     {det?.matched_classification_rule_title != null && String(det.matched_classification_rule_title).trim() ? (
@@ -487,10 +698,114 @@ export default function OfficerValidationPage() {
                         </div>
                       </div>
                     ) : null}
+                    {lastServerElapsedMs != null ? (
+                      <div className="officer-kpi">
+                        <div className="officer-kpi__label">Скорость обработки на сервере</div>
+                        <div className="officer-kpi__value fe-font-mono">{formatDurationMs(lastServerElapsedMs)}</div>
+                      </div>
+                    ) : null}
                   </div>
                 ) : null}
               </div>
             ) : null}
+
+            <div
+              className="officer-pipeline-fallback"
+              style={{
+                border: "1px solid #cbd5e1",
+                borderRadius: 12,
+                padding: "1rem 1.1rem",
+                background: "linear-gradient(165deg, #f8fafc 0%, #f1f5f9 100%)",
+              }}
+            >
+              <h3 style={{ margin: "0 0 0.35rem", fontSize: "0.95rem", fontWeight: 650, color: "#0f172a" }}>
+                Извлечённые признаки
+              </h3>
+              <p style={{ margin: "0 0 0.75rem", fontSize: "0.8125rem", color: "#475569", lineHeight: 1.45 }}>
+                Краткая форма по результату модели. При необходимости откорректируйте значения в форме ниже.
+              </p>
+              {featureExtractionStatus === "inspector_override" ? (
+                <p style={{ margin: "0 0 0.75rem", fontSize: "0.8125rem", color: "#92400e", lineHeight: 1.45 }}>
+                  Признаки заданы вручную после предыдущей корректировки.
+                </p>
+              ) : null}
+              {!featuresEditMode ? (
+                <>
+                  <div
+                    className="officer-summary"
+                    style={{
+                      whiteSpace: "pre-wrap",
+                      fontSize: "0.875rem",
+                      lineHeight: 1.5,
+                      minHeight: "2.5rem",
+                    }}
+                  >
+                    {extractedSummaryRu || (Object.keys(parsedFeatures).length === 0 ? "(нет данных)" : "")}
+                  </div>
+                  <div style={{ marginTop: 12, display: "flex", flexWrap: "wrap", gap: 8 }}>
+                    <button
+                      type="button"
+                      className="btn-secondary"
+                      disabled={busy || !canSubmit}
+                      onClick={() => {
+                        setEditedFeatures(deepClone(parsedFeatures));
+                        setFeaturesEditMode(true);
+                        setCorrectionLogError(null);
+                      }}
+                    >
+                      Откорректировать результат извлечения
+                    </button>
+                  </div>
+                </>
+              ) : (
+                <>
+                  {editedFeatures ? (
+                    <ExtractedFeaturesEditor
+                      value={editedFeatures}
+                      disabled={busy}
+                      onChange={(next) => setEditedFeatures(next)}
+                    />
+                  ) : null}
+                  <div style={{ marginTop: 12, display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
+                    <button
+                      type="button"
+                      className="btn"
+                      disabled={busy || !canSubmit || !editedFeatures}
+                      onClick={() => {
+                        if (!editedFeatures) return;
+                        onApplyFeatureEdits(parsedFeatures, editedFeatures);
+                      }}
+                    >
+                      Применить и перепроверить
+                    </button>
+                    <button
+                      type="button"
+                      className="btn-secondary"
+                      disabled={busy}
+                      onClick={() => {
+                        setFeaturesEditMode(false);
+                        setEditedFeatures(null);
+                        setCorrectionLogError(null);
+                      }}
+                    >
+                      Отмена
+                    </button>
+                  </div>
+                  {correctionLogError ? (
+                    <p style={{ margin: "0.65rem 0 0", fontSize: "0.8125rem", color: "#b91c1c" }}>{correctionLogError}</p>
+                  ) : null}
+                  {correctionLogOk ? (
+                    <p style={{ margin: "0.65rem 0 0", fontSize: "0.8125rem", color: "#166534" }}>
+                      Корректировка записана для эксперта.
+                    </p>
+                  ) : null}
+                </>
+              )}
+              <details style={{ marginTop: 14 }} className="officer-details">
+                <summary>Технический JSON признаков (для отладки)</summary>
+                <pre style={{ fontSize: 12, overflow: "auto", maxHeight: 240 }}>{JSON.stringify(parsedFeatures, null, 2)}</pre>
+              </details>
+            </div>
 
             {semanticPayload ? (
               <div
@@ -519,39 +834,60 @@ export default function OfficerValidationPage() {
                       ? semanticPayload.similarity_threshold.toFixed(4)
                       : String(semanticPayload.similarity_threshold ?? "—")}
                   </strong>
-                  {" · "}
-                  Ниже порога:{" "}
-                  {semanticPayload.below_threshold === true ? "да" : semanticPayload.below_threshold === false ? "нет" : "—"}
                 </p>
                 {typeof semanticPayload.explanation_ru === "string" && semanticPayload.explanation_ru.trim() ? (
                   <p style={{ margin: 0, fontSize: "0.875rem", color: "#451a03" }}>{semanticPayload.explanation_ru}</p>
                 ) : null}
-                {typeof semanticPayload.service_mode === "string" && semanticPayload.service_mode.trim() ? (
-                  <p style={{ margin: "0.5rem 0 0", fontSize: "0.875rem", color: "#78350f", lineHeight: 1.45 }}>
-                    <strong>Режим семантики:</strong> {semanticPayload.service_mode}
-                    {typeof semanticPayload.embedding_model === "string" && semanticPayload.embedding_model.trim()
-                      ? ` · модель ${semanticPayload.embedding_model}`
-                      : ""}
-                    {typeof semanticPayload.n_reference_examples_used === "number" ? (
-                      <>
-                        {" "}
-                        · эталонов с текстом (использовано): {semanticPayload.n_reference_examples_used}
-                        {typeof semanticPayload.n_reference_examples_total === "number"
-                          ? ` / ${semanticPayload.n_reference_examples_total}`
-                          : ""}
-                      </>
-                    ) : null}
-                  </p>
+                {featureSpacePoints.length > 0 ? (
+                  <div style={{ marginTop: 10 }}>
+                    <button
+                      type="button"
+                      className="btn-secondary"
+                      onClick={() => {
+                        setFeatureSpaceZoom(1);
+                        setFeatureSpacePan({ x: 0, y: 0 });
+                        setFeatureSpaceHovered(null);
+                        setFeatureSpaceOpen(true);
+                      }}
+                    >
+                      Навигация в пространстве признаков
+                    </button>
+                  </div>
                 ) : null}
-                {typeof semanticPayload.note_ru === "string" && semanticPayload.note_ru.trim() ? (
-                  <p style={{ margin: "0.35rem 0 0", fontSize: "0.8125rem", color: "#92400e", lineHeight: 1.45 }}>
-                    {semanticPayload.note_ru}
-                  </p>
+                {(
+                  (typeof semanticPayload.service_mode === "string" && semanticPayload.service_mode.trim()) ||
+                  (typeof semanticPayload.note_ru === "string" && semanticPayload.note_ru.trim())
+                ) ? (
+                  <details style={{ marginTop: 10 }} className="officer-details">
+                    <summary>Техподробности семантического шага</summary>
+                    <div style={{ marginTop: 8, fontSize: "0.8125rem", color: "#92400e", lineHeight: 1.45 }}>
+                      {typeof semanticPayload.service_mode === "string" && semanticPayload.service_mode.trim() ? (
+                        <p style={{ margin: 0 }}>
+                          <strong>Режим:</strong> {semanticPayload.service_mode}
+                          {typeof semanticPayload.embedding_model === "string" && semanticPayload.embedding_model.trim()
+                            ? ` · модель ${semanticPayload.embedding_model}`
+                            : ""}
+                          {typeof semanticPayload.n_reference_examples_used === "number" ? (
+                            <>
+                              {" "}
+                              · эталонов: {semanticPayload.n_reference_examples_used}
+                              {typeof semanticPayload.n_reference_examples_total === "number"
+                                ? ` / ${semanticPayload.n_reference_examples_total}`
+                                : ""}
+                            </>
+                          ) : null}
+                        </p>
+                      ) : null}
+                      {typeof semanticPayload.note_ru === "string" && semanticPayload.note_ru.trim() ? (
+                        <p style={{ margin: "0.4rem 0 0" }}>{semanticPayload.note_ru}</p>
+                      ) : null}
+                    </div>
+                  </details>
                 ) : null}
               </div>
             ) : null}
 
-            {llmNamingPayload ? (
+            {llmNamingPayload && hasMeaningfulLlmClassSuggestion ? (
               <div
                 className="officer-pipeline-fallback"
                 style={{
@@ -566,7 +902,7 @@ export default function OfficerValidationPage() {
                 </h3>
                 <p style={{ margin: "0 0 0.5rem", fontSize: "0.875rem", color: "#5b21b6", lineHeight: 1.45 }}>
                   <code className="fe-font-mono" style={{ fontWeight: 700 }}>
-                    {String(llmNamingPayload.suggested_class_name ?? "—")}
+                    {llmSuggestedClassNameRaw}
                   </code>
                 </p>
                 <p style={{ margin: 0, fontSize: "0.875rem", color: "#5b21b6", lineHeight: 1.45 }}>
@@ -602,110 +938,181 @@ export default function OfficerValidationPage() {
                     <h3 id="officer-price-heading" className="officer-price-service__title">
                       Согласование стоимости
                     </h3>
-                    <p className="officer-price-service__subtitle">
-                      Запрос к сервису проверки заявленной стоимости (графа 42) выполнен; ниже ответ сервера.
-                    </p>
                   </div>
-                  <span className="officer-pill officer-pill--ok">Сервис ответил</span>
-                </div>
-                <div className="officer-price-service__endpoint" title="Маршрут сервиса в контуре оркестратора">
-                  <span className="officer-price-service__method">POST</span>
-                  <code className="officer-price-service__path">/api/v1/price/validate</code>
-                  {typeof pricePayload.declaration_id === "string" && pricePayload.declaration_id.trim() ? (
-                    <span className="officer-price-service__decl">· {pricePayload.declaration_id}</span>
-                  ) : null}
+                  <span className={`officer-pill ${pricePayload.status === "price_mismatch" ? "officer-pill--warn" : "officer-pill--ok"}`}>
+                    {pricePayload.status === "price_mismatch" ? "Отклонение" : "Норма"}
+                  </span>
                 </div>
                 <div className="officer-price-service__row">
-                  <span className="officer-price-service__k">Статус обработки</span>
-                  <span className="officer-price-service__v">{priceStatusLabel(pricePayload.status)}</span>
+                  <span className="officer-price-service__k">Средняя</span>
+                  <span className="officer-price-service__v fe-font-mono">{formatMoney(pricePayload.expected_average_price)}</span>
                 </div>
                 <div className="officer-price-service__row">
-                  <span className="officer-price-service__k">Сумма в запросе (графа 42)</span>
+                  <span className="officer-price-service__k">Заявленная (гр. 42)</span>
                   <span className="officer-price-service__v fe-font-mono">
                     {typeof pricePayload.declared_price === "number"
-                      ? String(pricePayload.declared_price)
+                      ? formatMoney(pricePayload.declared_price)
                       : form.graph42.trim() || "—"}
                   </span>
                 </div>
-                {typeof pricePayload.status_ru === "string" && pricePayload.status_ru.trim() ? (
-                  <div className="officer-price-service__body">{pricePayload.status_ru}</div>
-                ) : null}
-                {priceSourceFootnote ? (
-                  <p className="officer-price-service__footnote">{priceSourceFootnote}</p>
-                ) : null}
+                <div className="officer-price-service__row">
+                  <span className="officer-price-service__k">Отклонение</span>
+                  <span className="officer-price-service__v fe-font-mono">
+                    {formatMoney(pricePayload.deviation_abs)}{" "}
+                    <span
+                      style={{
+                        color:
+                          typeof pricePayload.deviation_pct === "number"
+                            ? pricePayload.deviation_pct > 0
+                              ? "#b91c1c"
+                              : pricePayload.deviation_pct < 0
+                                ? "#166534"
+                                : "#0f172a"
+                            : "#0f172a",
+                        fontWeight: 700,
+                      }}
+                    >
+                      ({formatPct(pricePayload.deviation_pct)})
+                    </span>
+                  </span>
+                </div>
+                <div className="officer-price-service__row">
+                  <span className="officer-price-service__k">Объём</span>
+                  <span className="officer-price-service__v fe-font-mono">
+                    {typeof pricePayload.basis_mass_kg === "number" ? `${formatMoney(pricePayload.basis_mass_kg)} кг` : "—"}
+                  </span>
+                </div>
               </div>
             ) : null}
 
-            <div
-              className="officer-pipeline-fallback"
-              style={{
-                border: "1px solid #cbd5e1",
-                borderRadius: 12,
-                padding: "1rem 1.1rem",
-                background: "linear-gradient(165deg, #f8fafc 0%, #f1f5f9 100%)",
-              }}
-            >
-              <h3 style={{ margin: "0 0 0.35rem", fontSize: "0.95rem", fontWeight: 650, color: "#0f172a" }}>
-                Корректировка извлечённых признаков
-              </h3>
-              <p style={{ margin: "0 0 0.75rem", fontSize: "0.8125rem", color: "#475569", lineHeight: 1.45 }}>
-                Если модель ошиблась, отредактируйте JSON ниже и нажмите «Перепроверить с исправленными признаками» — повторный
-                вызов модели извлечения не выполняется, классификация пересчитывается с вашими данными.
-              </p>
-              <label style={{ display: "grid", gap: 6 }}>
-                <span className="officer-section-label">JSON признаков (как после парсинга ответа модели)</span>
-                <textarea
-                  className="officer-textarea fe-font-mono"
-                  style={{ minHeight: 200, fontSize: 13 }}
-                  value={featuresDraft}
-                  onChange={(e) => {
-                    setFeaturesDraft(e.target.value);
-                    setFeaturesDraftError(null);
-                  }}
-                  disabled={busy}
-                  spellCheck={false}
-                  aria-invalid={featuresDraftError != null}
-                />
-              </label>
-              {featuresDraftError ? (
-                <p style={{ margin: "0.5rem 0 0", fontSize: "0.8125rem", color: "#b91c1c" }}>{featuresDraftError}</p>
-              ) : null}
-              <div style={{ marginTop: 10 }}>
-                <button
-                  type="button"
-                  className="btn-secondary"
-                  disabled={busy || !canSubmit}
-                  onClick={() => void onRevalidateWithCorrectedFeatures()}
-                >
-                  Перепроверить с исправленными признаками
-                </button>
-              </div>
-            </div>
-
-            {summaryText ? (
-              <div>
-                <h3
-                  style={{
-                    margin: "0 0 0.6rem",
-                    fontSize: "0.9375rem",
-                    fontWeight: 650,
-                    letterSpacing: "-0.02em",
-                    color: "#0f172a",
-                  }}
-                >
-                  Краткий итог
-                </h3>
-                <div className="officer-summary">{summaryText}</div>
-              </div>
-            ) : null}
-
-            <details className="officer-details">
-              <summary>Технические данные (JSON)</summary>
-              <pre>{JSON.stringify(result, null, 2)}</pre>
-            </details>
           </div>
         ) : null}
       </section>
+      {featureSpaceOpen ? (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label="Навигация в пространстве признаков кластеризации"
+          style={{
+            position: "fixed",
+            inset: 0,
+            zIndex: 1200,
+            background: "rgba(15, 23, 42, 0.45)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            padding: 20,
+          }}
+          onMouseDown={(e) => {
+            if (e.target === e.currentTarget) setFeatureSpaceOpen(false);
+          }}
+        >
+          <div
+            className="card"
+            style={{ width: "min(95vw, 980px)", maxHeight: "90vh", overflow: "auto", padding: 14, background: "#fff" }}
+          >
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, marginBottom: 8 }}>
+              <h3 style={{ margin: 0, fontSize: 17, color: "#0f172a" }}>Пространство признаков кластеризации</h3>
+              <ModalCloseButton onClick={() => setFeatureSpaceOpen(false)} />
+            </div>
+            <p style={{ margin: "0 0 10px", fontSize: 13, color: "#475569" }}>
+              Каждая точка — описание товара. Наведите курсор, чтобы увидеть текст ДТ. Синий маркер — текущий запрос инспектора.
+            </p>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 10, alignItems: "center", marginBottom: 10 }}>
+              <button type="button" className="btn-secondary" onClick={() => setFeatureSpaceZoom((z) => Math.max(0.6, z / 1.2))}>
+                − Масштаб
+              </button>
+              <button type="button" className="btn-secondary" onClick={() => setFeatureSpaceZoom((z) => Math.min(4, z * 1.2))}>
+                + Масштаб
+              </button>
+              <button
+                type="button"
+                className="btn-secondary"
+                onClick={() => {
+                  setFeatureSpaceZoom(1);
+                  setFeatureSpacePan({ x: 0, y: 0 });
+                }}
+              >
+                Сброс
+              </button>
+              <span style={{ fontSize: 12, color: "#64748b" }}>Точек: {featureSpacePoints.length}</span>
+            </div>
+            <div style={{ border: "1px solid #e2e8f0", borderRadius: 10, overflow: "hidden", background: "#f8fafc" }}>
+              <svg
+                viewBox="0 0 860 480"
+                width="100%"
+                style={{ display: "block", cursor: "grab", touchAction: "none" }}
+                onWheel={(e) => {
+                  e.preventDefault();
+                  setFeatureSpaceZoom((z) => Math.min(4, Math.max(0.6, e.deltaY < 0 ? z * 1.08 : z / 1.08)));
+                }}
+                onMouseDown={(e) => {
+                  const sx = e.clientX;
+                  const sy = e.clientY;
+                  const start = { ...featureSpacePan };
+                  const onMove = (ev: MouseEvent) => {
+                    setFeatureSpacePan({ x: start.x + (ev.clientX - sx), y: start.y + (ev.clientY - sy) });
+                  };
+                  const onUp = () => {
+                    window.removeEventListener("mousemove", onMove);
+                    window.removeEventListener("mouseup", onUp);
+                  };
+                  window.addEventListener("mousemove", onMove);
+                  window.addEventListener("mouseup", onUp);
+                }}
+              >
+                <rect x={0} y={0} width={860} height={480} fill="#f8fafc" />
+                <line x1={40} y1={440} x2={820} y2={440} stroke="#cbd5e1" />
+                <line x1={40} y1={40} x2={40} y2={440} stroke="#cbd5e1" />
+                {featureSpacePoints.map((p, i) => {
+                  const pt = projectFeatureSpacePoint(p);
+                  const isQuery = p.kind === "query";
+                  return (
+                    <circle
+                      key={`${p.kind}-${i}`}
+                      cx={pt.x}
+                      cy={pt.y}
+                      r={isQuery ? 6 : 4}
+                      fill={isQuery ? "#2563eb" : "#f59e0b"}
+                      stroke={isQuery ? "#1d4ed8" : "#92400e"}
+                      strokeWidth={1}
+                      opacity={isQuery ? 0.95 : 0.78}
+                      onMouseEnter={() => setFeatureSpaceHovered(p)}
+                      onMouseLeave={() => setFeatureSpaceHovered((prev) => (prev === p ? null : prev))}
+                    >
+                      <title>{p.text}</title>
+                    </circle>
+                  );
+                })}
+              </svg>
+            </div>
+            <div
+              style={{
+                marginTop: 10,
+                minHeight: 72,
+                border: "1px solid #e2e8f0",
+                borderRadius: 8,
+                padding: "8px 10px",
+                background: "#fff",
+                fontSize: 13,
+                color: "#334155",
+                whiteSpace: "pre-wrap",
+              }}
+            >
+              {featureSpaceHovered ? (
+                <>
+                  <div style={{ marginBottom: 4, fontWeight: 600, color: "#0f172a" }}>
+                    {featureSpaceHovered.kind === "query" ? "Запрос инспектора" : `Эталон ${featureSpaceHovered.class_id ?? ""}`}
+                  </div>
+                  <div>{featureSpaceHovered.text || "(пустое описание)"}</div>
+                </>
+              ) : (
+                "Наведите курсор на точку, чтобы увидеть текст описания ДТ."
+              )}
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

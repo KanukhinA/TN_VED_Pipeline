@@ -129,19 +129,19 @@ flowchart TD
 
 Отдельная векторная БД в текущем `compose` не поднята.
 
-## Генерация системного промпта извлечения признаков (кнопка «Сгенерировать основу промпта из справочника»)
+## Справочник LLM-моделей (feature extraction, без хардкода в коде)
 
-Здесь **два разных места правки**, не путать с текстом промпта конфигурации в UI (он хранится в DSL правила в БД).
+Один JSON задаёт **и** список моделей с параметрами рантайма для UI/правил (`rules-engine`), **и** те же параметры для deploy/прогрева в `preprocessing` (Ollama / vLLM).
 
-| Что менять | Где в репозитории | Формат |
-|---|---|---|
-| **Мета-инструкция для LLM «промпт-инженера»** — текст, который задаёт роль, структуру и требования к выходному системному промпту | `frontend/src/expert/featureExtractionPromptGenerator.ts` — константа `FEATURE_EXTRACTION_PROMPT_GENERATOR_META` и логика сборки запроса в `buildFeatureExtractionPromptGeneratorRequest` | Исходный код (TypeScript), не YAML |
-| **Параметры вызова Ollama** для этого запроса (`num_ctx`, `temperature`, `max_new_tokens`, …) | По умолчанию: `services/api-gateway/config/prompt_generator.json`. Переопределение пути: переменная окружения `PROMPT_GENERATOR_CONFIG_PATH` (см. `services/api-gateway/app/prompt_generator_config.py`). Файл перечитывается на каждый запрос. | JSON |
-| Дополнительные значения по умолчанию в коде (если JSON отсутствует или неполный) | `services/api-gateway/app/prompt_generator_config.py` — словарь `CODE_DEFAULT` | Python |
+| Поле | Значение |
+|---|---|
+| **Файл** | [`config/llm_models.json`](config/llm_models.json) |
+| **Формат** | Объект с полем `models`: ключ — тег модели (как в `ollama pull`), значение — параметры (`num_ctx`, `max_new_tokens`, `temperature`, `repetition_penalty`, `max_length`, `enable_thinking`, …). |
+| **Переопределение пути** | `FEATURE_EXTRACTION_MODEL_DEFAULTS_PATH` — в контейнере `backend` (`rules-engine`). `MODEL_RUNTIME_SETTINGS_PATH` — в контейнере `preprocessing`. По умолчанию в образах: `/app/config/llm_models.json`. |
 
-**Исходные данные справочника** (шаблон JSON, допустимые значения), которые подмешиваются в запрос к генератору, берутся из DSL правила: `meta.numeric_characteristics_draft` (редактируется в мастере каталога и сохраняется в БД вместе с правилом, не отдельным yaml-файлом в репозитории).
+**Как добавить модель:** отредактировать `config/llm_models.json` (добавить объект в `models`), подтянуть образ в Ollama при необходимости (`ollama pull <тег>`), перезапустить сервисы или положить файл через volume (в `docker-compose.yml` для `backend` и `preprocessing` уже смонтирован `./config/llm_models.json`).
 
-Диагностика текущего эффективного конфига генератора: `GET /api/feature-extraction/prompt-generator-config` на `api-gateway`.
+**Где это читается:** `GET /api/feature-extraction/model-settings` на `rules-engine` без сохранённой записи в БД отдаёт содержимое этого файла; после первого сохранения настроек в UI/через API актуальный список хранится в PostgreSQL (`AppSetting`), и его нужно обновлять тем же API или снова выставить из файла (при пустой БД файл снова становится источником по умолчанию). Для согласованности deploy с `preprocessing` правьте тот же JSON — он используется как `MODEL_RUNTIME_SETTINGS_PATH`.
 
 ## Контекстная диаграмма
 

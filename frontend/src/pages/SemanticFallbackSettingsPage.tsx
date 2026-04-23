@@ -1,5 +1,6 @@
 import React from "react";
 import { getPipelineConfig, savePipelineConfig } from "../api/client";
+import { FEATURE_EXTRACTION_PROMPT_GENERATOR_META } from "../expert/featureExtractionPromptGenerator";
 import PrimaryCatalogSettingsSection from "../ui/PrimaryCatalogSettingsSection";
 
 export default function SemanticFallbackSettingsPage() {
@@ -17,7 +18,7 @@ export default function SemanticFallbackSettingsPage() {
           setSemanticThreshold(t);
         }
       } catch {
-        if (!cancelled) setStatus("Не удалось загрузить порог пайплайна.");
+        if (!cancelled) setStatus("Не удалось загрузить сохранённый порог.");
       }
     })();
     return () => {
@@ -53,16 +54,13 @@ export default function SemanticFallbackSettingsPage() {
           Порог семантической схожести (SimCheck)
         </h2>
         <p style={{ margin: 0, color: "#334155", lineHeight: 1.5, fontSize: 14 }}>
-          Если детерминированная классификация не выбрала класс, оркестратор вызывает семантический поиск. При схожести{" "}
-          <strong>не выше</strong> этого порога запускается LLM-генерация имени класса; имя не
-          применяется без подтверждения эксперта.
+          Если классификация по правилам справочника не выбрала класс, выполняется семантический поиск (SimCheck). При
+          схожести <strong>не выше</strong> этого порога запускается генерация имени класса моделью; имя не применяется без
+          подтверждения эксперта.
         </p>
         <p style={{ margin: 0, color: "#64748b", lineHeight: 1.55, fontSize: 13 }}>
-          Схожесть с эталонами из датасета справочника считается по эмбеддингам (E5), если в БД есть хотя бы один эталон
-          с непустым текстом описания; иначе используется тестовая заглушка — режим отображается в результате проверки
-          декларации. Для принудительной заглушки при отладке задайте сервису{" "}
-          <code style={{ fontSize: "0.9em" }}>semantic-search</code> переменную{" "}
-          <code style={{ fontSize: "0.9em" }}>SEMANTIC_SEARCH_FORCE_STUB=1</code>.
+          Схожесть считается по эталонам из датасета справочника. Подробности и режим работы поиска отображаются в результате
+          проверки декларации.
         </p>
 
         <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 10 }}>
@@ -99,6 +97,34 @@ export default function SemanticFallbackSettingsPage() {
         ) : null}
       </div>
     </div>
+      <div className="card" style={{ padding: 0, overflow: "hidden" }}>
+        <div style={{ padding: "16px 18px", display: "grid", gap: 12 }}>
+          <h2 style={{ margin: 0, fontSize: 17, fontWeight: 700, color: "#0f172a" }}>
+            Базовый текст промпта для генерации промптов
+          </h2>
+          <p style={{ margin: 0, color: "#334155", lineHeight: 1.5, fontSize: 14 }}>
+            Этот текст используется как мета-инструкция для модели, которая генерирует системный промпт извлечения признаков.
+          </p>
+          <textarea
+            className="fe-textarea-code"
+            value={FEATURE_EXTRACTION_PROMPT_GENERATOR_META}
+            readOnly
+            style={{
+              minHeight: 220,
+              maxHeight: "min(50vh, 420px)",
+              overflow: "auto",
+              whiteSpace: "pre-wrap",
+              wordBreak: "break-word",
+              background: "#f8fafc",
+              border: "1px solid #e2e8f0",
+              borderRadius: 8,
+              padding: "10px 12px",
+              fontSize: 12,
+              color: "#0f172a",
+            }}
+          />
+        </div>
+      </div>
     </div>
   );
 }

@@ -604,11 +604,26 @@ def get_semantic_threshold_for_rule(rule_id: uuid.UUID, db: Session = Depends(ge
     }
 
 
+def _classification_class_ids_from_dsl(dsl: RuleDSL) -> set[str]:
+    """Уникальные class_id из правил классификации (нижний регистр)."""
+    c = dsl.classification
+    if c is None or not c.rules:
+        return set()
+    out: set[str] = set()
+    for r in c.rules:
+        cid = str(r.class_id).strip().lower()
+        if cid:
+            out.add(cid)
+    return out
+
+
 class ReferenceExampleBulkItem(BaseModel):
     """Строка датасета: описание декларации + JSON признаков для детерминированной классификации."""
 
     description_text: str = ""
     data: Any
+    assigned_class_id: Optional[str] = None
+    """Явный класс от эксперта; должен совпадать с одним из class_id в classification.rules."""
 
 
 class ReferenceExampleBulkIn(BaseModel):
@@ -618,6 +633,11 @@ class ReferenceExampleBulkIn(BaseModel):
 class ReferenceExampleBulkOut(BaseModel):
     inserted: int
     skipped: list[dict[str, Any]]
+
+
+def _normalize_reference_description(raw: str) -> str:
+    desc = (raw or "").strip()
+    return desc if desc else "(без описания)"
 
 
 @router.get("/{rule_id}/reference-examples")
@@ -669,29 +689,73 @@ def bulk_reference_examples(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Rule compilation failed: {e}")
 
+    allowed_classes = _classification_class_ids_from_dsl(dsl)
+    existing_descriptions = {
+        (str(d or "").strip() or "(без описания)")
+        for (d,) in db.query(RuleReferenceExample.description_text)
+        .filter(RuleReferenceExample.rule_id == rule_id)
+        .all()
+    }
+    seen_descriptions = set(existing_descriptions)
+
     inserted = 0
     skipped: list[dict[str, Any]] = []
     for idx, item in enumerate(body.items):
-        ok, errors, validated_data, assigned_class = compiled.validate(item.data)
-        if not ok or not assigned_class:
+        desc = _normalize_reference_description(item.description_text or "")
+        if desc in seen_descriptions:
             skipped.append(
                 {
                     "index": idx,
-                    "reason": "validation_failed" if not ok else "no_class",
-                    "errors": errors if not ok else None,
+                    "reason": "duplicate_description_text",
+                    "detail": "example with identical description_text already exists; existing record is preserved",
                 }
             )
             continue
-        desc = (item.description_text or "").strip()
-        if not desc:
-            desc = "(без описания)"
+
+        ok, errors, validated_data, assigned_class = compiled.validate(item.data)
+        if not ok:
+            skipped.append(
+                {
+                    "index": idx,
+                    "reason": "validation_failed",
+                    "errors": errors,
+                }
+            )
+            continue
+
+        expert_raw = (item.assigned_class_id or "").strip()
+        expert_norm = expert_raw.lower() if expert_raw else ""
+        if expert_norm:
+            if expert_norm not in allowed_classes:
+                skipped.append(
+                    {
+                        "index": idx,
+                        "reason": "invalid_class_override",
+                        "detail": "assigned_class_id must match a classification rule class_id",
+                    }
+                )
+                continue
+            final_class = expert_norm
+        else:
+            if not assigned_class:
+                skipped.append(
+                    {
+                        "index": idx,
+                        "reason": "no_class",
+                        "errors": None,
+                    }
+                )
+                continue
+            final_class = str(assigned_class)
+
         row = RuleReferenceExample(
             rule_id=rule_id,
             description_text=desc[:500_000],
             features_json=validated_data if isinstance(validated_data, dict) else item.data,
-            assigned_class_id=str(assigned_class),
+            assigned_class_id=final_class,
         )
         db.add(row)
+        seen_descriptions.add(desc)
         inserted += 1
 
     db.commit()
