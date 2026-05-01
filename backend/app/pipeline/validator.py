@@ -27,6 +27,7 @@ class CompiledRuleCache:
         self._cache: Dict[CompiledRuleCacheKey, Any] = {}
 
     def get_or_compile(self, rv: RuleVersion) -> Any:
+        """Возвращает compiled-правило из кеша или компилирует и кеширует."""
         key = CompiledRuleCacheKey(rule_id=rv.rule_id, rule_version_id=rv.id, version=rv.version)
         compiled = self._cache.get(key)
         if compiled is not None:
@@ -44,6 +45,7 @@ _DEFAULT_CACHE = CompiledRuleCache()
 def validate_with_rule(
     rule_id: uuid.UUID, data: Any, db: Session, *, cache: CompiledRuleCache = _DEFAULT_CACHE
 ) -> Tuple[bool, list[Any], Optional[dict[str, Any]], Optional[str]]:
+    """Валидирует данные по активной версии правила с использованием кеша компиляции."""
     rv: RuleVersion | None = (
         db.query(RuleVersion)
         .filter(RuleVersion.rule_id == rule_id, RuleVersion.is_active.is_(True))
@@ -51,6 +53,7 @@ def validate_with_rule(
         .first()
     )
     if rv is None:
+        # Единый формат ошибки, чтобы вызывающий код не ловил исключения в штатном потоке.
         return (False, [{"message": "Active rule version not found"}], None, None)
 
     compiled = cache.get_or_compile(rv)

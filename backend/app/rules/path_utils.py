@@ -78,11 +78,13 @@ def extract_values(data: Any, path: str) -> List[Any]:
 
 
 def path_exists(data: Any, path: str) -> bool:
+    """Проверяет, есть ли хотя бы одно значение по указанному пути."""
     values = extract_values(data, path)
     return len(values) > 0
 
 
 def extract_first_value(data: Any, path: str) -> Any:
+    """Возвращает первое найденное значение по пути или `None`."""
     values = extract_values(data, path)
     return values[0] if values else None
 

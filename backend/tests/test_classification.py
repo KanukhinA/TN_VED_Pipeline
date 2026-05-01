@@ -139,6 +139,39 @@ def test_row_indicator_value_min_max_one_row():
     assert ok_two and cls_two == "other"
 
 
+def test_row_indicator_accepts_open_ended_numeric_cell_ranges():
+    """Диапазонные значения [x, None] и [None, y] должны считаться валидными скалярами."""
+    cfg = ClassificationConfig(
+        strategy="first_match",
+        rules=[
+            ClassificationRule(
+                class_id="calcium_nitrate",
+                priority=0,
+                conditions=[
+                    RowIndicatorCondition(
+                        type="rowIndicator",
+                        array_path="массовая доля",
+                        name_field="вещество",
+                        name_equals="n",
+                        value_field="массовая доля",
+                        value_min=14.0,
+                    )
+                ],
+            ),
+            ClassificationRule(class_id="other", priority=10, conditions=[]),
+        ],
+    )
+    data = {
+        "массовая доля": [
+            {"вещество": "n", "массовая доля": [17, None]},
+            {"вещество": "nh4+", "массовая доля": [None, 0.5]},
+            {"вещество": "ca", "массовая доля": [32, None]},
+        ]
+    }
+    ok, cls, err = evaluate_classification(data, cfg)
+    assert ok and cls == "calcium_nitrate" and not err
+
+
 def test_rule_conditions_support_or_conjunction():
     cfg = ClassificationConfig(
         strategy="first_match",

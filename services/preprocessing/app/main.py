@@ -124,6 +124,8 @@ class OllamaGenerateRequest(BaseModel):
     temperature: float = Field(default=0.0, ge=0.0, le=2.0)
     top_p: float | None = Field(default=None, ge=0.0, le=1.0)
     enable_thinking: bool = False
+    constrained_decoding: bool = True
+    do_sample: bool = False
 
 
 @app.get("/health")
@@ -263,11 +265,19 @@ def parse_model_json(payload: ParseModelJsonRequest) -> dict[str, Any]:
 
     raw = (payload.text or "").strip()
     if not raw:
-        return {"parsed": {}, "extracted_fragment_preview": ""}
+        return {"parsed": {}, "extracted_fragment_preview": "", "parsed_top_level_kind": "empty"}
+    parsed_any = parse_json_from_model_response(raw)
     fragment = extract_json_from_response(raw)
+    if isinstance(parsed_any, dict):
+        pkind = "dict"
+    elif isinstance(parsed_any, list):
+        pkind = "list"
+    else:
+        pkind = "other"
     return {
-        "parsed": parse_json_from_model_response(raw),
+        "parsed": parsed_any,
         "extracted_fragment_preview": fragment[:1200],
+        "parsed_top_level_kind": pkind,
     }
 
 
@@ -278,17 +288,37 @@ def ollama_generate_endpoint(body: OllamaGenerateRequest) -> dict[str, Any]:
     if not (body.prompt or "").strip():
         raise HTTPException(status_code=400, detail="prompt is required")
     unload_other_running_ollama_models(body.model.strip())
+    # Для совместимости между backends:
+    # - constrained_decoding=True + do_sample=False: максимально детерминированный режим
+    # - do_sample=True: разрешаем стохастическую генерацию (temperature/top_p)
+    runtime_temperature = float(body.temperature)
+    runtime_top_p = body.top_p
+    if body.do_sample:
+        if runtime_temperature <= 0.0:
+            runtime_temperature = 0.2
+        if runtime_top_p is None:
+            runtime_top_p = 0.95
+    elif body.constrained_decoding:
+        runtime_temperature = 0.0
+        runtime_top_p = 1.0
     try:
-        return ollama_generate(
+        out = ollama_generate(
             body.model.strip(),
             body.prompt,
             num_ctx=body.num_ctx,
             num_predict=body.max_new_tokens,
             repeat_penalty=body.repetition_penalty,
-            temperature=body.temperature,
-            top_p=body.top_p,
+            temperature=runtime_temperature,
+            top_p=runtime_top_p,
             enable_thinking=body.enable_thinking,
         )
+        out["runtime_generation"] = {
+            "constrained_decoding": body.constrained_decoding,
+            "do_sample": body.do_sample,
+            "temperature": runtime_temperature,
+            "top_p": runtime_top_p,
+        }
+        return out
     except httpx.HTTPStatusError as e:
         tag = "vllm" if is_vllm() else "ollama"
         raise HTTPException(

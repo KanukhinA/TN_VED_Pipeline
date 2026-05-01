@@ -1,6 +1,4 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import React from "react";
-
 export interface CatalogListSectionProps {
   catalogs: any[];
   /** Соответствие кода группы ТН ВЭД → rule_id основного справочника (как на сервере). */
@@ -133,7 +131,7 @@ export default function CatalogListSection(props: CatalogListSectionProps) {
                   ) : null}
                   {isPrimaryForCategory ? (
                     <span
-                      title="Этот справочник задан как основной для данной категории (группы ТН ВЭД). Сменить выбор: раздел «Извлечение признаков» → «Другие настройки сервисов» → блок «Основной справочник по категории ТН ВЭД»."
+                      title="Этот справочник задан как основной для данной категории (группы ТН ВЭД). Сменить выбор: раздел «Общие настройки» → «Семантическая проверка» → блок «Основной справочник по категории ТН ВЭД»."
                       style={{
                         flexShrink: 0,
                         padding: "2px 8px",

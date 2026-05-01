@@ -1,6 +1,6 @@
-import React, { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { normalizeTnVedEaeuCode } from "../catalog/tnVedCode";
-import { getTnVedParentPrefixesForExpansion, listTnVedChildren } from "../catalog/tnVedEaeuTree";
+import { getTnVedParentPrefixesForExpansion, listTnVedChildren, resolveTnVedCodeLabel } from "../catalog/tnVedEaeuTree";
 import { TN_VED_GROUPS } from "../catalog/tnVedGroupsData";
 
 type NodeProps = {
@@ -120,7 +120,13 @@ export default function TnVedEaeuTreeListbox(props: TnVedEaeuTreeListboxProps) {
   const inputRef = useRef<HTMLInputElement>(null);
   const panelId = useId();
   useEffect(() => {
-    setQuery(value);
+    const norm = normalizeTnVedEaeuCode(value.trim());
+    if (!norm) {
+      setQuery(value);
+      return;
+    }
+    const label = resolveTnVedCodeLabel(norm);
+    setQuery(label || norm);
   }, [value]);
   useEffect(() => {
     if (disabled) setOpen(false);

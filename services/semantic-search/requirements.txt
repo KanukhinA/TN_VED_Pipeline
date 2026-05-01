@@ -1,4 +1,4 @@
-fastapi>=0.110.0
-uvicorn[standard]>=0.27.0
-numpy>=1.26.0
-sentence-transformers>=3.0.0
+fastapi>=0.110.0,<0.137.0
+uvicorn[standard]>=0.27.0,<0.47.0
+numpy>=1.26.0,<2.0.0
+sentence-transformers>=3.0.0,<5.0.0

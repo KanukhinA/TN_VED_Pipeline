@@ -37,6 +37,7 @@ def _get_database_url() -> str:
 
 
 def get_engine() -> Engine:
+    """Создаёт SQLAlchemy engine с параметрами под текущий тип БД."""
     url = _get_database_url()
     connect_args = {}
     # SQLite требует check_same_thread False для работы с FastAPI.
@@ -47,17 +48,20 @@ def get_engine() -> Engine:
 
 
 def create_db_and_tables() -> None:
+    """Инициализирует схему БД и минимальные совместимые миграции."""
     engine = get_engine()
     Base.metadata.create_all(engine)
     _ensure_rules_archived_column(engine)
 
 
 def get_session_factory() -> sessionmaker:
+    """Фабрика SQLAlchemy-сессий для dependency в FastAPI."""
     engine = get_engine()
     return sessionmaker(bind=engine, autoflush=False, autocommit=False)
 
 
 def get_db_session() -> Generator:
+    """Dependency FastAPI: выдаёт сессию и гарантированно закрывает её."""
     SessionLocal = get_session_factory()
     session = SessionLocal()
     try:

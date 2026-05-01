@@ -1,11 +1,12 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { EXTRACTION_TEST_INFER_DURATION_FIELD } from "../api/backendInferenceKeys";
 import {
   fetchFeatureExtractionModelOperationHistory,
   fetchLlmContainerLogs,
   generateFeatureExtractionSystemPrompt,
+  getFeatureExtractionPromptGeneratorMeta,
   getRule,
   listFeatureExtractionModels,
   listRules,
@@ -15,6 +16,7 @@ import {
 } from "../api/client";
 import { buildFeatureExtractionPromptGeneratorRequest } from "../expert/featureExtractionPromptGenerator";
 import SemanticFallbackSettingsPage from "./SemanticFallbackSettingsPage";
+import PromptGeneratorSettingsPage from "./PromptGeneratorSettingsPage";
 import FeatureExtractionModelAdmin from "../ui/FeatureExtractionModelAdmin";
 import FeatureExtractionLlmConsole, { type LlmOperationLogState } from "../ui/FeatureExtractionLlmConsole";
 import FewShotPromptAssistant from "../ui/FewShotPromptAssistant";
@@ -487,41 +489,46 @@ function RunningModelsBanner({ runningModels }: { runningModels: string[] }) {
   );
 }
 
-/** Подстраницы настроек извлечения: каталог → промпты; models и SimCheck — отдельные вкладки. */
-function featureExtractionSubpage(pathname: string): "catalog" | "prompts" | "dataset" | "models" | "simcheck" {
-  if (pathname.endsWith("/simcheck")) return "simcheck";
+/** Подстраницы: настройки справочника + общие настройки моделей и качества извлечения. */
+function featureExtractionSubpage(pathname: string): "catalog" | "prompts" | "dataset" | "models" | "semantic" | "prompt-generator" {
+  if (pathname.endsWith("/prompt-generator")) return "prompt-generator";
+  if (pathname.endsWith("/simcheck") || pathname.endsWith("/semantic")) return "semantic";
   if (pathname.endsWith("/models")) return "models";
   if (pathname.endsWith("/dataset")) return "dataset";
   if (pathname.endsWith("/prompts") || pathname.endsWith("/test")) return "prompts";
+  if (pathname.endsWith("/general-settings") || pathname.endsWith("/general-settings/")) return "semantic";
   return "catalog";
 }
 
 export default function FeatureExtractionSettingsPage() {
   const navigate = useNavigate();
   const location = useLocation();
-  const featureBasePath = location.pathname.startsWith("/expert/") ? "/expert/feature-extraction" : "/feature-extraction";
+  const isExpertScope = location.pathname.startsWith("/expert/");
+  const catalogBasePath = isExpertScope ? "/expert/catalog-settings" : "/catalog-settings";
+  const generalBasePath = isExpertScope ? "/expert/general-settings" : "/general-settings";
   const subpage = featureExtractionSubpage(location.pathname);
   const featurePageH1 =
     subpage === "models"
-      ? "Администрирование моделей"
-      : subpage === "simcheck"
-        ? "Другие настройки сервисов"
+      ? "Управление моделями"
+      : subpage === "prompt-generator"
+        ? "Генератор промптов"
+      : subpage === "semantic"
+        ? "Семантическая проверка и именование классов"
         : subpage === "prompts"
           ? "2. Конфигурация и промпты"
           : subpage === "dataset"
             ? "3. Подгрузить датасет"
             : "1. Справочник";
   const isModelAdminPage = subpage === "models";
-  /** Верхняя «Настройки по справочникам» — только ветка каталог/промпты, не simcheck и не models. */
-  const isCatalogSettingsTopTab = subpage === "catalog" || subpage === "prompts" || subpage === "dataset";
+  const isGeneralSettingsTopTab = subpage === "models" || subpage === "semantic" || subpage === "prompt-generator";
   const [runningModels, setRunningModels] = useState<string[]>([]);
-  /** Состояние консоли модели: показ только на вкладке «Администрирование моделей», при повторном входе текст сохраняется. */
+  /** Состояние консоли модели: показ только на вкладке «Управление моделями», при повторном входе текст сохраняется. */
   const [llmConsole, setLlmConsole] = useState<LlmOperationLogState>(null);
   const [llmContainerLogs, setLlmContainerLogs] = useState<string | null>(null);
   /** Журнал deploy/pause/delete с api-gateway (память процесса шлюза). */
   const [modelOpHistory, setModelOpHistory] = useState<ModelOperationHistoryEvent[]>([]);
   const [modelOpHistoryError, setModelOpHistoryError] = useState<string | null>(null);
-  /** Ключи из JSON админки «Администрирование моделей» (объект models в БД). */
+  /** Ключи из JSON раздела «Управление моделями» (объект models в БД). */
   const [adminModelTags, setAdminModelTags] = useState<string[]>([]);
 
   const [catalogs, setCatalogs] = useState<RuleListItem[]>([]);
@@ -796,9 +803,9 @@ export default function FeatureExtractionSettingsPage() {
   useEffect(() => {
     const p = location.pathname.replace(/\/$/, "");
     if (p.endsWith("/test")) {
-      navigate(`${featureBasePath}/prompts`, { replace: true });
+      navigate(`${catalogBasePath}/prompts`, { replace: true });
     }
-  }, [location.pathname, navigate, featureBasePath]);
+  }, [location.pathname, navigate, catalogBasePath]);
 
   useEffect(() => {
     if (subpage === "prompts") {
@@ -985,7 +992,14 @@ export default function FeatureExtractionSettingsPage() {
       setError("Нет данных справочника или конфигурации.");
       return;
     }
-    const built = buildFeatureExtractionPromptGeneratorRequest(loadedDsl);
+    let metaInstructionText: string | undefined;
+    try {
+      const savedMeta = await getFeatureExtractionPromptGeneratorMeta();
+      metaInstructionText = String(savedMeta.template ?? "").trim() || undefined;
+    } catch {
+      metaInstructionText = undefined;
+    }
+    const built = buildFeatureExtractionPromptGeneratorRequest(loadedDsl, { metaInstructionText });
     if (!built.ok) {
       setError(built.message);
       return;
@@ -1001,7 +1015,7 @@ export default function FeatureExtractionSettingsPage() {
     }
     if (!runningModels.includes(model)) {
       setError(
-        "Выбранная модель не запущена. Запустите её в разделе «Администрирование моделей», затем обновите список или снова откройте этот шаг.",
+        "Выбранная модель не запущена. Запустите её в разделе «Управление моделями», затем обновите список или снова откройте этот шаг.",
       );
       return;
     }
@@ -1061,7 +1075,7 @@ export default function FeatureExtractionSettingsPage() {
     }
     if (!runningModels.includes(effectiveModel)) {
       reportInputModalError(
-        "Выбранная модель не запущена на сервере. Загрузите и запустите её в разделе «Администрирование моделей» — на этой странице нельзя управлять запуском и остановкой моделей.",
+        "Выбранная модель не запущена на сервере. Загрузите и запустите её в разделе «Управление моделями» — на этой странице нельзя управлять запуском и остановкой моделей.",
       );
       return;
     }
@@ -1221,38 +1235,41 @@ export default function FeatureExtractionSettingsPage() {
   return (
     <div className="container" style={{ paddingBottom: showFeLongOpBar ? 88 : undefined }}>
       <h1 style={{ marginBottom: 10 }}>{featurePageH1}</h1>
-      <nav className="fe-text-nav" aria-label="Основные разделы настроек">
-        <button
-          type="button"
-          className={`fe-text-nav__tab${isCatalogSettingsTopTab ? " fe-text-nav__tab--active" : ""}`}
-          onClick={() => navigate(featureBasePath)}
-        >
-          Настройки по справочникам
-        </button>
-        <button
-          type="button"
-          className={`fe-text-nav__tab${isModelAdminPage ? " fe-text-nav__tab--active" : ""}`}
-          onClick={() => navigate(`${featureBasePath}/models`)}
-        >
-          🔒 Администрирование моделей
-        </button>
-        <button
-          type="button"
-          className={`fe-text-nav__tab${subpage === "simcheck" ? " fe-text-nav__tab--active" : ""}`}
-          onClick={() => navigate(`${featureBasePath}/simcheck`)}
-        >
-          Другие настройки сервисов
-        </button>
-      </nav>
+      {isGeneralSettingsTopTab ? (
+        <nav className="fe-text-nav fe-text-nav--steps" aria-label="Разделы общих настроек">
+          <button
+            type="button"
+            className={`fe-text-nav__tab${isModelAdminPage ? " fe-text-nav__tab--active" : ""}`}
+            onClick={() => navigate(`${generalBasePath}/models`)}
+          >
+            🔒 Управление моделями
+          </button>
+          <button
+            type="button"
+            className={`fe-text-nav__tab${subpage === "semantic" ? " fe-text-nav__tab--active" : ""}`}
+            onClick={() => navigate(`${generalBasePath}/semantic`)}
+          >
+            Семантическая проверка
+          </button>
+          <button
+            type="button"
+            className={`fe-text-nav__tab${subpage === "prompt-generator" ? " fe-text-nav__tab--active" : ""}`}
+            onClick={() => navigate(`${generalBasePath}/prompt-generator`)}
+          >
+            Генератор промптов
+          </button>
+        </nav>
+      ) : null}
 
       {subpage === "models" ? (
         <FeatureExtractionModelAdmin
           onRunningModelsChange={setRunningModels}
-          llmConsole={llmConsole}
           setLlmConsole={setLlmConsole}
         />
-      ) : subpage === "simcheck" ? (
+      ) : subpage === "semantic" ? (
         <SemanticFallbackSettingsPage />
+      ) : subpage === "prompt-generator" ? (
+        <PromptGeneratorSettingsPage />
       ) : (
       <div
         style={{
@@ -1268,21 +1285,21 @@ export default function FeatureExtractionSettingsPage() {
         <button
           type="button"
           className={`fe-text-nav__tab${subpage === "catalog" ? " fe-text-nav__tab--active" : ""}`}
-          onClick={() => navigate(featureBasePath)}
+          onClick={() => navigate(catalogBasePath)}
         >
           1. Справочник
         </button>
         <button
           type="button"
           className={`fe-text-nav__tab${subpage === "prompts" ? " fe-text-nav__tab--active" : ""}`}
-          onClick={() => navigate(`${featureBasePath}/prompts`)}
+          onClick={() => navigate(`${catalogBasePath}/prompts`)}
         >
           2. Конфигурация и промпты
         </button>
         <button
           type="button"
           className={`fe-text-nav__tab${subpage === "dataset" ? " fe-text-nav__tab--active" : ""}`}
-          onClick={() => navigate(`${featureBasePath}/dataset`)}
+          onClick={() => navigate(`${catalogBasePath}/dataset`)}
         >
           3. Подгрузить датасет
         </button>
@@ -1406,7 +1423,7 @@ export default function FeatureExtractionSettingsPage() {
           <p style={{ margin: "0 0 12px 0", fontSize: 15 }}>
             Сначала выберите справочник на шаге «Справочник».
           </p>
-          <button type="button" className="btn" onClick={() => navigate(featureBasePath)}>
+          <button type="button" className="btn" onClick={() => navigate(catalogBasePath)}>
             Перейти к выбору справочника
           </button>
         </div>
@@ -2523,7 +2540,7 @@ export default function FeatureExtractionSettingsPage() {
           <p style={{ margin: "0 0 12px 0", fontSize: 15 }}>
             Сначала выберите справочник на шаге «Справочник».
           </p>
-          <button type="button" className="btn" onClick={() => navigate(featureBasePath)}>
+          <button type="button" className="btn" onClick={() => navigate(catalogBasePath)}>
             Перейти к выбору справочника
           </button>
         </div>
@@ -2580,7 +2597,7 @@ export default function FeatureExtractionSettingsPage() {
         }}
       >
         {subpage === "prompts" ? (
-          <button type="button" className="btn-secondary" onClick={() => navigate(featureBasePath)}>
+          <button type="button" className="btn-secondary" onClick={() => navigate(catalogBasePath)}>
             Назад
           </button>
         ) : null}
@@ -2588,7 +2605,7 @@ export default function FeatureExtractionSettingsPage() {
           <button
             type="button"
             className="btn-secondary"
-            onClick={() => navigate(`${featureBasePath}/prompts`)}
+            onClick={() => navigate(`${catalogBasePath}/prompts`)}
           >
             Назад
           </button>
@@ -2598,7 +2615,7 @@ export default function FeatureExtractionSettingsPage() {
             type="button"
             className={!catalogSelected ? "btn-secondary" : "btn"}
             disabled={!catalogSelected}
-            onClick={() => navigate(`${featureBasePath}/prompts`)}
+            onClick={() => navigate(`${catalogBasePath}/prompts`)}
           >
             Далее
           </button>
@@ -2608,7 +2625,7 @@ export default function FeatureExtractionSettingsPage() {
             type="button"
             className={!catalogSelected ? "btn-secondary" : "btn"}
             disabled={!catalogSelected}
-            onClick={() => navigate(`${featureBasePath}/dataset`)}
+            onClick={() => navigate(`${catalogBasePath}/dataset`)}
           >
             Далее: датасет
           </button>

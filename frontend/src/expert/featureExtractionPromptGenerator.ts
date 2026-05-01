@@ -55,6 +55,7 @@ export type PromptGeneratorCatalogResult = PromptGeneratorCatalogOk | PromptGene
 export type PromptGeneratorOverrides = {
   jsonTemplateText?: string;
   allowedValuesText?: string;
+  metaInstructionText?: string;
 };
 
 /**
@@ -150,8 +151,9 @@ export function buildFeatureExtractionPromptGeneratorRequest(
   const effectiveJsonTemplateText = String(overrides?.jsonTemplateText ?? defaultJsonTemplateText).trim();
   const effectiveAllowedValuesText = String(overrides?.allowedValuesText ?? defaultAllowedValuesText).trim();
 
+  const metaInstructionText = String(overrides?.metaInstructionText ?? FEATURE_EXTRACTION_PROMPT_GENERATOR_META).trim();
   const generatorPrompt = [
-    FEATURE_EXTRACTION_PROMPT_GENERATOR_META,
+    metaInstructionText,
     "",
     "ВХОДНЫЕ ДАННЫЕ",
     "",

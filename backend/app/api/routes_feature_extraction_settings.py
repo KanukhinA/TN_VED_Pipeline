@@ -21,6 +21,7 @@ SETTINGS_KEY = "feature_extraction_model_settings_v1"
 
 
 def _normalize_settings(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Приводит payload настроек к стабильному формату `{models: {...}}`."""
     models = payload.get("models")
     if not isinstance(models, dict):
         models = {}
@@ -28,6 +29,7 @@ def _normalize_settings(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _defaults_file_path() -> Path:
+    """Определяет путь к файлу дефолтных настроек моделей."""
     raw = (os.getenv("FEATURE_EXTRACTION_MODEL_DEFAULTS_PATH") or "").strip()
     if raw:
         return Path(raw)
@@ -53,17 +55,27 @@ class ModelRuntimeSettingsPayload(BaseModel):
 
 @router.get("/model-settings")
 def get_feature_extraction_model_settings(db: Session = Depends(get_db_session)) -> Dict[str, Any]:
+    """Читает runtime-настройки моделей из БД с fallback на файл по умолчанию."""
     row: AppSetting | None = db.query(AppSetting).filter(AppSetting.key == SETTINGS_KEY).one_or_none()
     if not row:
         return file_default_model_settings()
-    return _normalize_settings(row.value_json)
+    normalized = _normalize_settings(row.value_json)
+    models = normalized.get("models")
+    if not isinstance(models, dict) or len(models) == 0:
+        # Защита от пустых runtime-настроек в БД: в этом случае используем стабильные дефолты из файла.
+        return file_default_model_settings()
+    return normalized
 
 
 @router.put("/model-settings")
 def put_feature_extraction_model_settings(
     payload: ModelRuntimeSettingsPayload, db: Session = Depends(get_db_session)
 ) -> Dict[str, Any]:
+    """Сохраняет runtime-настройки моделей извлечения в `AppSetting`."""
     normalized = _normalize_settings(payload.model_dump())
+    models = normalized.get("models")
+    if not isinstance(models, dict) or len(models) == 0:
+        raise HTTPException(status_code=400, detail="Список моделей не может быть пустым.")
     row: AppSetting | None = db.query(AppSetting).filter(AppSetting.key == SETTINGS_KEY).one_or_none()
     if row is None:
         row = AppSetting(key=SETTINGS_KEY, value_json=normalized, updated_at=datetime.utcnow())
@@ -84,6 +96,7 @@ class PrimaryCatalogSettingsPayload(BaseModel):
 
 @router.get("/primary-catalog-settings")
 def get_primary_catalog_settings(db: Session = Depends(get_db_session)) -> Dict[str, Any]:
+    """Возвращает эффективные основные справочники по группам ТН ВЭД."""
     return {"by_group_code": get_effective_primary_catalog_map(db)}
 
 
@@ -91,6 +104,7 @@ def get_primary_catalog_settings(db: Session = Depends(get_db_session)) -> Dict[
 def put_primary_catalog_settings(
     payload: PrimaryCatalogSettingsPayload, db: Session = Depends(get_db_session)
 ) -> Dict[str, Any]:
+    """Валидирует и сохраняет назначения основных справочников по группам."""
     try:
         normalized = validate_and_save_primary_catalog_map(db, dict(payload.by_group_code))
     except ValueError as exc:
@@ -105,6 +119,7 @@ class FewShotAssistRunCreate(BaseModel):
 
 
 def _parse_rule_id(raw: str) -> uuid.UUID:
+    """Парсит UUID и отдаёт понятный 400 при ошибке формата."""
     try:
         return uuid.UUID(str(raw).strip())
     except (ValueError, TypeError) as exc:
@@ -115,6 +130,7 @@ def _parse_rule_id(raw: str) -> uuid.UUID:
 def create_few_shot_assist_run(
     payload: FewShotAssistRunCreate, db: Session = Depends(get_db_session)
 ) -> Dict[str, Any]:
+    """Сохраняет результат few-shot-помощника для выбранного справочника."""
     rid = _parse_rule_id(payload.rule_id)
     rule: Rule | None = db.query(Rule).filter(Rule.id == rid).one_or_none()
     if rule is None:
@@ -138,6 +154,7 @@ def list_few_shot_assist_runs(
     rule_id: str = Query(..., description="UUID справочника"),
     db: Session = Depends(get_db_session),
 ) -> Dict[str, Any]:
+    """Возвращает историю запусков few-shot для справочника."""
     rid = _parse_rule_id(rule_id)
     if db.query(Rule).filter(Rule.id == rid).one_or_none() is None:
         raise HTTPException(status_code=404, detail="Справочник не найден")
@@ -165,6 +182,7 @@ def delete_few_shot_assist_run(
     run_id: str,
     db: Session = Depends(get_db_session),
 ) -> Dict[str, str]:
+    """Удаляет запись о прогоне few-shot по id."""
     uid = _parse_rule_id(run_id)
     row: FewShotAssistRun | None = db.query(FewShotAssistRun).filter(FewShotAssistRun.id == uid).one_or_none()
     if row is None:

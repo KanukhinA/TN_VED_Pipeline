@@ -30,6 +30,7 @@ from app.prompt_generator_config import (
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -47,6 +48,18 @@ CLUSTERING_CHUNK_SIZE = int(os.getenv("FEW_SHOT_CLUSTERING_CHUNK_SIZE", "400"))
 MODEL_OP_HISTORY_MAX = max(50, int(os.getenv("MODEL_OP_HISTORY_MAX", "400")))
 
 app = FastAPI(title="API Gateway", version="0.1.0")
+cors_origins_raw = os.getenv(
+    "CORS_ALLOW_ORIGINS",
+    "http://localhost:8081,http://127.0.0.1:8081,http://localhost:8082,http://127.0.0.1:8082",
+)
+cors_allow_origins = [x.strip() for x in cors_origins_raw.split(",") if x.strip()]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=cors_allow_origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 RETRY_ATTEMPTS = 3
 RETRY_BASE_DELAY_SECONDS = 0.35
 
@@ -237,6 +250,7 @@ class ValidationRequest(BaseModel):
     net_weight_kg: float | None = None
     price: float | None = None
     extracted_features_override: dict[str, Any] | None = None
+    semantic_k: int | None = None
 
 
 class FeatureExtractionTestRequest(BaseModel):
@@ -1148,6 +1162,67 @@ async def generate_extraction_system_prompt(payload: GenerateExtractionPromptReq
 
 class PipelineConfigBody(BaseModel):
     semantic_similarity_threshold: Optional[float] = None
+    semantic_neighbor_similarity_floor_s0: Optional[float] = None
+    semantic_support_threshold_tau2: Optional[float] = None
+
+
+class PromptTemplateBody(BaseModel):
+    template: str = ""
+
+
+FEATURE_EXTRACTION_PROMPT_GENERATOR_META_PATH = Path(
+    os.getenv(
+        "FEATURE_EXTRACTION_PROMPT_GENERATOR_META_PATH",
+        "/app/config/feature_extraction_prompt_generator_meta.txt",
+    )
+)
+
+
+def _default_feature_extraction_prompt_generator_meta() -> str:
+    # Синхронизировано с frontend/src/expert/featureExtractionPromptGenerator.ts
+    return (
+        "Ты — промпт-инженер, специализирующийся на создании системных инструкций для LLM, которые извлекают "
+        "структурированные числовые и количественные характеристики из неструктурированных текстов.\n\n"
+        "Твоя задача: на основе предоставленного JSON-шаблона (где значения заменены на null) и списка допустимых "
+        "значений для ключевых полей, сгенерировать готовый системный промпт для модели-экстрактора.\n\n"
+        "ТРЕБОВАНИЯ К ГЕНЕРАЦИИ ПРОМПТА:\n"
+        "1. Сохрани архитектуру: Роль → Задача (пошагово) → Правила маппинга полей → Особые указания → Строгий JSON-вывод.\n"
+        "2. Автоматически определи тип извлекаемых характеристик из ключей JSON. Сформулируй задачу и правила именно под этот тип данных.\n"
+        "3. Интегрируй список допустимых значений в правила нормализации: укажи, что извлечённые значения должны приводиться к "
+        "регистру/формату из списка, заменять синонимы на канонические обозначения и игнорировать несуществующие в списке варианты.\n"
+        "4. Включи в «Особые указания» универсальные правила обработки чисел:\n"
+        "   - Язык вывода: русский.\n"
+        "   - Диапазоны и погрешности → формат [min, max].\n"
+        "   - Логические операторы: «не менее» → [x, null], «не более» → [null, x].\n"
+        "   - Десятичный разделитель: точка.\n"
+        "   - Приоритет: конкретные числовые значения заменяют общие/оценочные формулировки.\n"
+        "   - Пропуск: если атрибут отсутствует в тексте — не выводи его в JSON.\n"
+        "   - Единицы измерения: укажи явно для каждого числового поля, кроме справочных/строковых.\n"
+        "5. В конце промпта приведи пример JSON строго в формате исходного шаблона, но с подставленными реалистичными "
+        "значениями (числа, массивы, корректные null).\n"
+        "6. Стиль: императивный, без воды, готовый к production-использованию. Не добавляй пояснений, комментариев или "
+        "обрамляющих фраз.\n\n"
+        "ВЫВОД: Верни ТОЛЬКО сгенерированный системный промпт."
+    )
+
+
+def _load_feature_extraction_prompt_generator_meta() -> str:
+    try:
+        txt = FEATURE_EXTRACTION_PROMPT_GENERATOR_META_PATH.read_text(encoding="utf-8")
+        if txt.strip():
+            return txt
+    except Exception:
+        pass
+    return _default_feature_extraction_prompt_generator_meta()
+
+
+def _save_feature_extraction_prompt_generator_meta(template: str) -> str:
+    normalized = (template or "").strip()
+    if not normalized:
+        raise ValueError("Шаблон не может быть пустым.")
+    FEATURE_EXTRACTION_PROMPT_GENERATOR_META_PATH.parent.mkdir(parents=True, exist_ok=True)
+    FEATURE_EXTRACTION_PROMPT_GENERATOR_META_PATH.write_text(normalized + "\n", encoding="utf-8")
+    return normalized
 
 
 @app.get("/api/admin/pipeline-config")
@@ -1168,6 +1243,23 @@ def put_pipeline_configuration(body: PipelineConfigBody) -> dict[str, Any]:
     merged = effective_pipeline_params(body.model_dump(exclude_unset=True))
     save_pipeline_file(merged)
     return {"status": "ok", "effective": merged}
+
+
+@app.get("/api/admin/feature-extraction-prompt-generator-meta")
+def get_feature_extraction_prompt_generator_meta() -> dict[str, Any]:
+    return {
+        "template": _load_feature_extraction_prompt_generator_meta(),
+        "path": str(FEATURE_EXTRACTION_PROMPT_GENERATOR_META_PATH),
+    }
+
+
+@app.put("/api/admin/feature-extraction-prompt-generator-meta")
+def put_feature_extraction_prompt_generator_meta(body: PromptTemplateBody) -> dict[str, Any]:
+    try:
+        tpl = _save_feature_extraction_prompt_generator_meta(body.template)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"status": "ok", "template": tpl, "path": str(FEATURE_EXTRACTION_PROMPT_GENERATOR_META_PATH)}
 
 
 class ExpertClassNameDecisionBody(BaseModel):
@@ -1205,6 +1297,60 @@ def get_prompt_generator_configuration() -> dict[str, Any]:
         "from_file": load_prompt_generator_file(),
         "effective": effective_prompt_generator_params(None),
     }
+
+
+@app.get("/api/admin/class-naming-prompt")
+async def get_class_naming_prompt() -> Any:
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        try:
+            resp = await request_with_retry(client, "GET", f"{LLM_GENERATOR_URL}/api/v1/prompt-template")
+            return Response(content=resp.content, status_code=resp.status_code, media_type=resp.headers.get("content-type"))
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"llm-generator unavailable: {exc}") from exc
+
+
+@app.put("/api/admin/class-naming-prompt")
+async def put_class_naming_prompt(request: Request) -> Any:
+    body = await request.body()
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        try:
+            resp = await request_with_retry(
+                client,
+                "PUT",
+                f"{LLM_GENERATOR_URL}/api/v1/prompt-template",
+                content=body if body else None,
+                headers={"content-type": request.headers.get("content-type", "application/json")},
+            )
+            return Response(content=resp.content, status_code=resp.status_code, media_type=resp.headers.get("content-type"))
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"llm-generator unavailable: {exc}") from exc
+
+
+@app.get("/api/admin/class-naming-generation-config")
+async def get_class_naming_generation_config() -> Any:
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        try:
+            resp = await request_with_retry(client, "GET", f"{LLM_GENERATOR_URL}/api/v1/generation-config")
+            return Response(content=resp.content, status_code=resp.status_code, media_type=resp.headers.get("content-type"))
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"llm-generator unavailable: {exc}") from exc
+
+
+@app.put("/api/admin/class-naming-generation-config")
+async def put_class_naming_generation_config(request: Request) -> Any:
+    body = await request.body()
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        try:
+            resp = await request_with_retry(
+                client,
+                "PUT",
+                f"{LLM_GENERATOR_URL}/api/v1/generation-config",
+                content=body if body else None,
+                headers={"content-type": request.headers.get("content-type", "application/json")},
+            )
+            return Response(content=resp.content, status_code=resp.status_code, media_type=resp.headers.get("content-type"))
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"llm-generator unavailable: {exc}") from exc
 
 
 @app.get("/api/feature-extraction/model-settings")

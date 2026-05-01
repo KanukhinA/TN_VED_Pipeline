@@ -1,4 +1,3 @@
-import React from "react";
 import { getTnVedGroup, TN_VED_GROUPS } from "../catalog/tnVedGroupsData";
 import { normalizeTnVedChapterMeta } from "../catalog/tnVedCode";
 

@@ -18,6 +18,7 @@ from .path_utils import extract_first_value, extract_values, path_exists
 
 
 class CrossRuleError(BaseModel):
+    """Структурированная ошибка проверки cross-rule."""
     template: str
     path: Optional[str] = None
     message: str
@@ -25,11 +26,13 @@ class CrossRuleError(BaseModel):
 
 
 def _compare(left: Any, op: ComparisonOpType, right: Any) -> bool:
+    """Унифицированное сравнение значений для условий кросс-правил."""
     if op == "exists":
         return left is not None
     if op == "notExists":
         return left is None
     if op in {"equals", "notEquals", "gt", "gte", "lt", "lte", "in"}:
+        # Для интервалов вида [min, max] приводим к скаляру (среднее/граница).
         coerced = coerce_numeric_cell_to_scalar(left)
         if coerced is not None:
             left = coerced
@@ -74,6 +77,7 @@ def _compare(left: Any, op: ComparisonOpType, right: Any) -> bool:
 
 
 def validate_cross_rules(data: Any, rules: List[CrossRule]) -> List[CrossRuleError]:
+    """Применяет все cross-rules к данным и возвращает накопленный список нарушений."""
     errors: List[CrossRuleError] = []
 
     for rule in rules:
@@ -118,6 +122,7 @@ def validate_cross_rules(data: Any, rules: List[CrossRule]) -> List[CrossRuleErr
             satisfied = _compare(left, cond.op, cond.value)
 
             if satisfied:
+                # Проверяем наличие всех обязательных путей, только если условие if выполнено.
                 for req_path in rule.then.required_paths:
                     if not path_exists(data, req_path):
                         errors.append(
@@ -135,6 +140,7 @@ def validate_cross_rules(data: Any, rules: List[CrossRule]) -> List[CrossRuleErr
                 if path_exists(data, p):
                     present_count += 1
             if present_count < rule.min_count:
+                # Нарушение, если присутствует меньше полей, чем требуется правилом.
                 errors.append(
                     CrossRuleError(
                         template=rule.template,

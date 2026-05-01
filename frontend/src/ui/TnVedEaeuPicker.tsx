@@ -1,6 +1,5 @@
 import React from "react";
-import { normalizeTnVedEaeuCode } from "../catalog/tnVedCode";
-import { isTnVedChildrenDatasetIncomplete, resolveTnVedCodeLabel, TN_VED_CHILDREN_BUILD_INFO } from "../catalog/tnVedEaeuTree";
+import { isTnVedChildrenDatasetIncomplete, TN_VED_CHILDREN_BUILD_INFO } from "../catalog/tnVedEaeuTree";
 import TnVedEaeuTreeListbox from "./TnVedEaeuTreeListbox";
 
 export type TnVedEaeuPickerProps = {
@@ -29,9 +28,6 @@ export default function TnVedEaeuPicker(props: TnVedEaeuPickerProps) {
   const { value, onChange, disabled, label, hideLabel, manualInputId, manualInputInlineLabel, manualInputAside, manualInputRowStyle } = props;
   const labelResolved =
     label === undefined ? "Код ТН ВЭД ЕАЭС для класса" : label;
-  const norm = normalizeTnVedEaeuCode(value.trim()) ?? "";
-
-  const summary = norm ? resolveTnVedCodeLabel(norm) : "";
 
   return (
     <div style={{ width: "100%" }}>
@@ -81,8 +77,6 @@ export default function TnVedEaeuPicker(props: TnVedEaeuPickerProps) {
           searchInputId={manualInputId}
         />
       </div>
-
-      {summary ? <div className="tnved-picker-summary">{summary}</div> : null}
     </div>
   );
 }

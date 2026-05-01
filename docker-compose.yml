@@ -75,6 +75,9 @@ services:
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
       VLLM_BASE_URL: ${VLLM_BASE_URL:-http://vllm:8000}
       OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3.1:8b}
+      CLASS_NAMING_PROMPT_PATH: /app/config/class_naming_prompt.txt
+    volumes:
+      - ./services/llm-naming/config/class_naming_prompt.txt:/app/config/class_naming_prompt.txt
     depends_on:
       ollama:
         condition: service_healthy
@@ -188,6 +191,7 @@ services:
       dockerfile: frontend/Dockerfile
       args:
         VITE_UI_MODE: expert
+        VITE_API_BASE: ${VITE_API_BASE:-http://localhost:8000/api}
     container_name: pipeline_frontend_expert
     depends_on:
       - api-gateway
@@ -200,6 +204,7 @@ services:
       dockerfile: frontend/Dockerfile
       args:
         VITE_UI_MODE: officer
+        VITE_API_BASE: ${VITE_API_BASE:-http://localhost:8000/api}
     container_name: pipeline_frontend_officer
     depends_on:
       - api-gateway

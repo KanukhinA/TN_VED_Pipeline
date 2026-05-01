@@ -11,16 +11,19 @@ from .db.session import create_db_and_tables
 
 
 class ClassifyStubRequest(BaseModel):
+    """Тестовый payload для заглушки классификации."""
     description: str
     tnved_code: str | None = None
     features: dict[str, object] | None = None
 
 
 def create_app() -> FastAPI:
+    """Фабрика FastAPI-приложения backend rules-engine."""
     app = FastAPI(title="Pydantic Rule Builder")
 
     @app.on_event("startup")
     def _startup() -> None:
+        # Создаём таблицы при старте сервиса (для локального/development запуска).
         create_db_and_tables()
 
     app.include_router(rules_router)
@@ -30,10 +33,12 @@ def create_app() -> FastAPI:
 
     @app.get("/health")
     def health() -> dict[str, str]:
+        """Healthcheck для оркестратора/балансировщика."""
         return {"status": "ok", "service": "rules-engine"}
 
     @app.post("/api/pipeline/classify-stub")
     def classify_stub(payload: ClassifyStubRequest) -> dict[str, object]:
+        """Упрощённая заглушка классификации для интеграционных тестов UI/пайплайна."""
         matched = payload.tnved_code is not None and payload.tnved_code.startswith("31")
         return {
             "matched": matched,

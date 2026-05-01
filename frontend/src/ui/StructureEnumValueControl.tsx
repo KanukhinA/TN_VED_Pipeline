@@ -1,4 +1,3 @@
-import React from "react";
 import { matchStructureRowDescriptorByPath, type StructureRowFieldDescriptor } from "../expert/numericCharacteristicsDraft";
 
 type Props = {

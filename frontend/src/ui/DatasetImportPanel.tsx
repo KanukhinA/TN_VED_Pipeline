@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   bulkSaveReferenceExamples,
   deleteReferenceExample,
@@ -667,7 +667,12 @@ export default function DatasetImportPanel({ ruleId, disabled }: DatasetImportPa
       ) : null}
 
       <div className="card" style={{ padding: 14 }}>
-        <div style={{ fontWeight: 650, marginBottom: 8 }}>Эталоны в базе для этого справочника</div>
+        <div style={{ fontWeight: 650, marginBottom: 8, display: "flex", alignItems: "center", gap: 8 }}>
+          <span>Эталоны в базе для этого справочника</span>
+          <span style={{ fontSize: 12, color: "#475569", fontWeight: 600 }}>
+            ({storedLoading ? "загрузка..." : `записей: ${stored.length}`})
+          </span>
+        </div>
         {storedLoading ? (
           <p style={{ margin: 0, color: "#64748b" }}>Загрузка…</p>
         ) : stored.length === 0 ? (

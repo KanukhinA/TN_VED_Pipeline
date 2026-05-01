@@ -1,4 +1,3 @@
-import React from "react";
 import { formatElapsedSec } from "../hooks/useElapsedSeconds";
 
 export type LongOperationStatusBarProps = {

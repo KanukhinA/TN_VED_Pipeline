@@ -34,9 +34,11 @@ _MAX_ROW_PAIR_RATIO_TOLERANCE_REL = 0.1
 
 
 def _row_indicator_value_matches_range(lf: float, cond: RowIndicatorCondition) -> bool:
+    """Проверяет числовое значение индикатора по диапазону из условия."""
     vmin = cond.value_min
     vmax = cond.value_max
     if vmin is not None and vmax is not None:
+        # Для совместимости трактуем диапазон как цель со сравнением по относительному допуску.
         target = (vmin + vmax) / 2.0
         return _formula_compare_numeric(lf, "equals", target, _ROW_INDICATOR_RANGE_TARGET_TOLERANCE_REL)
     if vmin is not None:
@@ -47,6 +49,7 @@ def _row_indicator_value_matches_range(lf: float, cond: RowIndicatorCondition) -
 
 
 def _condition_is_primary(cond: ClassificationCondition) -> bool:
+    """Возвращает флаг primary для любого поддерживаемого типа условия."""
     if isinstance(cond, PathClassificationCondition):
         return cond.primary
     if isinstance(cond, RowIndicatorCondition):
@@ -59,6 +62,7 @@ def _condition_is_primary(cond: ClassificationCondition) -> bool:
 
 
 def _condition_conjunction(cond: ClassificationCondition) -> str:
+    """Извлекает логическую связку (and/or) из условия."""
     if isinstance(cond, PathClassificationCondition):
         return cond.conjunction
     if isinstance(cond, RowIndicatorCondition):
@@ -71,6 +75,7 @@ def _condition_conjunction(cond: ClassificationCondition) -> str:
 
 
 def _condition_group_id(cond: ClassificationCondition) -> Optional[str]:
+    """Возвращает group_id, если условие входит в группу."""
     if isinstance(cond, PathClassificationCondition):
         return cond.group_id
     if isinstance(cond, RowIndicatorCondition):
@@ -83,6 +88,7 @@ def _condition_group_id(cond: ClassificationCondition) -> Optional[str]:
 
 
 def _rule_matches_by_groups(data: Any, conditions: List[ClassificationCondition]) -> bool:
+    """Проверяет правило в режиме групп: достаточно прохождения любой полной группы."""
     groups: Dict[str, List[ClassificationCondition]] = {}
     order: List[str] = []
     for cond in conditions:
@@ -103,10 +109,11 @@ def _rule_matches_by_groups(data: Any, conditions: List[ClassificationCondition]
 
 
 def _rule_matches(data: Any, rule: ClassificationRule) -> bool:
+    """Проверяет, выполняется ли правило классификации для данных."""
     if not rule.conditions:
         return True
     primary_conds = [c for c in rule.conditions if _condition_is_primary(c)]
-    # Если все помечены как необязательные — как раньше: проверяем все (обратная совместимость).
+    # Если нет primary-условий, проверяем все как в старом поведении.
     to_check = primary_conds if primary_conds else rule.conditions
     if any(_condition_group_id(cond) for cond in to_check):
         return _rule_matches_by_groups(data, to_check)
@@ -120,6 +127,7 @@ def _rule_matches(data: Any, rule: ClassificationRule) -> bool:
 
 
 def _condition_holds(data: Any, cond: ClassificationCondition) -> bool:
+    """Диспетчер проверки одного условия по его типу."""
     if isinstance(cond, PathClassificationCondition):
         if cond.op == "exists":
             return bool(extract_values(data, cond.path))
@@ -142,6 +150,7 @@ def _condition_holds(data: Any, cond: ClassificationCondition) -> bool:
 
 
 def _op_to_text(op: str) -> str:
+    """Преобразует внутренний оператор в человекочитаемый вид."""
     m = {
         "equals": "=",
         "notEquals": "!=",
@@ -159,12 +168,42 @@ def _op_to_text(op: str) -> str:
     return m.get(op, op)
 
 
+def _path_to_ru(path: str) -> str:
+    """Делает путь поля читаемым для русскоязычного UI."""
+    p = str(path or "").strip()
+    if not p:
+        return "поле"
+    p = p.replace("[*]", "")
+    p = p.replace(".", " -> ")
+    return f"поле «{p}»"
+
+
+def _value_to_ru(value: Any) -> str:
+    if isinstance(value, str):
+        return f"«{value}»"
+    if isinstance(value, (list, tuple)):
+        items = ", ".join(f"«{str(v)}»" for v in value)
+        return f"[{items}]"
+    return str(value)
+
+
 def _condition_to_ru(cond: ClassificationCondition) -> str:
+    """Строит краткое русское описание условия для сообщений об ошибках."""
     if isinstance(cond, PathClassificationCondition):
-        op = _op_to_text(cond.op)
-        if cond.op in ("exists", "notExists"):
-            return f"path `{cond.path}`: {op}"
-        return f"path `{cond.path}`: {op} {cond.value!r}"
+        field_name = _path_to_ru(cond.path)
+        if cond.op == "exists":
+            return f"{field_name} должно быть заполнено"
+        if cond.op == "notExists":
+            return f"{field_name} должно отсутствовать"
+        if cond.op == "in":
+            return f"{field_name} должно быть одним из значений {_value_to_ru(cond.value)}"
+        if cond.op == "notIn":
+            return f"{field_name} не должно входить в набор {_value_to_ru(cond.value)}"
+        if cond.op == "equals":
+            return f"{field_name} должно быть равно {_value_to_ru(cond.value)}"
+        if cond.op == "notEquals":
+            return f"{field_name} не должно быть равно {_value_to_ru(cond.value)}"
+        return f"{field_name}: {_op_to_text(cond.op)} {_value_to_ru(cond.value)}"
     if isinstance(cond, RowIndicatorCondition):
         if cond.value_min is not None or cond.value_max is not None:
             return (
@@ -184,6 +223,7 @@ def _condition_to_ru(cond: ClassificationCondition) -> str:
 
 
 def _semantic_rule_mismatch_details_ru(data: Any, rule: ClassificationRule, max_items: int = 3) -> str:
+    """Формирует короткое объяснение, какие условия правила не выполнились."""
     primary_conds = [c for c in rule.conditions if _condition_is_primary(c)]
     to_check = primary_conds if primary_conds else rule.conditions
     if not to_check:
@@ -201,6 +241,7 @@ def _semantic_rule_mismatch_details_ru(data: Any, rule: ClassificationRule, max_
 
 
 def _row_indicator_holds(data: Any, cond: RowIndicatorCondition) -> bool:
+    """Проверяет rowIndicator: находит строку по имени и сверяет её значение."""
     arr = extract_first_value(data, cond.array_path)
     if not isinstance(arr, list):
         return False
@@ -224,6 +265,7 @@ def _row_indicator_holds(data: Any, cond: RowIndicatorCondition) -> bool:
 
 
 def _formula_compare_numeric(lhs: float, op: str, rhs: float, tolerance_rel: float) -> bool:
+    """Сравнение чисел с относительным допуском для equals."""
     if op == "equals":
         scale = max(abs(lhs), abs(rhs), 1e-12)
         return abs(lhs - rhs) <= tolerance_rel * scale
@@ -231,6 +273,7 @@ def _formula_compare_numeric(lhs: float, op: str, rhs: float, tolerance_rel: flo
 
 
 def _row_formula_holds(data: Any, cond: RowFormulaCondition) -> bool:
+    """Проверяет rowFormula: собирает переменные, вычисляет формулу, сравнивает результат."""
     arr = extract_first_value(data, cond.array_path)
     if not isinstance(arr, list):
         return False
@@ -246,6 +289,7 @@ def _row_formula_holds(data: Any, cond: RowFormulaCondition) -> bool:
             found = coerce_numeric_cell_to_scalar(row.get(cond.value_field))
             break
         if found is None:
+            # Если любой обязательный компонент не найден, формулу проверить нельзя.
             return False
         num_vars[var_id] = found
     try:
@@ -258,6 +302,7 @@ def _row_formula_holds(data: Any, cond: RowFormulaCondition) -> bool:
 
 
 def _row_pair_ratio_holds(data: Any, cond: RowPairRatioCondition) -> bool:
+    """Проверяет условие отношения двух компонент с ограничением допуска."""
     arr = extract_first_value(data, cond.array_path)
     if not isinstance(arr, list):
         return False
@@ -287,6 +332,7 @@ def _row_pair_ratio_holds(data: Any, cond: RowPairRatioCondition) -> bool:
     if v_left is None or v_right is None:
         return False
     if v_right == 0.0:
+        # Защита от деления на ноль в фактическом отношении.
         return False
     expected = cond.ratio_left / cond.ratio_right
     actual = v_left / v_right
@@ -296,6 +342,7 @@ def _row_pair_ratio_holds(data: Any, cond: RowPairRatioCondition) -> bool:
 
 
 def _ordered_rules_list(rules: List[ClassificationRule]) -> List[ClassificationRule]:
+    """Стабильно сортирует правила: сначала priority, затем исходный порядок."""
     indexed = sorted(enumerate(rules), key=lambda x: (x[1].priority, x[0]))
     return [r for _, r in indexed]
 
@@ -352,6 +399,7 @@ def evaluate_classification(
     ordered = _ordered_rules_list(config.rules)
 
     if config.strategy == "first_match":
+        # Возвращаем первый матч; при отсутствии используем default_class_id.
         for rule in ordered:
             if _rule_matches(data, rule):
                 return (True, rule.class_id, [])
@@ -369,6 +417,7 @@ def evaluate_classification(
         )
 
     if config.strategy == "exactly_one":
+        # Для strictly-one собираем все совпадения и применяем стратегию разрешения неоднозначности.
         matched_indices = [i for i, r in enumerate(ordered) if _rule_matches(data, r)]
         if len(matched_indices) == 1:
             return (True, ordered[matched_indices[0]].class_id, [])
@@ -414,6 +463,6 @@ def semantic_candidate_matches_class_rule(
     return (
         False,
         "Извлечённые значения не удовлетворяют условиям классификации справочника для класса, "
-        f"выбранного по схожести с эталонами. Не выполнено правило: «{rule_name}». "
-        f"Конкретно: {mismatch}.",
+        f"выбранного по схожести с эталонами. Не выполнено правило: «{rule_name}»"
+        f". А именно: {mismatch}.",
     )

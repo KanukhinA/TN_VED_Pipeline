@@ -59,6 +59,7 @@ def get_effective_primary_catalog_map(db: Session) -> Dict[str, str]:
 
 
 def _meta_group_from_rv(rv: RuleVersion) -> Optional[str]:
+    """Извлекает и нормализует группу ТН ВЭД из `RuleVersion.dsl_json.meta`."""
     meta = rv.dsl_json.get("meta") if isinstance(rv.dsl_json, dict) else None
     if not isinstance(meta, dict):
         return None
@@ -72,6 +73,7 @@ def _meta_group_from_rv(rv: RuleVersion) -> Optional[str]:
 
 
 def load_primary_catalog_map(db: Session) -> Dict[str, str]:
+    """Читает сохранённые назначения `группа -> rule_id` из AppSetting."""
     row: AppSetting | None = (
         db.query(AppSetting).filter(AppSetting.key == PRIMARY_CATALOG_APP_KEY).one_or_none()
     )
@@ -102,6 +104,7 @@ def validate_and_save_primary_catalog_map(db: Session, by_group_code: Dict[str, 
     """
     groups = group_rule_ids_by_tn_ved(db)
     if not groups:
+        # Если активных справочников нет, очищаем настройку и выходим без ошибки.
         row: AppSetting | None = (
             db.query(AppSetting).filter(AppSetting.key == PRIMARY_CATALOG_APP_KEY).one_or_none()
         )
@@ -171,6 +174,7 @@ def validate_and_save_primary_catalog_map(db: Session, by_group_code: Dict[str, 
 
     missing = set(groups.keys()) - set(normalized.keys())
     if missing:
+        # Требуем явный выбор основного справочника по каждой доступной группе.
         raise ValueError(
             "Не задан основной справочник для групп ТН ВЭД: "
             + ", ".join(sorted(missing, key=lambda x: (len(x), x)))

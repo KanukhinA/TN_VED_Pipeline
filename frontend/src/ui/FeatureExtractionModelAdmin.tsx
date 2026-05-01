@@ -13,8 +13,6 @@ import type { LlmOperationLogState } from "./FeatureExtractionLlmConsole";
 type Props = {
   /** Список сейчас запущенных на сервере моделей (для экрана «Справочники»). */
   onRunningModelsChange?: (runningModels: string[]) => void;
-  /** Состояние консоли вынесено на страницу — не пропадает при смене вкладки. */
-  llmConsole: LlmOperationLogState;
   setLlmConsole: React.Dispatch<React.SetStateAction<LlmOperationLogState>>;
 };
 
@@ -214,7 +212,6 @@ function formatDeployElapsed(totalSec: number): string {
 
 export default function FeatureExtractionModelAdmin({
   onRunningModelsChange,
-  llmConsole,
   setLlmConsole,
 }: Props) {
   const [settingsText, setSettingsText] = React.useState(JSON.stringify(defaultJson, null, 2));

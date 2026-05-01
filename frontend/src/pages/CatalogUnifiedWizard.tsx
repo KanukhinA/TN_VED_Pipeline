@@ -1,11 +1,12 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   archiveRule,
   cloneRule,
   deleteRule,
   getPrimaryCatalogSettings,
   getRule,
+  getClassificationRuleConflicts,
   listRules,
   saveRule,
   unarchiveRule,
@@ -18,7 +19,7 @@ import ClassificationRulesPanel, {
   parseClassificationFromDsl,
   type UiClassification,
 } from "../ui/ClassificationRulesPanel";
-import { generateSampleJson, loadDraftFromDslResponse, suggestModelId } from "../expert/expertDraft";
+import { suggestModelId } from "../expert/expertDraft";
 import {
   buildStructureRowDescriptors,
   defaultNumericCharacteristicsDraft,
@@ -27,7 +28,6 @@ import {
   normalizeNumericCharacteristicsDraft,
   numericCharacteristicsToDsl,
   parseNumericCharacteristicsDraft,
-  serializeNumericCharacteristicsDraft,
   type NumericCharacteristicsDraft,
 } from "../expert/numericCharacteristicsDraft";
 import JsonSchemaPreviewAside, { splitMainColumnStyle, splitRowStyle } from "../ui/JsonSchemaPreviewAside";
@@ -58,6 +58,7 @@ export default function CatalogUnifiedWizard() {
   const [ruleId, setRuleId] = useState<string | null>(null);
   const [dataJson, setDataJson] = useState("{}");
   const [validateResult, setValidateResult] = useState<any>(null);
+  const [ruleConflictsResult, setRuleConflictsResult] = useState<any>(null);
   const [classificationJsonText, setClassificationJsonText] = useState("");
   const [classificationJsonError, setClassificationJsonError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -248,6 +249,7 @@ export default function CatalogUnifiedWizard() {
       }
       setFlowStep(2);
       setValidateResult(null);
+      setRuleConflictsResult(null);
     } catch (e: any) {
       window.alert(e?.message ?? String(e));
     }
@@ -289,6 +291,7 @@ export default function CatalogUnifiedWizard() {
       setDsl(payload);
       setRuleId(res.rule_id);
       setValidateResult(null);
+      setRuleConflictsResult(null);
       await refreshCatalogs();
     } catch (e: any) {
       window.alert(e?.message ?? String(e));
@@ -307,6 +310,21 @@ export default function CatalogUnifiedWizard() {
       setValidateResult(await validateRule(ruleId, JSON.parse(dataJson)));
     } catch (e: any) {
       setValidateResult({ ok: false, errors: [{ message: e?.message ?? String(e) }] });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleCheckRuleConflicts() {
+    if (!ruleId) {
+      window.alert("Сначала сохраните справочник.");
+      return;
+    }
+    setBusy(true);
+    try {
+      setRuleConflictsResult(await getClassificationRuleConflicts(ruleId));
+    } catch (e: any) {
+      window.alert(e?.message ?? String(e));
     } finally {
       setBusy(false);
     }
@@ -334,6 +352,7 @@ export default function CatalogUnifiedWizard() {
       setRuleId(full.rule_id);
       setFlowStep(target);
       setValidateResult(null);
+      setRuleConflictsResult(null);
       dataJsonTouchedRef.current = false;
       dataJsonAutoDraftKeyRef.current = "";
     } catch (e: any) {
@@ -352,6 +371,7 @@ export default function CatalogUnifiedWizard() {
     setRuleId(null);
     setDataJson("{}");
     setValidateResult(null);
+    setRuleConflictsResult(null);
     dataJsonTouchedRef.current = false;
     dataJsonAutoDraftKeyRef.current = "";
   }
@@ -424,7 +444,7 @@ export default function CatalogUnifiedWizard() {
   }
 
   const flowTitle =
-    flowStep === 1 ? "Шаг 1. Структура" : flowStep === 2 ? "Шаг 2. Классы" : "Шаг 3. Сохранение";
+    flowStep === 1 ? "Шаг 1. Структура" : flowStep === 2 ? "Шаг 2. Классы" : "Шаг 3. Проверка правил";
 
   const tnVedCodeResolved = useMemo(() => {
     const fromState = normalizeTnVedGroupCode(tnVedGroupCode);
@@ -633,12 +653,55 @@ export default function CatalogUnifiedWizard() {
               {JSON.stringify(validateResult, null, 2)}
             </pre>
           ) : null}
+          {ruleConflictsResult ? (
+            <div
+              style={{
+                marginTop: 12,
+                padding: 12,
+                borderRadius: 8,
+                border: `1px solid ${ruleConflictsResult.has_conflicts ? "#fecaca" : "#bbf7d0"}`,
+                background: ruleConflictsResult.has_conflicts ? "#fef2f2" : "#f0fdf4",
+              }}
+            >
+              <div style={{ fontWeight: 700, color: ruleConflictsResult.has_conflicts ? "#991b1b" : "#166534", marginBottom: 8 }}>
+                {ruleConflictsResult.has_conflicts
+                  ? `Найдены пересечения правил: ${Array.isArray(ruleConflictsResult.conflicts) ? ruleConflictsResult.conflicts.length : 0}`
+                  : "Пересечений между созданными правилами не обнаружено"}
+              </div>
+              {ruleConflictsResult.has_conflicts && Array.isArray(ruleConflictsResult.conflicts) ? (
+                <div style={{ display: "grid", gap: 8 }}>
+                  {(() => {
+                    const grouped = new Map<string, { left: string; rights: string[] }>();
+                    for (const c of ruleConflictsResult.conflicts as any[]) {
+                      const left = `#${c.left_rule_index} ${c.left_class_id ?? ""}`.trim();
+                      const right = `#${c.right_rule_index} ${c.right_class_id ?? ""}`.trim();
+                      const key = `${c.left_rule_index}|${c.left_class_id ?? ""}`;
+                      const row = grouped.get(key) ?? { left, rights: [] };
+                      row.rights.push(right);
+                      grouped.set(key, row);
+                    }
+                    return [...grouped.values()].map((g, idx) => (
+                      <div key={`${g.left}-${idx}`} style={{ border: "1px solid #fecaca", borderRadius: 6, background: "#fff", padding: "8px 10px" }}>
+                        <div style={{ fontWeight: 700, color: "#7f1d1d", marginBottom: 4 }}>{g.left}</div>
+                        <div style={{ fontSize: 13, color: "#991b1b", lineHeight: 1.4 }}>
+                          Пересекается с: {g.rights.join(", ")}
+                        </div>
+                      </div>
+                    ));
+                  })()}
+                </div>
+              ) : null}
+            </div>
+          ) : null}
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 16, alignItems: "center" }}>
             <button type="button" className="btn" disabled={busy} onClick={() => void handleSave()}>
               Сохранить справочник
             </button>
             <button type="button" className="btn-secondary" disabled={busy || !ruleId} onClick={() => void handleValidate()}>
               Проверить
+            </button>
+            <button type="button" className="btn-secondary" disabled={busy || !ruleId} onClick={() => void handleCheckRuleConflicts()}>
+              Проверить конфликты правил
             </button>
             <button type="button" className="btn-secondary" onClick={() => setFlowStep(2)}>
               Назад

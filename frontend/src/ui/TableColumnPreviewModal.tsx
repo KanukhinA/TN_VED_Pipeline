@@ -224,7 +224,7 @@ export function TableColumnPreviewModal({
                     >
                       {rowNum}
                     </td>
-                    {table.columns.map((c, ci) => {
+                    {table.columns.map((_, ci) => {
                       const isPrimary = ci === activeCol;
                       const isSecondary = secondaryCol >= 0 && ci === secondaryCol && ci !== activeCol;
                       return (

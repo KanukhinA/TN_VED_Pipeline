@@ -12,7 +12,11 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 import psycopg2
 
-from app.pipeline_config import load_semantic_similarity_threshold
+from app.pipeline_config import (
+    load_semantic_neighbor_similarity_floor_s0,
+    load_semantic_similarity_threshold,
+    load_semantic_support_threshold_tau2,
+)
 
 PREPROCESSING_URL = os.getenv("PREPROCESSING_URL", "http://preprocessing:8004")
 RULES_ENGINE_URL = os.getenv("RULES_ENGINE_URL", "http://backend:8000")
@@ -32,6 +36,7 @@ class ValidationRequest(BaseModel):
     net_weight_kg: float | None = None
     price: float | None = None
     extracted_features_override: Optional[dict[str, Any]] = None
+    semantic_k: int | None = None
 
 
 def init_jobs_schema() -> None:
@@ -118,7 +123,7 @@ def health() -> dict[str, str]:
 
 async def _fetch_reference_examples_for_rule(
     client: httpx.AsyncClient, rule_id: str | None
-) -> list[dict[str, str]]:
+) -> list[dict[str, Any]]:
     if not rule_id:
         return []
     try:
@@ -131,14 +136,17 @@ async def _fetch_reference_examples_for_rule(
         raw = data.get("examples") if isinstance(data, dict) else None
         if not isinstance(raw, list):
             return []
-        out: list[dict[str, str]] = []
+        out: list[dict[str, Any]] = []
         for ex in raw:
             if not isinstance(ex, dict):
                 continue
+            emb = ex.get("embedding")
+            emb_vec = emb if isinstance(emb, list) else None
             out.append(
                 {
                     "description_text": str(ex.get("description_text") or ""),
                     "assigned_class_id": str(ex.get("assigned_class_id") or ""),
+                    "embedding": emb_vec,
                 }
             )
         return out
@@ -193,10 +201,15 @@ async def _run_validate_pipeline(
 
     flow: dict[str, Any] = {"declaration_id": payload.declaration_id, "steps": []}
     class_id: str | None = None
+    problem_registry_record_created = False
 
     async with httpx.AsyncClient(timeout=900.0) as client:
         try:
-            await phase("catalog", "Подбор справочника", "Запускаем officer-run и извлекаем признаки.")
+            await phase(
+                "catalog",
+                "Подбор справочника",
+                "Подбираем подходящий справочник и извлекаем признаки из описания декларации.",
+            )
             officer = await client.post(
                 f"{RULES_ENGINE_URL}/api/pipeline/officer-run",
                 json=payload.model_dump(),
@@ -241,6 +254,36 @@ async def _run_validate_pipeline(
                         "explanation_ru": expl,
                     },
                 )
+                # Чтобы спорные случаи по классификации стабильно попадали в архив и очередь
+                # экспертных решений, создаём explicit запись expert-decision.
+                try:
+                    cat = officer_json.get("catalog")
+                    rid = None
+                    if isinstance(cat, dict) and cat.get("rule_id") is not None:
+                        rid = str(cat.get("rule_id")).strip() or None
+                    body_ed: dict[str, Any] = {
+                        "category": "classification_expert_review",
+                        "declaration_id": payload.declaration_id,
+                        "summary_ru": f"Требуется подтверждение эксперта по классификации для декларации {payload.declaration_id}",
+                        "payload": {
+                            "source": "orchestrator",
+                            "step": "expert-review-routing",
+                            "classification_expert_review": crev,
+                            "explanation_ru": expl,
+                            "officer_result": officer_json,
+                        },
+                    }
+                    if rid:
+                        body_ed["rule_id"] = rid
+                    pr_ed = await client.post(
+                        f"{RULES_ENGINE_URL}/api/expert-decisions",
+                        json=body_ed,
+                        timeout=30.0,
+                    )
+                    pr_ed.raise_for_status()
+                    problem_registry_record_created = True
+                except Exception:
+                    pass
             elif not class_id:
                 cat = officer_json.get("catalog")
                 rule_id_from_catalog: str | None = None
@@ -256,12 +299,20 @@ async def _run_validate_pipeline(
 
                 await phase("semantic-search", "Семантический fallback", "Ищем ближайший эталон по эмбеддингам.")
                 try:
+                    knn_k = int(payload.semantic_k) if payload.semantic_k is not None else 3
+                    if knn_k < 1:
+                        knn_k = 1
+                    neighbor_floor_s0 = load_semantic_neighbor_similarity_floor_s0()
+                    support_tau2 = load_semantic_support_threshold_tau2()
                     ss = await client.post(
                         f"{SEMANTIC_SEARCH_URL}/api/v1/search",
                         json={
                             "description": payload.description,
                             "tnved_code": payload.tnved_code,
                             "similarity_threshold": threshold,
+                            "knn_k": knn_k,
+                            "neighbor_similarity_floor_s0": neighbor_floor_s0,
+                            "support_threshold_tau2": support_tau2,
                             "rule_id": rule_id_from_catalog,
                             "reference_examples": reference_examples,
                         },
@@ -382,6 +433,10 @@ async def _run_validate_pipeline(
                         if isinstance(cat, dict) and cat.get("rule_id") is not None:
                             rid = str(cat.get("rule_id")).strip() or None
                         sug = str(nm_data.get("suggested_class_name") or "").strip()
+                        fe = officer_json.get("feature_extraction")
+                        fe_summary = ""
+                        if isinstance(fe, dict):
+                            fe_summary = str(fe.get("extracted_document_ru") or "").strip()
                         body_ed: dict[str, Any] = {
                             "category": "class_name_confirmation",
                             "declaration_id": payload.declaration_id,
@@ -392,6 +447,7 @@ async def _run_validate_pipeline(
                                 "source": "orchestrator",
                                 "step": "llm-class-name-suggestion",
                                 "llm_result": nm_data,
+                                "extracted_features_summary_ru": fe_summary,
                             },
                         }
                         if rid:
@@ -402,6 +458,60 @@ async def _run_validate_pipeline(
                             timeout=30.0,
                         )
                         pr_ed.raise_for_status()
+                        problem_registry_record_created = True
+                    except Exception:
+                        pass
+
+                # Страховка: если автоклассификация не завершилась итоговым классом
+                # и до этого не удалось создать запись в реестре проблемных деклараций,
+                # создаём универсальную запись независимо от последующих действий инспектора.
+                if not class_id and not problem_registry_record_created:
+                    try:
+                        cat = officer_json.get("catalog")
+                        rid = None
+                        if isinstance(cat, dict) and cat.get("rule_id") is not None:
+                            rid = str(cat.get("rule_id")).strip() or None
+                        semantic_step = next(
+                            (
+                                s.get("result")
+                                for s in flow.get("steps", [])
+                                if isinstance(s, dict) and s.get("step") == "semantic-search"
+                            ),
+                            None,
+                        )
+                        semantic_rule_step = next(
+                            (
+                                s.get("result")
+                                for s in flow.get("steps", [])
+                                if isinstance(s, dict) and s.get("step") == "semantic-class-rule-check"
+                            ),
+                            None,
+                        )
+                        reason_ru = "Автоматическая классификация не назначила итоговый класс; требуется решение эксперта."
+                        if isinstance(semantic_rule_step, dict) and semantic_rule_step.get("consistent") is False:
+                            reason_ru = "Семантический кандидат не прошёл проверку правила класса; требуется решение эксперта."
+                        body_ed_fallback: dict[str, Any] = {
+                            "category": "classification_unresolved",
+                            "declaration_id": payload.declaration_id,
+                            "summary_ru": f"Автоклассификация не сработала для декларации {payload.declaration_id}; требуется решение эксперта.",
+                            "payload": {
+                                "source": "orchestrator",
+                                "step": "classification-unresolved-fallback",
+                                "reason_ru": reason_ru,
+                                "semantic_search": semantic_step if isinstance(semantic_step, dict) else {},
+                                "semantic_rule_check": semantic_rule_step if isinstance(semantic_rule_step, dict) else {},
+                                "officer_result": officer_json,
+                            },
+                        }
+                        if rid:
+                            body_ed_fallback["rule_id"] = rid
+                        pr_ed = await client.post(
+                            f"{RULES_ENGINE_URL}/api/expert-decisions",
+                            json=body_ed_fallback,
+                            timeout=30.0,
+                        )
+                        pr_ed.raise_for_status()
+                        problem_registry_record_created = True
                     except Exception:
                         pass
 

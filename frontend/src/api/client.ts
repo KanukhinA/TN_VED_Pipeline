@@ -1,7 +1,6 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 import {
-  EXTRACTION_TEST_INFER_DURATION_FIELD,
   FEATURE_EXTRACTION_LLM_CONTAINER_LOGS_PATH,
   INFERENCE_OPTIONS_BODY_KEY,
 } from "./backendInferenceKeys";
@@ -138,6 +137,27 @@ export async function validateRule(ruleId: string, data: any): Promise<any> {
   return json;
 }
 
+export async function getClassificationRuleConflicts(ruleId: string): Promise<{
+  has_conflicts: boolean;
+  conflicts: Array<{
+    left_rule_index: number;
+    right_rule_index: number;
+    left_class_id: string;
+    right_class_id: string;
+    left_title?: string | null;
+    right_title?: string | null;
+    reason_ru: string;
+  }>;
+}> {
+  const res = await fetchWithRetry(`${API_BASE}/rules/${ruleId}/classification-conflicts`, { method: "GET" });
+  const json = await parseJsonSafe(res);
+  if (!res.ok) throw new Error(json?.detail ?? "Не удалось проверить конфликты правил");
+  return {
+    has_conflicts: Boolean(json?.has_conflicts),
+    conflicts: Array.isArray(json?.conflicts) ? json.conflicts : [],
+  };
+}
+
 export async function listReferenceExamples(ruleId: string): Promise<{ examples: any[] }> {
   const res = await fetchWithRetry(`${API_BASE}/rules/${encodeURIComponent(ruleId)}/reference-examples`, {
     method: "GET",
@@ -231,6 +251,8 @@ export type OfficerValidationPayload = {
   declaration_id?: string | null;
   /** Если задан — сервер пропускает вызов модели извлечения и использует этот JSON. */
   extracted_features_override?: Record<string, unknown> | null;
+  /** k для выбора класса по kNN в семантическом fallback. */
+  semantic_k?: number;
 };
 
 export async function validateDeclarationByOfficer(
@@ -250,6 +272,9 @@ export async function validateDeclarationByOfficer(
   };
   if (payload.extracted_features_override != null) {
     body.extracted_features_override = payload.extracted_features_override;
+  }
+  if (typeof payload.semantic_k === "number" && Number.isFinite(payload.semantic_k)) {
+    body.semantic_k = Math.max(1, Math.floor(payload.semantic_k));
   }
   const res = await fetchWithRetry(`${API_BASE}/validate`, {
     method: "POST",
@@ -311,6 +336,9 @@ export async function validateDeclarationByOfficerWithProgress(
   };
   if (payload.extracted_features_override != null) {
     body.extracted_features_override = payload.extracted_features_override;
+  }
+  if (typeof payload.semantic_k === "number" && Number.isFinite(payload.semantic_k)) {
+    body.semantic_k = Math.max(1, Math.floor(payload.semantic_k));
   }
   const res = await fetch(`${API_BASE}/validate/stream`, {
     method: "POST",
@@ -408,7 +436,11 @@ export async function getPipelineConfig(): Promise<any> {
   return json;
 }
 
-export async function savePipelineConfig(body: { semantic_similarity_threshold?: number }): Promise<any> {
+export async function savePipelineConfig(body: {
+  semantic_similarity_threshold?: number;
+  semantic_neighbor_similarity_floor_s0?: number;
+  semantic_support_threshold_tau2?: number;
+}): Promise<any> {
   const res = await fetchWithRetry(`${API_BASE}/admin/pipeline-config`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
@@ -419,6 +451,90 @@ export async function savePipelineConfig(body: { semantic_similarity_threshold?:
     throw new Error(json?.detail ?? "Не удалось сохранить конфигурацию пайплайна");
   }
   return json;
+}
+
+export async function getClassNamingPromptTemplate(): Promise<{ template: string; path?: string }> {
+  const res = await fetchWithRetry(`${API_BASE}/admin/class-naming-prompt`, { method: "GET" });
+  const json = await parseJsonSafe(res);
+  if (!res.ok) {
+    throw new Error(formatFastApiDetail(json?.detail) ?? "Не удалось загрузить промпт генерации имени класса");
+  }
+  return {
+    template: typeof json?.template === "string" ? json.template : "",
+    path: typeof json?.path === "string" ? json.path : undefined,
+  };
+}
+
+export async function saveClassNamingPromptTemplate(template: string): Promise<{ template: string; path?: string }> {
+  const res = await fetchWithRetry(`${API_BASE}/admin/class-naming-prompt`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ template }),
+  });
+  const json = await parseJsonSafe(res);
+  if (!res.ok) {
+    throw new Error(formatFastApiDetail(json?.detail) ?? "Не удалось сохранить промпт генерации имени класса");
+  }
+  return {
+    template: typeof json?.template === "string" ? json.template : "",
+    path: typeof json?.path === "string" ? json.path : undefined,
+  };
+}
+
+export async function getClassNamingGenerationConfig(): Promise<{ max_new_tokens: number; path?: string }> {
+  const res = await fetchWithRetry(`${API_BASE}/admin/class-naming-generation-config`, { method: "GET" });
+  const json = await parseJsonSafe(res);
+  if (!res.ok) {
+    throw new Error(formatFastApiDetail(json?.detail) ?? "Не удалось загрузить параметры генерации имени класса");
+  }
+  return {
+    max_new_tokens: typeof json?.max_new_tokens === "number" ? json.max_new_tokens : 24,
+    path: typeof json?.path === "string" ? json.path : undefined,
+  };
+}
+
+export async function saveClassNamingGenerationConfig(max_new_tokens: number): Promise<{ max_new_tokens: number; path?: string }> {
+  const res = await fetchWithRetry(`${API_BASE}/admin/class-naming-generation-config`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ max_new_tokens }),
+  });
+  const json = await parseJsonSafe(res);
+  if (!res.ok) {
+    throw new Error(formatFastApiDetail(json?.detail) ?? "Не удалось сохранить параметры генерации имени класса");
+  }
+  return {
+    max_new_tokens: typeof json?.max_new_tokens === "number" ? json.max_new_tokens : max_new_tokens,
+    path: typeof json?.path === "string" ? json.path : undefined,
+  };
+}
+
+export async function getFeatureExtractionPromptGeneratorMeta(): Promise<{ template: string; path?: string }> {
+  const res = await fetchWithRetry(`${API_BASE}/admin/feature-extraction-prompt-generator-meta`, { method: "GET" });
+  const json = await parseJsonSafe(res);
+  if (!res.ok) {
+    throw new Error(formatFastApiDetail(json?.detail) ?? "Не удалось загрузить базовый текст генератора промптов");
+  }
+  return {
+    template: typeof json?.template === "string" ? json.template : "",
+    path: typeof json?.path === "string" ? json.path : undefined,
+  };
+}
+
+export async function saveFeatureExtractionPromptGeneratorMeta(template: string): Promise<{ template: string; path?: string }> {
+  const res = await fetchWithRetry(`${API_BASE}/admin/feature-extraction-prompt-generator-meta`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ template }),
+  });
+  const json = await parseJsonSafe(res);
+  if (!res.ok) {
+    throw new Error(formatFastApiDetail(json?.detail) ?? "Не удалось сохранить базовый текст генератора промптов");
+  }
+  return {
+    template: typeof json?.template === "string" ? json.template : "",
+    path: typeof json?.path === "string" ? json.path : undefined,
+  };
 }
 
 export async function submitExpertClassNameDecision(body: {
@@ -826,6 +942,27 @@ export type ExpertDecisionItem = {
   resolved_at?: string | null;
 };
 
+export type ExpertDecisionListQuery = {
+  status?: string;
+  category?: string;
+  issue_type?: string;
+  q?: string;
+  tnved_prefix?: string;
+  has_class?: boolean;
+  created_from?: string;
+  created_to?: string;
+  include_imported?: boolean;
+  page?: number;
+  page_size?: number;
+};
+
+export type ExpertDecisionListPage = {
+  items: ExpertDecisionItem[];
+  total: number;
+  page: number;
+  page_size: number;
+};
+
 export async function createExpertDecision(payload: {
   category: string;
   declaration_id: string;
@@ -845,22 +982,42 @@ export async function createExpertDecision(payload: {
   return json as ExpertDecisionItem;
 }
 
-export async function listExpertDecisions(params?: { status?: string; category?: string }): Promise<ExpertDecisionItem[]> {
+export async function listExpertDecisions(params?: ExpertDecisionListQuery): Promise<ExpertDecisionListPage> {
   const sp = new URLSearchParams();
   if (params?.status?.trim()) sp.set("status", params.status.trim());
   if (params?.category?.trim()) sp.set("category", params.category.trim());
+  if (params?.issue_type?.trim()) sp.set("issue_type", params.issue_type.trim());
+  if (params?.q?.trim()) sp.set("q", params.q.trim());
+  if (params?.tnved_prefix?.trim()) sp.set("tnved_prefix", params.tnved_prefix.trim());
+  if (typeof params?.has_class === "boolean") sp.set("has_class", String(params.has_class));
+  if (params?.created_from?.trim()) sp.set("created_from", params.created_from.trim());
+  if (params?.created_to?.trim()) sp.set("created_to", params.created_to.trim());
+  if (typeof params?.include_imported === "boolean") sp.set("include_imported", String(params.include_imported));
+  if (typeof params?.page === "number" && Number.isFinite(params.page)) sp.set("page", String(Math.max(1, Math.floor(params.page))));
+  if (typeof params?.page_size === "number" && Number.isFinite(params.page_size)) {
+    sp.set("page_size", String(Math.max(1, Math.floor(params.page_size))));
+  }
   const qs = sp.toString();
   const res = await fetchWithRetry(`${API_BASE}/expert-decisions${qs ? `?${qs}` : ""}`, { method: "GET" });
   const json = await parseJsonSafe(res);
   if (!res.ok) {
     throw new Error(formatFastApiDetail(json?.detail) ?? "Не удалось загрузить очередь решений");
   }
-  return Array.isArray(json) ? (json as ExpertDecisionItem[]) : [];
+  const items = Array.isArray(json?.items) ? (json.items as ExpertDecisionItem[]) : Array.isArray(json) ? (json as ExpertDecisionItem[]) : [];
+  const total = typeof json?.total === "number" ? json.total : items.length;
+  const page = typeof json?.page === "number" ? json.page : params?.page ?? 1;
+  const pageSize = typeof json?.page_size === "number" ? json.page_size : params?.page_size ?? items.length;
+  return {
+    items,
+    total,
+    page,
+    page_size: pageSize,
+  };
 }
 
 export async function patchExpertDecision(
   id: string,
-  body: { status: "resolved" | "dismissed"; resolution?: Record<string, unknown> },
+  body: { status: "pending" | "resolved" | "dismissed"; resolution?: Record<string, unknown> },
 ): Promise<ExpertDecisionItem> {
   const res = await fetchWithRetry(`${API_BASE}/expert-decisions/${encodeURIComponent(id)}`, {
     method: "PATCH",
@@ -872,5 +1029,36 @@ export async function patchExpertDecision(
     throw new Error(formatFastApiDetail(json?.detail) ?? "Не удалось обновить запись");
   }
   return json as ExpertDecisionItem;
+}
+
+export async function deleteExpertDecision(id: string): Promise<void> {
+  const res = await fetchWithRetry(`${API_BASE}/expert-decisions/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+  const json = await parseJsonSafe(res);
+  if (!res.ok) {
+    throw new Error(formatFastApiDetail(json?.detail) ?? "Не удалось удалить запись");
+  }
+}
+
+export async function recheckExpertDecisionWithCurrentCatalog(id: string): Promise<{
+  status: string;
+  resolved: boolean;
+  reason?: string;
+  item?: ExpertDecisionItem;
+}> {
+  const res = await fetchWithRetry(`${API_BASE}/expert-decisions/${encodeURIComponent(id)}/recheck-current-catalog`, {
+    method: "POST",
+  });
+  const json = await parseJsonSafe(res);
+  if (!res.ok) {
+    throw new Error(formatFastApiDetail(json?.detail) ?? "Не удалось переклассифицировать по актуальному справочнику");
+  }
+  return {
+    status: String(json?.status ?? ""),
+    resolved: Boolean(json?.resolved),
+    reason: typeof json?.reason === "string" ? json.reason : undefined,
+    item: json?.item as ExpertDecisionItem | undefined,
+  };
 }
 

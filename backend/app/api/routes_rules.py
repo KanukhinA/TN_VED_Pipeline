@@ -12,8 +12,13 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from ..db.session import get_db_session
-from ..db.models import Rule, RuleReferenceExample, RuleVersion
-from ..rules.dsl_models import RuleDSL, normalize_tn_ved_eaeu_code_value
+from ..db.models import Rule, RuleReferenceEmbedding, RuleReferenceExample, RuleVersion
+from ..rules.dsl_models import (
+    RuleDSL,
+    normalize_tn_ved_eaeu_code_value,
+    PathClassificationCondition,
+    RowIndicatorCondition,
+)
 from ..rules.compiler import compile_rule
 from ..examples.fertilizer_rule_dsl import (
     FERTILIZER_RULE_DSL,
@@ -25,6 +30,7 @@ router = APIRouter(prefix="/api/rules", tags=["rules"])
 
 
 def _meta_tn_ved_group_code(dsl_json: Dict[str, Any]) -> Optional[str]:
+    """Безопасно извлекает и нормализует `meta.tn_ved_group_code` из DSL-JSON."""
     meta = dsl_json.get("meta")
     if not isinstance(meta, dict):
         return None
@@ -49,6 +55,7 @@ def _token_jaccard(a: str, b: str) -> float:
 
 
 def _rule_list_sort_key(item: "RuleListItem") -> tuple[int, str]:
+    """Ключ сортировки справочников: сначала код группы, затем имя."""
     c = item.tn_ved_group_code
     if c and c.isdigit():
         return (int(c), (item.name or "").lower())
@@ -56,6 +63,7 @@ def _rule_list_sort_key(item: "RuleListItem") -> tuple[int, str]:
 
 
 def _clone_copy_name(base_name: Optional[str]) -> str:
+    """Формирует имя копии справочника с суффиксом `(копия)`."""
     base = (base_name or "").strip()
     if not base:
         return "Справочник (копия)"
@@ -65,6 +73,7 @@ def _clone_copy_name(base_name: Optional[str]) -> str:
 
 
 def _make_unique_clone_model_id(db: Session, source_model_id: str) -> str:
+    """Генерирует уникальный `model_id` для клона."""
     src = source_model_id.strip() or "spravochnik"
     candidate = f"{src}_{uuid.uuid4().hex[:8]}"
     while db.query(Rule.id).filter(Rule.model_id == candidate).first() is not None:
@@ -73,6 +82,7 @@ def _make_unique_clone_model_id(db: Session, source_model_id: str) -> str:
 
 
 def _cfg_feature_extraction_primary(item: dict) -> bool:
+    """Признак основной конфигурации извлечения (поддержка bool и строки `true`)."""
     v = item.get("feature_extraction_primary")
     return v is True or v == "true"
 
@@ -145,6 +155,126 @@ class ValidateResponse(BaseModel):
     assigned_class: Optional[str] = None
 
 
+class RuleConflictItem(BaseModel):
+    left_rule_index: int
+    right_rule_index: int
+    left_class_id: str
+    right_class_id: str
+    left_title: Optional[str] = None
+    right_title: Optional[str] = None
+    reason_ru: str
+
+
+class RuleConflictsResponse(BaseModel):
+    has_conflicts: bool
+    conflicts: list[RuleConflictItem] = Field(default_factory=list)
+
+
+def _is_primary(cond: Any) -> bool:
+    return bool(getattr(cond, "primary", True))
+
+
+def _numeric_interval_from_path(cond: PathClassificationCondition) -> Optional[tuple[float, float]]:
+    op = str(cond.op)
+    val = cond.value
+    try:
+        if op == "gt":
+            return float(val) + 1e-12, float("inf")
+        if op == "gte":
+            return float(val), float("inf")
+        if op == "lt":
+            return float("-inf"), float(val) - 1e-12
+        if op == "lte":
+            return float("-inf"), float(val)
+        if op == "equals":
+            x = float(val)
+            return x, x
+    except Exception:
+        return None
+    return None
+
+
+def _numeric_interval_from_row_indicator(cond: RowIndicatorCondition) -> Optional[tuple[float, float]]:
+    if cond.value_min is not None or cond.value_max is not None:
+        lo = float(cond.value_min) if cond.value_min is not None else float("-inf")
+        hi = float(cond.value_max) if cond.value_max is not None else float("inf")
+        return lo, hi
+    op = cond.op
+    try:
+        if op == "gt":
+            return float(cond.value) + 1e-12, float("inf")
+        if op == "gte":
+            return float(cond.value), float("inf")
+        if op == "lt":
+            return float("-inf"), float(cond.value) - 1e-12
+        if op == "lte":
+            return float("-inf"), float(cond.value)
+        if op == "equals":
+            x = float(cond.value)
+            return x, x
+    except Exception:
+        return None
+    return None
+
+
+def _intervals_disjoint(a: tuple[float, float], b: tuple[float, float]) -> bool:
+    return a[1] < b[0] or b[1] < a[0]
+
+
+def _path_conditions_contradict(a: PathClassificationCondition, b: PathClassificationCondition) -> bool:
+    if str(a.path).strip() != str(b.path).strip():
+        return False
+    ao = str(a.op)
+    bo = str(b.op)
+    av = a.value
+    bv = b.value
+    if ao == "equals" and bo == "equals":
+        return av != bv
+    if ao == "equals" and bo == "in" and isinstance(bv, list):
+        return av not in bv
+    if bo == "equals" and ao == "in" and isinstance(av, list):
+        return bv not in av
+    if ao == "in" and bo == "in" and isinstance(av, list) and isinstance(bv, list):
+        return len(set(av) & set(bv)) == 0
+    ai = _numeric_interval_from_path(a)
+    bi = _numeric_interval_from_path(b)
+    if ai is not None and bi is not None:
+        return _intervals_disjoint(ai, bi)
+    return False
+
+
+def _row_indicator_conditions_contradict(a: RowIndicatorCondition, b: RowIndicatorCondition) -> bool:
+    same_key = (
+        str(a.array_path).strip() == str(b.array_path).strip()
+        and str(a.name_field).strip() == str(b.name_field).strip()
+        and str(a.name_equals).strip().lower() == str(b.name_equals).strip().lower()
+        and str(a.value_field).strip() == str(b.value_field).strip()
+    )
+    if not same_key:
+        return False
+    ai = _numeric_interval_from_row_indicator(a)
+    bi = _numeric_interval_from_row_indicator(b)
+    if ai is not None and bi is not None:
+        return _intervals_disjoint(ai, bi)
+    return False
+
+
+def _rules_potentially_overlap(rule_a: Any, rule_b: Any) -> tuple[bool, str]:
+    conds_a = [c for c in (getattr(rule_a, "conditions", None) or []) if _is_primary(c) and getattr(c, "conjunction", "and") == "and"]
+    conds_b = [c for c in (getattr(rule_b, "conditions", None) or []) if _is_primary(c) and getattr(c, "conjunction", "and") == "and"]
+    if not conds_a or not conds_b:
+        return False, "Недостаточно обязательных условий для анализа пересечений."
+    for ca in conds_a:
+        for cb in conds_b:
+            if isinstance(ca, PathClassificationCondition) and isinstance(cb, PathClassificationCondition):
+                if _path_conditions_contradict(ca, cb):
+                    return False, f"Условия по пути «{ca.path}» взаимно исключают друг друга."
+            if isinstance(ca, RowIndicatorCondition) and isinstance(cb, RowIndicatorCondition):
+                if _row_indicator_conditions_contradict(ca, cb):
+                    return False, f"Диапазоны показателя «{ca.name_equals}» не пересекаются."
+    return True, "Обязательные условия не противоречат друг другу; возможна зона пересечения."
+
+
 class DSLSchemaResponse(BaseModel):
     schema_: Dict[str, Any] = Field(alias="schema")
 
@@ -188,11 +318,13 @@ class TemplateDetailsResponse(BaseModel):
 
 @router.get("/dsl-schema", response_model=DSLSchemaResponse)
 def get_dsl_schema() -> DSLSchemaResponse:
+    """Возвращает JSON Schema для редактора DSL на фронтенде."""
     return DSLSchemaResponse(schema=RuleDSL.model_json_schema())
 
 
 @router.get("/example/fertilizer", response_model=ExampleResponse)
 def get_fertilizer_example() -> ExampleResponse:
+    """Возвращает учебный DSL и пример данных для быстрого старта."""
     return ExampleResponse(dsl=FERTILIZER_RULE_DSL, example_data=FERTILIZER_DECLARATION_EXAMPLE)
 
 
@@ -202,6 +334,7 @@ def list_rules(
     include_archived: bool = Query(False, description="Показывать архивные справочники"),
     db: Session = Depends(get_db_session),
 ) -> list[RuleListItem]:
+    """Список активных справочников с поиском и фильтром архивных."""
     stmt = (
         db.query(Rule, RuleVersion)
         .join(RuleVersion, RuleVersion.rule_id == Rule.id)
@@ -215,6 +348,7 @@ def list_rules(
     qn = (q or "").strip().lower()
 
     def row_matches(rule: Rule, rv: RuleVersion) -> bool:
+        """Проверка попадания справочника под поисковую строку."""
         if not qn:
             return True
         if qn in rule.model_id.lower():
@@ -255,6 +389,7 @@ def list_rules(
 
 @router.get("/templates", response_model=list[TemplateListItem])
 def list_templates() -> list[TemplateListItem]:
+    """Справочник доступных шаблонов создания правил."""
     return [
         TemplateListItem(
             template_id="fertilizer",
@@ -266,6 +401,7 @@ def list_templates() -> list[TemplateListItem]:
 
 @router.get("/templates/{template_id}", response_model=TemplateDetailsResponse)
 def get_template(template_id: str) -> TemplateDetailsResponse:
+    """Детали одного шаблона DSL по id."""
     if template_id == "fertilizer":
         return TemplateDetailsResponse(
             template_id="fertilizer",
@@ -279,9 +415,10 @@ def get_template(template_id: str) -> TemplateDetailsResponse:
 
 @router.post("", response_model=CreateRuleResponse)
 def create_rule(dsl_in: Dict[str, Any], db: Session = Depends(get_db_session)) -> CreateRuleResponse:
+    """Создаёт новый справочник и первую активную версию DSL."""
     try:
         dsl = RuleDSL.model_validate(dsl_in)
-        # Компилируем для early validation
+        # Ранняя проверка: DSL должен успешно компилироваться в исполняемую модель.
         _ = compile_rule(dsl)
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Invalid DSL: {e}")
@@ -304,7 +441,7 @@ def create_rule(dsl_in: Dict[str, Any], db: Session = Depends(get_db_session)) -
         created_at=created_at,
     )
     db.add(rule)
-    db.flush()  # получить rule.id
+    db.flush()  # Нужен `rule.id` до создания записи версии.
 
     version = 1
     dsl_json = dsl.model_dump(by_alias=True, exclude_none=True)
@@ -331,6 +468,7 @@ def create_rule(dsl_in: Dict[str, Any], db: Session = Depends(get_db_session)) -
 @router.put("/{rule_id}", response_model=CreateRuleResponse)
 @router.post("/{rule_id}/save", response_model=CreateRuleResponse)
 def update_rule(rule_id: uuid.UUID, dsl_in: Dict[str, Any], db: Session = Depends(get_db_session)) -> CreateRuleResponse:
+    """Сохраняет новую версию DSL существующего справочника и переключает active-флаг."""
     rule: Rule | None = db.query(Rule).filter(Rule.id == rule_id).one_or_none()
     if not rule:
         raise HTTPException(status_code=404, detail="Rule not found")
@@ -362,6 +500,7 @@ def update_rule(rule_id: uuid.UUID, dsl_in: Dict[str, Any], db: Session = Depend
     )
 
     for v in active_versions:
+        # Сохраняем историю, но оставляем активной только новую версию.
         v.is_active = False
 
     next_version = (latest.version if latest else 0) + 1
@@ -395,6 +534,7 @@ def update_rule(rule_id: uuid.UUID, dsl_in: Dict[str, Any], db: Session = Depend
 
 @router.post("/{rule_id}/clone", response_model=CreateRuleResponse)
 def clone_rule(rule_id: uuid.UUID, req: CloneRuleRequest, db: Session = Depends(get_db_session)) -> CreateRuleResponse:
+    """Клонирует активную версию справочника в новый `Rule` с версией 1."""
     source_rule: Rule | None = db.query(Rule).filter(Rule.id == rule_id).one_or_none()
     if not source_rule:
         raise HTTPException(status_code=404, detail="Source rule not found")
@@ -463,6 +603,7 @@ def clone_rule(rule_id: uuid.UUID, req: CloneRuleRequest, db: Session = Depends(
 
 @router.post("/{rule_id}/archive")
 def archive_rule(rule_id: uuid.UUID, db: Session = Depends(get_db_session)) -> Dict[str, bool]:
+    """Переводит справочник в архивное состояние."""
     rule: Rule | None = db.query(Rule).filter(Rule.id == rule_id).one_or_none()
     if not rule:
         raise HTTPException(status_code=404, detail="Rule not found")
@@ -473,6 +614,7 @@ def archive_rule(rule_id: uuid.UUID, db: Session = Depends(get_db_session)) -> D
 
 @router.post("/{rule_id}/unarchive")
 def unarchive_rule(rule_id: uuid.UUID, db: Session = Depends(get_db_session)) -> Dict[str, bool]:
+    """Снимает справочник с архива."""
     rule: Rule | None = db.query(Rule).filter(Rule.id == rule_id).one_or_none()
     if not rule:
         raise HTTPException(status_code=404, detail="Rule not found")
@@ -483,6 +625,7 @@ def unarchive_rule(rule_id: uuid.UUID, db: Session = Depends(get_db_session)) ->
 
 @router.delete("/{rule_id}")
 def delete_rule(rule_id: uuid.UUID, db: Session = Depends(get_db_session)) -> Dict[str, bool]:
+    """Удаляет справочник и связанные сущности каскадом."""
     rule: Rule | None = db.query(Rule).filter(Rule.id == rule_id).one_or_none()
     if not rule:
         raise HTTPException(status_code=404, detail="Rule not found")
@@ -493,6 +636,7 @@ def delete_rule(rule_id: uuid.UUID, db: Session = Depends(get_db_session)) -> Di
 
 @router.get("/{rule_id}", response_model=Dict[str, Any])
 def get_rule(rule_id: uuid.UUID, db: Session = Depends(get_db_session)) -> Dict[str, Any]:
+    """Возвращает карточку справочника с текущей активной версией DSL."""
     rule: Rule | None = db.query(Rule).filter(Rule.id == rule_id).one_or_none()
     if not rule:
         raise HTTPException(status_code=404, detail="Rule not found")
@@ -520,6 +664,7 @@ def get_rule(rule_id: uuid.UUID, db: Session = Depends(get_db_session)) -> Dict[
 
 @router.post("/{rule_id}/validate", response_model=ValidateResponse)
 def validate_rule(rule_id: uuid.UUID, req: ValidateRequest, db: Session = Depends(get_db_session)) -> ValidateResponse:
+    """Прогоняет произвольные данные через активную версию правила."""
     rv: RuleVersion | None = (
         db.query(RuleVersion)
         .filter(RuleVersion.rule_id == rule_id, RuleVersion.is_active.is_(True))
@@ -537,6 +682,44 @@ def validate_rule(rule_id: uuid.UUID, req: ValidateRequest, db: Session = Depend
 
     ok, errors, validated_data, assigned_class = compiled.validate(req.data)
     return ValidateResponse(ok=ok, errors=errors, validated_data=validated_data, assigned_class=assigned_class)
+
+
+@router.get("/{rule_id}/classification-conflicts", response_model=RuleConflictsResponse)
+def classification_conflicts(rule_id: uuid.UUID, db: Session = Depends(get_db_session)) -> RuleConflictsResponse:
+    """Эвристическая проверка пересечений между правилами классификации одного справочника."""
+    rv: RuleVersion | None = (
+        db.query(RuleVersion)
+        .filter(RuleVersion.rule_id == rule_id, RuleVersion.is_active.is_(True))
+        .order_by(RuleVersion.version.desc())
+        .first()
+    )
+    if not rv:
+        raise HTTPException(status_code=404, detail="Active rule version not found")
+    try:
+        dsl = RuleDSL.model_validate(rv.dsl_json)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Rule parse failed: {e}")
+
+    clf = dsl.classification
+    rules = list(clf.rules) if clf and clf.rules else []
+    conflicts: list[RuleConflictItem] = []
+    for i in range(len(rules)):
+        for j in range(i + 1, len(rules)):
+            overlap, reason = _rules_potentially_overlap(rules[i], rules[j])
+            if not overlap:
+                continue
+            conflicts.append(
+                RuleConflictItem(
+                    left_rule_index=i + 1,
+                    right_rule_index=j + 1,
+                    left_class_id=str(rules[i].class_id or ""),
+                    right_class_id=str(rules[j].class_id or ""),
+                    left_title=(rules[i].title or None),
+                    right_title=(rules[j].title or None),
+                    reason_ru=reason,
+                )
+            )
+    return RuleConflictsResponse(has_conflicts=len(conflicts) > 0, conflicts=conflicts)
 
 
 @router.get("/{rule_id}/semantic-threshold")
@@ -636,12 +819,14 @@ class ReferenceExampleBulkOut(BaseModel):
 
 
 def _normalize_reference_description(raw: str) -> str:
+    """Нормализует текст описания, подставляя маркер для пустых значений."""
     desc = (raw or "").strip()
     return desc if desc else "(без описания)"
 
 
 @router.get("/{rule_id}/reference-examples")
 def list_reference_examples(rule_id: uuid.UUID, db: Session = Depends(get_db_session)) -> Dict[str, Any]:
+    """Список эталонных примеров справочника с эмбеддингами (если есть)."""
     rule: Rule | None = db.query(Rule).filter(Rule.id == rule_id).one_or_none()
     if rule is None:
         raise HTTPException(status_code=404, detail="Rule not found")
@@ -651,6 +836,15 @@ def list_reference_examples(rule_id: uuid.UUID, db: Session = Depends(get_db_ses
         .order_by(RuleReferenceExample.created_at.desc())
         .all()
     )
+    ids = [r.id for r in rows]
+    emb_rows = (
+        db.query(RuleReferenceEmbedding)
+        .filter(RuleReferenceEmbedding.reference_example_id.in_(ids))
+        .all()
+        if ids
+        else []
+    )
+    emb_by_ref = {e.reference_example_id: e for e in emb_rows}
     return {
         "examples": [
             {
@@ -660,6 +854,10 @@ def list_reference_examples(rule_id: uuid.UUID, db: Session = Depends(get_db_ses
                 "description_text": r.description_text,
                 "features_json": r.features_json,
                 "assigned_class_id": r.assigned_class_id,
+                "embedding_model": emb_by_ref[r.id].embedding_model if r.id in emb_by_ref else None,
+                "embedding": emb_by_ref[r.id].embedding_json.get("vector")
+                if r.id in emb_by_ref and isinstance(emb_by_ref[r.id].embedding_json, dict)
+                else None,
             }
             for r in rows
         ]
@@ -670,6 +868,7 @@ def list_reference_examples(rule_id: uuid.UUID, db: Session = Depends(get_db_ses
 def bulk_reference_examples(
     rule_id: uuid.UUID, body: ReferenceExampleBulkIn, db: Session = Depends(get_db_session)
 ) -> ReferenceExampleBulkOut:
+    """Пакетная загрузка эталонов с валидацией структуры и класса."""
     rule: Rule | None = db.query(Rule).filter(Rule.id == rule_id).one_or_none()
     if rule is None:
         raise HTTPException(status_code=404, detail="Rule not found")
@@ -703,6 +902,7 @@ def bulk_reference_examples(
     for idx, item in enumerate(body.items):
         desc = _normalize_reference_description(item.description_text or "")
         if desc in seen_descriptions:
+            # Идентичные описания считаем дублями, чтобы не размывать датасет.
             skipped.append(
                 {
                     "index": idx,
@@ -714,6 +914,7 @@ def bulk_reference_examples(
 
         ok, errors, validated_data, assigned_class = compiled.validate(item.data)
         if not ok:
+            # Невалидные строки не импортируем, но возвращаем детали ошибки.
             skipped.append(
                 {
                     "index": idx,
@@ -726,6 +927,7 @@ def bulk_reference_examples(
         expert_raw = (item.assigned_class_id or "").strip()
         expert_norm = expert_raw.lower() if expert_raw else ""
         if expert_norm:
+            # Явный класс от эксперта разрешаем только из classification.rules.
             if expert_norm not in allowed_classes:
                 skipped.append(
                     {
@@ -766,6 +968,7 @@ def bulk_reference_examples(
 def delete_reference_example(
     rule_id: uuid.UUID, example_id: uuid.UUID, db: Session = Depends(get_db_session)
 ) -> Dict[str, str]:
+    """Удаляет один эталонный пример из справочника."""
     row: RuleReferenceExample | None = (
         db.query(RuleReferenceExample)
         .filter(RuleReferenceExample.id == example_id, RuleReferenceExample.rule_id == rule_id)

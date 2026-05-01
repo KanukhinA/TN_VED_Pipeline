@@ -185,6 +185,7 @@ class CompiledRule(BaseModel):
 
 
 def compile_rule(dsl: RuleDSL) -> CompiledRule:
+    """Компилирует DSL в `CompiledRule`: pydantic-модель + cross-rules + классификация."""
     counter = itertools.count(1)
     root_type, _ = _compile_field_type(
         dsl.schema_,

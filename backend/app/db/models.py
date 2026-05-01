@@ -12,6 +12,7 @@ from .base import Base
 
 
 class Rule(Base):
+    """Справочник (каталог правил) верхнего уровня с версиями DSL."""
     __tablename__ = "rules"
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -35,6 +36,7 @@ class Rule(Base):
 
 
 class RuleVersion(Base):
+    """Версия DSL-конфигурации справочника."""
     __tablename__ = "rule_versions"
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -43,7 +45,7 @@ class RuleVersion(Base):
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     model_id: Mapped[str] = mapped_column(String(255), nullable=False)
 
-    # Сохраняем DSL как JSON.
+    # Храним полную DSL-структуру как JSON-снимок версии.
     dsl_json: Mapped[Dict[str, Any]] = mapped_column(JSON, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
 
@@ -70,8 +72,36 @@ class RuleReferenceExample(Base):
     assigned_class_id: Mapped[str] = mapped_column(String(512), nullable=False)
 
     rule: Mapped["Rule"] = relationship(back_populates="reference_examples")
+    embedding: Mapped[Optional["RuleReferenceEmbedding"]] = relationship(
+        back_populates="reference_example",
+        cascade="all, delete-orphan",
+        uselist=False,
+    )
 
     __table_args__ = (Index("ix_rule_reference_examples_rule_id_created", "rule_id", "created_at"),)
+
+
+class RuleReferenceEmbedding(Base):
+    """Кэш эмбеддинга описания эталонной декларации для семантического поиска."""
+
+    __tablename__ = "rule_reference_embeddings"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    reference_example_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("rule_reference_examples.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+    )
+    embedding_model: Mapped[str] = mapped_column(String(255), nullable=False)
+    embedding_json: Mapped[Dict[str, Any]] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
+
+    reference_example: Mapped["RuleReferenceExample"] = relationship(back_populates="embedding")
+
+    __table_args__ = (
+        Index("ix_rule_reference_embeddings_ref_id", "reference_example_id"),
+    )
 
 
 class FewShotAssistRun(Base):
@@ -90,6 +120,7 @@ class FewShotAssistRun(Base):
 
 
 class AppSetting(Base):
+    """KV-хранилище прикладных настроек (глобальные параметры системы)."""
     __tablename__ = "app_settings"
 
     key: Mapped[str] = mapped_column(String(128), primary_key=True)
@@ -100,7 +131,7 @@ class AppSetting(Base):
 class ExpertDecisionItem(Base):
     """
     Очередь решений эксперта по пайплайну: спорная классификация, подтверждение имени класса от LLM и т.д.
-    Категории: classification_ambiguous | classification_none | class_name_confirmation | …
+    Категории: classification_ambiguous | classification_none | class_name_confirmation | ...
     """
 
     __tablename__ = "expert_decision_items"
@@ -124,5 +155,7 @@ class ExpertDecisionItem(Base):
     __table_args__ = (
         Index("ix_expert_decision_items_status_created", "status", "created_at"),
         Index("ix_expert_decision_items_category_status", "category", "status"),
+        Index("ix_expert_decision_items_created_at", "created_at"),
+        Index("ix_expert_decision_items_declaration_id", "declaration_id"),
     )
 

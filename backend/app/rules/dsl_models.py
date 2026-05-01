@@ -154,6 +154,7 @@ ComparisonOpType = Literal[
 
 
 class ComparisonCond(BaseModel):
+    """Условие сравнения значения по пути (левая часть из данных, правая — value)."""
     path: str = Field(min_length=1)
     op: ComparisonOpType
     value: Optional[Union[str, float, int, bool, List[Union[str, float, int, bool]]]] = None
@@ -162,6 +163,7 @@ class ComparisonCond(BaseModel):
 
 
 class RequiredIfRule(BaseModel):
+    """Если условие `if` выполнено, поля из `then.required_paths` должны присутствовать."""
     template: Literal["requiredIf"] = "requiredIf"
     if_: ComparisonCond = Field(alias="if")
     then: "ThenRequired" = Field()
@@ -169,6 +171,7 @@ class RequiredIfRule(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
 class ThenRequired(BaseModel):
+    """Набор путей, обязательных при выполнении условия `requiredIf`."""
     required_paths: List[str] = Field(min_length=1)
 
 
@@ -413,6 +416,7 @@ class ClassificationConfig(BaseModel):
 
 
 class RuleMeta(BaseModel):
+    """Метаданные справочника: отображение в UI и runtime-настройки извлечения."""
     name: Optional[str] = None
     description: Optional[str] = None
     # Человеко-читабельный номер версии (может совпадать с версией в БД, а может быть отдельно)

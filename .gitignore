@@ -6,6 +6,7 @@
 !.env.example
 !.env.sample
 *.env.local
+*.ipynb
 
 # Private keys and certificates
 *.pem

@@ -1,5 +1,3 @@
-import React from "react";
-
 type ModalCloseButtonProps = {
   onClick: () => void;
   /** Подпись для скринридеров и подсказки */

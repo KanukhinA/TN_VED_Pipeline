@@ -172,15 +172,88 @@ export type ExtractedFeaturesEditorProps = {
 };
 
 export function ExtractedFeaturesEditor({ value, onChange, disabled }: ExtractedFeaturesEditorProps) {
-  if (Object.keys(value).length === 0) {
-    return (
-      <p style={{ margin: 0, fontSize: "0.875rem", color: "#64748b", lineHeight: 1.5 }}>
-        В объекте признаков нет полей (модель вернула пустой результат).
-      </p>
-    );
+  const [newKey, setNewKey] = React.useState("");
+  const [newType, setNewType] = React.useState<"text" | "number" | "boolean" | "object" | "array">("text");
+  const [addError, setAddError] = React.useState<string | null>(null);
+
+  function defaultValueByType(t: "text" | "number" | "boolean" | "object" | "array"): unknown {
+    if (t === "number") return 0;
+    if (t === "boolean") return false;
+    if (t === "object") return {};
+    if (t === "array") return [];
+    return "";
   }
+
+  function onAddField() {
+    const k = newKey.trim();
+    if (!k) {
+      setAddError("Укажите название признака.");
+      return;
+    }
+    if (Object.prototype.hasOwnProperty.call(value, k)) {
+      setAddError("Такое поле уже есть.");
+      return;
+    }
+    onChange({ ...value, [k]: defaultValueByType(newType) });
+    setNewKey("");
+    setNewType("text");
+    setAddError(null);
+  }
+
   return (
     <div className="extracted-features-editor" style={{ display: "grid", gap: "0.75rem" }}>
+      <div
+        style={{
+          display: "grid",
+          gap: 8,
+          border: "1px solid #e2e8f0",
+          borderRadius: 8,
+          padding: 10,
+          background: "#f8fafc",
+        }}
+      >
+        <div style={{ fontSize: "0.8125rem", color: "#334155", fontWeight: 600 }}>Добавить признак вручную</div>
+        <div style={{ display: "grid", gridTemplateColumns: "minmax(160px,1fr) 150px auto", gap: 8, alignItems: "end" }}>
+          <label style={{ display: "grid", gap: 4 }}>
+            <span style={{ fontSize: "0.75rem", color: "#64748b" }}>Название поля</span>
+            <input
+              className="officer-input"
+              type="text"
+              disabled={disabled}
+              value={newKey}
+              onChange={(e) => {
+                setNewKey(e.target.value);
+                setAddError(null);
+              }}
+              placeholder="например: n"
+            />
+          </label>
+          <label style={{ display: "grid", gap: 4 }}>
+            <span style={{ fontSize: "0.75rem", color: "#64748b" }}>Тип</span>
+            <select
+              className="officer-input"
+              disabled={disabled}
+              value={newType}
+              onChange={(e) => setNewType(e.target.value as "text" | "number" | "boolean" | "object" | "array")}
+            >
+              <option value="text">текст</option>
+              <option value="number">число</option>
+              <option value="boolean">да/нет</option>
+              <option value="object">объект</option>
+              <option value="array">массив</option>
+            </select>
+          </label>
+          <button type="button" className="btn-secondary" disabled={disabled} onClick={onAddField}>
+            Добавить поле
+          </button>
+        </div>
+        {addError ? <div style={{ fontSize: "0.75rem", color: "#b91c1c" }}>{addError}</div> : null}
+      </div>
+      {Object.keys(value).length === 0 ? (
+        <p style={{ margin: 0, fontSize: "0.875rem", color: "#64748b", lineHeight: 1.5 }}>
+          Пока нет ни одного признака. Добавьте поля вручную и нажмите «Применить и перепроверить».
+        </p>
+      ) : null}
       <EditableValue
         value={value}
         disabled={disabled}

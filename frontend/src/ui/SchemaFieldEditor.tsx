@@ -1,6 +1,4 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import React from "react";
-
 type StringConstraints = {
   min_length?: number;
   max_length?: number;

@@ -14,6 +14,8 @@ from typing import Any
 
 CODE_DEFAULT: dict[str, Any] = {
     "semantic_similarity_threshold": 0.75,
+    "semantic_neighbor_similarity_floor_s0": 0.35,
+    "semantic_support_threshold_tau2": 0.55,
 }
 
 ALLOWED_KEYS = frozenset(CODE_DEFAULT.keys())
@@ -46,6 +48,16 @@ def _clamp_config(merged: dict[str, Any]) -> dict[str, Any]:
         out["semantic_similarity_threshold"] = max(0.0, min(t, 1.0))
     except (TypeError, ValueError):
         out["semantic_similarity_threshold"] = CODE_DEFAULT["semantic_similarity_threshold"]
+    try:
+        s0 = float(out["semantic_neighbor_similarity_floor_s0"])
+        out["semantic_neighbor_similarity_floor_s0"] = max(-1.0, min(s0, 1.0))
+    except (TypeError, ValueError):
+        out["semantic_neighbor_similarity_floor_s0"] = CODE_DEFAULT["semantic_neighbor_similarity_floor_s0"]
+    try:
+        tau2 = float(out["semantic_support_threshold_tau2"])
+        out["semantic_support_threshold_tau2"] = max(0.0, min(tau2, 1.0))
+    except (TypeError, ValueError):
+        out["semantic_support_threshold_tau2"] = CODE_DEFAULT["semantic_support_threshold_tau2"]
     return out
 
 

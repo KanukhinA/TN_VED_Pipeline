@@ -28,10 +28,12 @@ OFFICER_HTTP_TIMEOUT = float(os.getenv("OFFICER_PIPELINE_HTTP_TIMEOUT", "900"))
 
 
 def _root_property_names(root: ObjectFieldSchema) -> set[str]:
+    """Возвращает множество имён корневых полей схемы."""
     return {p.name for p in root.properties}
 
 
 def _normalize_decl_tnved(raw: str | None) -> Optional[str]:
+    """Нормализует код ТН ВЭД декларации; допустимы только 2/4/6/8/10 цифр."""
     if raw is None:
         return None
     s = str(raw).strip()
@@ -50,6 +52,12 @@ def _find_best_rule_for_tnved(
     db: Session,
     declaration_tnved: str | None,
 ) -> Optional[Tuple[Rule, RuleVersion]]:
+    """
+    Подбирает наиболее подходящий активный справочник по коду ТН ВЭД:
+    1) самый длинный совпавший префикс группы;
+    2) при равенстве — primary-каталог группы;
+    3) иначе — самая свежая версия.
+    """
     decl = _normalize_decl_tnved(declaration_tnved)
     if not decl:
         return None
@@ -99,6 +107,7 @@ def _find_best_rule_for_tnved(
 
 
 def _fmt_scalar_display(v: Any) -> str:
+    """Единообразно форматирует скаляр для человекочитаемого отчёта."""
     if v is None:
         return "—"
     if isinstance(v, bool):
@@ -118,6 +127,7 @@ def _fmt_scalar_display(v: Any) -> str:
 
 
 def _format_prochee_row(row: dict) -> Optional[str]:
+    """Форматирует строку блока `прочее` в короткий текст."""
     param = row.get("параметр")
     if param is None:
         return None
@@ -136,6 +146,7 @@ def _format_prochee_row(row: dict) -> Optional[str]:
 
 
 def _format_mass_fraction_row(row: dict) -> Optional[str]:
+    """Форматирует строку блока `массовая доля` в короткий текст."""
     sub = row.get("вещество")
     mass = row.get("массовая доля")
     if sub is None and mass is None:
@@ -204,6 +215,27 @@ def format_extracted_document_compact(parsed: Dict[str, Any]) -> str:
     return "\n".join(lines) if lines else "(нет данных)"
 
 
+def _coerce_officer_parsed_features(parsed_raw: Any) -> Tuple[Dict[str, Any], Optional[str]]:
+    """
+    Нормализует результат парсера к объекту признаков.
+    Раньше list на верхнем уровне отбрасывался (на фронте давал «пустой» JSON).
+    """
+    if isinstance(parsed_raw, dict):
+        return dict(parsed_raw), None
+    if isinstance(parsed_raw, list):
+        if len(parsed_raw) == 0:
+            return {}, "Распознан пустой JSON-массив на верхнем уровне."
+        if len(parsed_raw) == 1 and isinstance(parsed_raw[0], dict):
+            return dict(parsed_raw[0]), (
+                "Модель вернула JSON-массив из одного объекта — развёрнут в корневой объект признаков."
+            )
+        return {}, (
+            "Модель вернула JSON-массив из нескольких элементов; для справочника ожидается один объект "
+            "с полями схемы (например «массовая доля», «прочее»). Скорректируйте промпт или введите признаки вручную."
+        )
+    return {}, "Ответ парсера не является JSON-объектом или массивом."
+
+
 def _merge_officer_into_prochee(
     data: Dict[str, Any],
     *,
@@ -212,6 +244,7 @@ def _merge_officer_into_prochee(
     price: Optional[float],
     root_names: set[str],
 ) -> Dict[str, Any]:
+    """Добавляет параметры инспектора (масса/стоимость) в секцию `прочее`, если поле есть в схеме."""
     out = dict(data)
     extras: List[Dict[str, Any]] = []
     if gross is not None:
@@ -223,6 +256,7 @@ def _merge_officer_into_prochee(
     if not extras:
         return out
     if "прочее" not in root_names:
+        # Если в целевой схеме нет поля, не внедряем служебные данные.
         return out
     cur = out.get("прочее")
     base: List[Any] = list(cur) if isinstance(cur, list) else []
@@ -231,6 +265,7 @@ def _merge_officer_into_prochee(
 
 
 def _pick_active_feature_config(dsl: RuleDSL) -> Optional[Dict[str, Any]]:
+    """Выбирает активную конфигурацию извлечения из meta с fallback на первую."""
     meta = dsl.meta
     if meta is None:
         return None
@@ -256,10 +291,13 @@ def _pick_active_feature_config(dsl: RuleDSL) -> Optional[Dict[str, Any]]:
 
 
 def _assemble_llm_prompt(cfg: Dict[str, Any], description: str) -> str:
+    """Собирает итоговый prompt для извлечения признаков из описания товара.
+
+    В прод-валидации используем только пользовательский промпт конфигурации
+    + текст декларации. Авто-превью правил (extraction_rules_preview) не
+    подмешиваем, чтобы не загрязнять prompt и не искажать поведение модели.
+    """
     parts: List[str] = []
-    rp = str(cfg.get("extraction_rules_preview") or "").strip()
-    if rp:
-        parts.append(rp)
     pr = str(cfg.get("prompt") or "").strip()
     if pr:
         parts.append(pr)
@@ -268,6 +306,7 @@ def _assemble_llm_prompt(cfg: Dict[str, Any], description: str) -> str:
 
 
 def _catalog_classification_entries(dsl: RuleDSL) -> List[Dict[str, str]]:
+    """Возвращает список классов классификации для UI-подсказок."""
     clf = dsl.classification
     if not clf or not clf.rules:
         return []
@@ -333,6 +372,7 @@ def _persist_expert_decision(
     summary_ru: str,
     payload: Dict[str, Any],
 ) -> None:
+    """Сохраняет задачу в очередь эксперта как pending."""
     row = ExpertDecisionItem(
         category=category,
         rule_id=rule_id,
@@ -451,6 +491,7 @@ def officer_run(
     parsed: Dict[str, Any] = {}
 
     if payload.extracted_features_override is not None:
+        # Режим ручной правки: полностью пропускаем LLM-извлечение.
         parsed = dict(payload.extracted_features_override)
         compact = format_extracted_document_compact(parsed) if parsed else "(пустой JSON)"
         feature_block = {
@@ -470,7 +511,13 @@ def officer_run(
             }
         else:
             prompt = _assemble_llm_prompt(fe_cfg, payload.description)
-            ollama_body: Dict[str, Any] = {
+            runtime_cfg = fe_cfg.get("extraction_runtime") if isinstance(fe_cfg.get("extraction_runtime"), dict) else {}
+            configured_constrained = bool(
+                runtime_cfg.get("use_guidance")
+                or runtime_cfg.get("use_outlines")
+                or runtime_cfg.get("pydantic_outlines")
+            )
+            base_ollama_body: Dict[str, Any] = {
                 "model": model,
                 "prompt": prompt,
                 "num_ctx": 8192,
@@ -479,24 +526,105 @@ def officer_run(
                 "temperature": 0.0,
                 "enable_thinking": False,
             }
+            generation_attempts: list[Dict[str, Any]] = [
+                # Сначала пробуем конфигурацию из настроек, затем fallback-стратегии.
+                {
+                    **base_ollama_body,
+                    "constrained_decoding": configured_constrained,
+                    "do_sample": False,
+                },
+                {
+                    **base_ollama_body,
+                    "constrained_decoding": not configured_constrained,
+                    "do_sample": False,
+                },
+                {
+                    **base_ollama_body,
+                    "constrained_decoding": not configured_constrained,
+                    "do_sample": True,
+                    "temperature": 0.2,
+                },
+            ]
+            selected_attempt_idx = 0
+            gen_json: Dict[str, Any] | None = None
+            raw_text = ""
+            attempt_results: list[Dict[str, Any]] = []
+            extraction_debug: Optional[Dict[str, Any]] = None
             try:
                 with httpx.Client(timeout=OFFICER_HTTP_TIMEOUT) as client:
-                    gen = client.post(
-                        f"{PREPROCESSING_URL}/api/v1/ollama/generate",
-                        json=ollama_body,
-                    )
-                    gen.raise_for_status()
-                    gen_json = gen.json()
-                    raw_text = str(gen_json.get("raw_response") or "").strip()
+                    for idx, attempt_body in enumerate(generation_attempts):
+                        gen = client.post(
+                            f"{PREPROCESSING_URL}/api/v1/ollama/generate",
+                            json=attempt_body,
+                        )
+                        gen.raise_for_status()
+                        candidate_json = gen.json()
+                        candidate_raw = str(candidate_json.get("raw_response") or "").strip()
+                        attempt_results.append(
+                            {
+                                "attempt": idx + 1,
+                                "constrained_decoding": bool(attempt_body.get("constrained_decoding")),
+                                "do_sample": bool(attempt_body.get("do_sample")),
+                                "temperature": attempt_body.get("temperature"),
+                                "runtime_generation": candidate_json.get("runtime_generation"),
+                                "eval_count": candidate_json.get("eval_count"),
+                                "done": candidate_json.get("done"),
+                                "raw_response_char_len": len(candidate_raw),
+                                "raw_response_excerpt": (candidate_raw[:8000] + ("…" if len(candidate_raw) > 8000 else "")),
+                                "raw_response_is_empty": len(candidate_raw) == 0,
+                            }
+                        )
+                        if candidate_raw:
+                            # Как только получили непустой текст, дальше не ретраим.
+                            gen_json = candidate_json
+                            raw_text = candidate_raw
+                            selected_attempt_idx = idx
+                            break
+                    if not raw_text:
+                        # Сохраняем последнюю попытку для диагностики.
+                        selected_attempt_idx = len(generation_attempts) - 1
+                        gen_json = candidate_json if "candidate_json" in locals() else None
 
                     pr = client.post(
                         f"{PREPROCESSING_URL}/api/v1/parse-model-json",
-                        json={"text": raw_text},
+                        json={"text": raw_text or ""},
                     )
                     pr.raise_for_status()
                     pr_json = pr.json()
                     parsed_raw = pr_json.get("parsed")
-                    parsed = parsed_raw if isinstance(parsed_raw, dict) else {}
+                    parsed, coercion_note = _coerce_officer_parsed_features(parsed_raw)
+                    parse_kind = str(pr_json.get("parsed_top_level_kind") or "")
+                    frag_preview = str(pr_json.get("extracted_fragment_preview") or "")
+
+                    summary_lines: list[str] = []
+                    if attempt_results and all(bool(a.get("raw_response_is_empty")) for a in attempt_results):
+                        summary_lines.append(
+                            "Все попытки генерации вернули пустой текст от модели. "
+                            "Проверьте, что Ollama/vLLM доступен, имя модели совпадает с выбранным в настройках, "
+                            "и что лимит max_new_tokens достаточен."
+                        )
+                    elif not raw_text.strip():
+                        summary_lines.append("Текст ответа модели для парсинга пуст — извлечь JSON невозможно.")
+                    if coercion_note:
+                        summary_lines.append(coercion_note)
+                    if raw_text.strip() and parse_kind == "dict" and not parsed and frag_preview.strip():
+                        summary_lines.append(
+                            "Фрагмент JSON выделен из ответа, но после разбора получился пустой объект — "
+                            "ответ модели, вероятно, не соответствует ожидаемой структуре."
+                        )
+                    elif raw_text.strip() and not frag_preview.strip():
+                        summary_lines.append(
+                            "В ответе модели не найден блок с «{» или «[» — парсер не смог выделить JSON. "
+                            "См. полный сырой ответ в attempt_results."
+                        )
+                    extraction_debug = {
+                        "summary_lines_ru": summary_lines,
+                        "parse": {
+                            "parsed_top_level_kind": parse_kind or None,
+                            "extracted_fragment_excerpt": (frag_preview[:2000] + ("…" if len(frag_preview) > 2000 else "")),
+                            "coercion_note_ru": coercion_note,
+                        },
+                    }
             except httpx.HTTPStatusError as e:
                 raise HTTPException(
                     status_code=502,
@@ -510,6 +638,7 @@ def officer_run(
 
             excerpt = raw_text[:1200] + ("…" if len(raw_text) > 1200 else "")
             compact = format_extracted_document_compact(parsed) if parsed else "(пустой JSON)"
+            selected_request = generation_attempts[selected_attempt_idx] if generation_attempts else base_ollama_body
             feature_block = {
                 "status": "ok",
                 "config_id": fe_cfg.get("id"),
@@ -518,6 +647,32 @@ def officer_run(
                 "extracted_document_ru": compact,
                 "parsed": parsed,
                 "raw_llm_excerpt": excerpt,
+                "llm_request": {
+                    "model": model,
+                    "prompt": prompt,
+                    "generation_params": {
+                        "num_ctx": selected_request.get("num_ctx"),
+                        "max_new_tokens": selected_request.get("max_new_tokens"),
+                        "repetition_penalty": selected_request.get("repetition_penalty"),
+                        "temperature": selected_request.get("temperature"),
+                        "enable_thinking": selected_request.get("enable_thinking"),
+                        "constrained_decoding": selected_request.get("constrained_decoding"),
+                        "do_sample": selected_request.get("do_sample"),
+                    },
+                    "attempt_index": selected_attempt_idx + 1,
+                    "attempts_total": len(generation_attempts),
+                    "attempts": [
+                        {
+                            "attempt": i + 1,
+                            "constrained_decoding": bool(a.get("constrained_decoding")),
+                            "do_sample": bool(a.get("do_sample")),
+                            "temperature": a.get("temperature"),
+                        }
+                        for i, a in enumerate(generation_attempts)
+                    ],
+                    "attempt_results": attempt_results,
+                },
+                **({"extraction_debug": extraction_debug} if extraction_debug is not None else {}),
             }
     else:
         feature_block["extracted_document_ru"] = "Извлечение не выполнялось — задайте конфигурацию в настройках справочника."
@@ -535,6 +690,7 @@ def officer_run(
     classification_expert_review = _extract_classification_expert_review(errors)
     exactly_one_conflict = classification_expert_review
     if classification_expert_review:
+        # Если классификация неоднозначна/пустая, создаём карточку для ручного решения эксперта.
         cat = (
             "classification_ambiguous"
             if classification_expert_review.get("kind") == "ambiguous"
@@ -598,6 +754,7 @@ def officer_run(
         summary_lines.append(f"Сработавшее правило классификации: {rule_title}")
     errors_ru = humanize_officer_error_list(errors) if errors else []
     if errors:
+        # В summary кладём человекочитаемые причины, чтобы инспектор видел контекст без дебага JSON.
         summary_lines.append("Ошибки (пояснение): " + json.dumps(errors_ru, ensure_ascii=False))
     if classification_expert_review:
         summary_lines.append(
