@@ -1,11 +1,8 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 /**
- * Сборка запроса к LLM, который генерирует системный промпт для извлечения признаков
- * по данным справочника (numeric_characteristics_draft).
- *
- * Параметры вызова LLM для генератора (temperature, num_ctx, …): JSON
- * `services/api-gateway/config/prompt_generator.json` или `PROMPT_GENERATOR_CONFIG_PATH`.
- * Обзор: раздел «Генерация системного промпта извлечения признаков» в корневом README.md.
+ * Сборка **одноразового** запроса к LLM-генератору: мета-инструкция (только из настроек генератора)
+ * + данные справочника. Результат генерации пишется в «Промпт конфигурации» и дальше идёт в извлечение.
+ * Мета-текст нигде в пайплайне извлечения не используется — только здесь и в POST /api/feature-extraction/generate-prompt.
  */
 
 import {
@@ -15,39 +12,14 @@ import {
   PROCHEE_ROOT_KEY,
 } from "./numericCharacteristicsDraft";
 
-/** Мета-инструкция для модели-генератора промпта (промпт-инженер). */
-export const FEATURE_EXTRACTION_PROMPT_GENERATOR_META = `Ты — промпт-инженер, специализирующийся на создании системных инструкций для LLM, которые извлекают структурированные числовые и количественные характеристики из неструктурированных текстов.
-
-Твоя задача: на основе предоставленного JSON-шаблона (где значения заменены на null) и списка допустимых значений для ключевых полей, сгенерировать готовый системный промпт для модели-экстрактора.
-
-ТРЕБОВАНИЯ К ГЕНЕРАЦИИ ПРОМПТА:
-1. Сохрани архитектуру: Роль → Задача (пошагово) → Правила маппинга полей → Особые указания → Строгий JSON-вывод.
-2. Автоматически определи тип извлекаемых характеристик из ключей JSON. Сформулируй задачу и правила именно под этот тип данных.
-3. Интегрируй список допустимых значений в правила нормализации: укажи, что извлечённые значения должны приводиться к регистру/формату из списка, заменять синонимы на канонические обозначения и игнорировать несуществующие в списке варианты.
-4. Включи в «Особые указания» универсальные правила обработки чисел:
-   - Язык вывода: русский.
-   - Диапазоны и погрешности → формат [min, max].
-   - Логические операторы: «не менее» → [x, null], «не более» → [null, x].
-   - Десятичный разделитель: точка.
-   - Приоритет: конкретные числовые значения заменяют общие/оценочные формулировки.
-   - Пропуск: если атрибут отсутствует в тексте — не выводи его в JSON.
-   - Единицы измерения: укажи явно для каждого числового поля, кроме справочных/строковых.
-5. В конце промпта приведи пример JSON строго в формате исходного шаблона, но с подставленными реалистичными значениями (числа, массивы, корректные null).
-6. Стиль: императивный, без воды, готовый к production-использованию. Не добавляй пояснений, комментариев или обрамляющих фраз.
-
-ВЫВОД: Верни ТОЛЬКО сгенерированный системный промпт.`;
-
 export type PromptGeneratorCatalogError = { ok: false; message: string };
 
 export type PromptGeneratorCatalogOk = {
   ok: true;
-  /** Полный текст запроса к LLM-генератору промпта */
+  /** Полный текст запроса к LLM-генератору промпта (мета + каталог). */
   generatorPrompt: string;
-  /** Исходный JSON-шаблон из справочника (для редактирования в UI). */
   jsonTemplateText: string;
-  /** Исходный список допустимых значений/правил из справочника (для редактирования в UI). */
   allowedValuesText: string;
-  /** Кратко для отладки */
   summary: string;
 };
 
@@ -55,17 +27,27 @@ export type PromptGeneratorCatalogResult = PromptGeneratorCatalogOk | PromptGene
 export type PromptGeneratorOverrides = {
   jsonTemplateText?: string;
   allowedValuesText?: string;
-  metaInstructionText?: string;
+  /** Обязателен: шаблон из GET /api/admin/feature-extraction-prompt-generator-meta («Генератор промптов»). */
+  metaInstructionText: string;
 };
 
 /**
  * Собирает промпт для LLM на основе загруженного DSL справочника.
- * Использует meta.numeric_characteristics_draft и при необходимости имя/ТН ВЭД.
+ * metaInstructionText должен быть загружен с сервера; встроенного fallback нет.
  */
 export function buildFeatureExtractionPromptGeneratorRequest(
   dsl: any,
-  overrides?: PromptGeneratorOverrides,
+  overrides: PromptGeneratorOverrides,
 ): PromptGeneratorCatalogResult {
+  const metaInstructionText = String(overrides.metaInstructionText ?? "").trim();
+  if (!metaInstructionText) {
+    return {
+      ok: false,
+      message:
+        "Базовый промпт генератора пуст. Задайте и сохраните его в разделе «Генератор промптов» (общие настройки).",
+    };
+  }
+
   if (!dsl || typeof dsl !== "object") {
     return { ok: false, message: "Нет данных справочника (DSL)." };
   }
@@ -84,7 +66,8 @@ export function buildFeatureExtractionPromptGeneratorRequest(
   if (!jsonTemplate || Object.keys(jsonTemplate).length === 0) {
     return {
       ok: false,
-      message: "Не удалось построить JSON-шаблон из черновика. Задайте числовые характеристики, текстовые массивы или блок «прочее» в каталоге.",
+      message:
+        "Не удалось построить JSON-шаблон из черновика. Задайте числовые характеристики, текстовые массивы или блок «прочее» в каталоге.",
     };
   }
 
@@ -102,9 +85,7 @@ export function buildFeatureExtractionPromptGeneratorRequest(
     const k = c.characteristicKey.trim();
     if (!k) continue;
     if (c.layout === "scalar") {
-      allowedBlocks.push(
-        `Числовое поле на корне документа (одно значение, не массив): ключ «${k}».`,
-      );
+      allowedBlocks.push(`Числовое поле на корне документа (одно значение, не массив): ключ «${k}».`);
       allowedBlocks.push("");
       continue;
     }
@@ -148,10 +129,9 @@ export function buildFeatureExtractionPromptGeneratorRequest(
 
   const defaultJsonTemplateText = JSON.stringify(jsonTemplate, null, 2);
   const defaultAllowedValuesText = allowedBlocks.length ? allowedBlocks.join("\n").trimEnd() : "";
-  const effectiveJsonTemplateText = String(overrides?.jsonTemplateText ?? defaultJsonTemplateText).trim();
-  const effectiveAllowedValuesText = String(overrides?.allowedValuesText ?? defaultAllowedValuesText).trim();
+  const effectiveJsonTemplateText = String(overrides.jsonTemplateText ?? defaultJsonTemplateText).trim();
+  const effectiveAllowedValuesText = String(overrides.allowedValuesText ?? defaultAllowedValuesText).trim();
 
-  const metaInstructionText = String(overrides?.metaInstructionText ?? FEATURE_EXTRACTION_PROMPT_GENERATOR_META).trim();
   const generatorPrompt = [
     metaInstructionText,
     "",

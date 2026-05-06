@@ -1,0 +1,83 @@
+@startuml packages_backend_app_overview
+set namespaceSeparator none
+package "app" as app {
+}
+package "app.api" as app.api {
+}
+package "app.api.routes_expert_decisions" as app.api.routes_expert_decisions {
+}
+package "app.api.routes_feature_extraction_settings" as app.api.routes_feature_extraction_settings {
+}
+package "app.api.routes_officer_pipeline" as app.api.routes_officer_pipeline {
+}
+package "app.api.routes_rules" as app.api.routes_rules {
+}
+package "app.db" as app.db {
+}
+package "app.db.base" as app.db.base {
+}
+package "app.db.models" as app.db.models {
+}
+package "app.db.session" as app.db.session {
+}
+package "app.examples" as app.examples {
+}
+package "app.examples.fertilizer_rule_dsl" as app.examples.fertilizer_rule_dsl {
+}
+package "app.main" as app.main {
+}
+package "app.pipeline" as app.pipeline {
+}
+package "app.pipeline.validator" as app.pipeline.validator {
+}
+package "app.primary_catalog_settings" as app.primary_catalog_settings {
+}
+package "app.rules" as app.rules {
+}
+package "app.rules.classification" as app.rules.classification {
+}
+package "app.rules.compiler" as app.rules.compiler {
+}
+package "app.rules.cross_rules" as app.rules.cross_rules {
+}
+package "app.rules.dsl_models" as app.rules.dsl_models {
+}
+package "app.rules.formula_safe_eval" as app.rules.formula_safe_eval {
+}
+package "app.rules.numeric_cell" as app.rules.numeric_cell {
+}
+package "app.rules.officer_validation_errors_ru" as app.rules.officer_validation_errors_ru {
+}
+package "app.rules.path_utils" as app.rules.path_utils {
+}
+package "app.rules.rule_overlap" as app.rules.rule_overlap {
+}
+package "app.rules.schema_normalize" as app.rules.schema_normalize {
+}
+app.db.models --> app.db.base
+app.db.session --> app.db.base
+app.main --> app.api.routes_expert_decisions
+app.main --> app.api.routes_feature_extraction_settings
+app.main --> app.api.routes_officer_pipeline
+app.main --> app.api.routes_rules
+app.main --> app.db.session
+app.primary_catalog_settings --> app.db.models
+app.primary_catalog_settings --> app.rules.dsl_models
+app.rules.classification --> app.rules.cross_rules
+app.rules.classification --> app.rules.dsl_models
+app.rules.classification --> app.rules.formula_safe_eval
+app.rules.classification --> app.rules.numeric_cell
+app.rules.classification --> app.rules.path_utils
+app.rules.compiler --> app.rules.classification
+app.rules.compiler --> app.rules.cross_rules
+app.rules.compiler --> app.rules.dsl_models
+app.rules.compiler --> app.rules.schema_normalize
+app.rules.cross_rules --> app.rules.dsl_models
+app.rules.cross_rules --> app.rules.numeric_cell
+app.rules.cross_rules --> app.rules.path_utils
+app.rules.dsl_models --> app.rules.formula_safe_eval
+app.rules.rule_overlap --> app.rules.classification
+app.rules.rule_overlap --> app.rules.dsl_models
+app.rules.rule_overlap --> app.rules.path_utils
+app.rules.schema_normalize --> app.rules.dsl_models
+@enduml

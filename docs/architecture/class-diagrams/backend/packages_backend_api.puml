@@ -1,0 +1,13 @@
+@startuml packages_backend_api
+set namespaceSeparator none
+package "app.api" as app.api {
+}
+package "app.api.routes_expert_decisions" as app.api.routes_expert_decisions {
+}
+package "app.api.routes_feature_extraction_settings" as app.api.routes_feature_extraction_settings {
+}
+package "app.api.routes_officer_pipeline" as app.api.routes_officer_pipeline {
+}
+package "app.api.routes_rules" as app.api.routes_rules {
+}
+@enduml

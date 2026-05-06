@@ -1,0 +1,153 @@
+@startuml classes_backend_api
+set namespaceSeparator none
+class "app.api.routes_expert_decisions.ExpertDecisionCreate" as app.api.routes_expert_decisions.ExpertDecisionCreate {
+  category : str
+  declaration_id : str
+  model_config
+  payload : Dict[str, Any]
+  rule_id : Optional[str]
+  summary_ru : str
+}
+class "app.api.routes_expert_decisions.ExpertDecisionItemOut" as app.api.routes_expert_decisions.ExpertDecisionItemOut {
+  category : str
+  created_at : str
+  declaration_id : str
+  id : str
+  payload_json : Dict[str, Any]
+  resolution_json : Optional[Dict[str, Any]]
+  resolved_at : Optional[str]
+  rule_id : Optional[str]
+  status : str
+  summary_ru : str
+}
+class "app.api.routes_expert_decisions.ExpertDecisionListPageOut" as app.api.routes_expert_decisions.ExpertDecisionListPageOut {
+  items : List[ExpertDecisionItemOut]
+  page : int
+  page_size : int
+  total : int
+}
+class "app.api.routes_expert_decisions.ExpertDecisionPatch" as app.api.routes_expert_decisions.ExpertDecisionPatch {
+  model_config
+  resolution : Dict[str, Any]
+  status : Literal['pending', 'resolved', 'dismissed']
+}
+class "app.api.routes_feature_extraction_settings.FewShotAssistRunCreate" as app.api.routes_feature_extraction_settings.FewShotAssistRunCreate {
+  model_config
+  result : Dict[str, Any]
+  rule_id : str
+}
+class "app.api.routes_feature_extraction_settings.ModelRuntimeSettingsPayload" as app.api.routes_feature_extraction_settings.ModelRuntimeSettingsPayload {
+  model_config
+  models : dict[str, dict[str, Any]]
+}
+class "app.api.routes_feature_extraction_settings.PrimaryCatalogSettingsPayload" as app.api.routes_feature_extraction_settings.PrimaryCatalogSettingsPayload {
+  by_group_code : dict[str, Optional[str]]
+  model_config
+}
+class "app.api.routes_officer_pipeline.OfficerRunRequest" as app.api.routes_officer_pipeline.OfficerRunRequest {
+  declaration_id : str
+  description : str
+  extracted_features_override : Optional[Dict[str, Any]]
+  gross_weight_kg : float | None
+  net_weight_kg : float | None
+  price : float | None
+  tnved_code : str | None
+}
+class "app.api.routes_officer_pipeline.SemanticClassConsistencyRequest" as app.api.routes_officer_pipeline.SemanticClassConsistencyRequest {
+  class_id : str
+  rule_id : str
+  validated_features : Dict[str, Any]
+}
+class "app.api.routes_rules.CloneRuleRequest" as app.api.routes_rules.CloneRuleRequest {
+  model_id : Optional[str]
+  name : Optional[str]
+}
+class "app.api.routes_rules.CreateRuleResponse" as app.api.routes_rules.CreateRuleResponse {
+  created_at : datetime
+  dsl : Dict[str, Any]
+  rule_id : UUID
+  version : int
+}
+class "app.api.routes_rules.DSLSchemaResponse" as app.api.routes_rules.DSLSchemaResponse {
+  model_config : dict
+  schema_ : Dict[str, Any]
+}
+class "app.api.routes_rules.ExampleResponse" as app.api.routes_rules.ExampleResponse {
+  dsl : Dict[str, Any]
+  example_data : Any
+}
+class "app.api.routes_rules.ReferenceExampleBulkIn" as app.api.routes_rules.ReferenceExampleBulkIn {
+  items : list[ReferenceExampleBulkItem]
+}
+class "app.api.routes_rules.ReferenceExampleBulkItem" as app.api.routes_rules.ReferenceExampleBulkItem {
+  assigned_class_id : Optional[str]
+  data : Any
+  description_text : str
+}
+class "app.api.routes_rules.ReferenceExampleBulkOut" as app.api.routes_rules.ReferenceExampleBulkOut {
+  inserted : int
+  skipped : list[dict[str, Any]]
+}
+class "app.api.routes_rules.RuleConflictItem" as app.api.routes_rules.RuleConflictItem {
+  adjustment_recommendations_ru : list[str]
+  ambiguous_example : Optional[Dict[str, Any]]
+  ambiguous_example_note_ru : Optional[str]
+  corridor_risk_ru : Optional[str]
+  left_class_id : str
+  left_rule_index : int
+  left_title : Optional[str]
+  overlap_axis_summary_ru : Optional[str]
+  overlap_columns : list[RuleOverlapColumnItem]
+  overlap_context_note_ru : Optional[str]
+  priority_resolution_ru : Optional[str]
+  range_intersections_ru : list[str]
+  reason_ru : str
+  right_class_id : str
+  right_rule_index : int
+  right_title : Optional[str]
+  rule_class_ids : list[str]
+  rule_indices : list[int]
+  rule_titles : list[Optional[str]]
+  simplified_analysis_note_ru : Optional[str]
+}
+class "app.api.routes_rules.RuleConflictsResponse" as app.api.routes_rules.RuleConflictsResponse {
+  conflicts : list[RuleConflictItem]
+  has_conflicts : bool
+}
+class "app.api.routes_rules.RuleListItem" as app.api.routes_rules.RuleListItem {
+  created_at : datetime
+  description : Optional[str]
+  is_archived : bool
+  model_id : str
+  name : Optional[str]
+  rule_id : UUID
+  tn_ved_group_code : Optional[str]
+  version : int
+}
+class "app.api.routes_rules.RuleOverlapColumnItem" as app.api.routes_rules.RuleOverlapColumnItem {
+  constraints_compact_ru : str
+  label_ru : str
+  rule_index : int
+}
+class "app.api.routes_rules.TemplateDetailsResponse" as app.api.routes_rules.TemplateDetailsResponse {
+  description : str
+  dsl : Dict[str, Any]
+  example_data : Any
+  template_id : str
+  title : str
+}
+class "app.api.routes_rules.TemplateListItem" as app.api.routes_rules.TemplateListItem {
+  description : str
+  template_id : str
+  title : str
+}
+class "app.api.routes_rules.ValidateRequest" as app.api.routes_rules.ValidateRequest {
+  data : Any
+}
+class "app.api.routes_rules.ValidateResponse" as app.api.routes_rules.ValidateResponse {
+  assigned_class : Optional[str]
+  errors : list[Any]
+  ok : bool
+  validated_data : Optional[Dict[str, Any]]
+}
+@enduml

@@ -30,6 +30,7 @@ from app.prompt_generator_config import (
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request, Response
+from shared.extraction_prompt import assemble_feature_extraction_prompt
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
@@ -470,34 +471,6 @@ async def validate_preflight() -> dict[str, Any]:
     }
 
 
-def _build_feature_extraction_prompt(payload: FeatureExtractionTestRequest) -> str:
-    parts: list[str] = []
-    rp = (payload.rules_preview or "").strip()
-    if rp:
-        parts.append(rp)
-    pr = (payload.prompt or "").strip()
-    if pr:
-        parts.append(pr)
-    st = (payload.sample_text or "").strip()
-    if st:
-        parts.append("Текст для извлечения:\n" + st)
-    return "\n\n".join(parts)
-
-
-def _assemble_extraction_prompt(*, rules_preview: str | None, prompt: str, sample_text: str) -> str:
-    parts: list[str] = []
-    rp = (rules_preview or "").strip()
-    if rp:
-        parts.append(rp)
-    pr = (prompt or "").strip()
-    if pr:
-        parts.append(pr)
-    st = (sample_text or "").strip()
-    if st:
-        parts.append("Текст для извлечения:\n" + st)
-    return "\n\n".join(parts)
-
-
 async def _require_model_running_for_prompt_test(model_name: str) -> None:
     """
     Тест промпта не должен сам поднимать модель (pull/load) — только вызов при уже запущенной
@@ -540,17 +513,15 @@ async def test_feature_extraction(payload: FeatureExtractionTestRequest) -> dict
         )
 
     eff = effective_extraction_runtime(payload.runtime)
-    assembled_for_ollama = _build_feature_extraction_prompt(payload)
+    assembled_for_ollama = assemble_feature_extraction_prompt(payload.prompt, payload.sample_text)
     out: dict[str, Any] = {
         "status": "ok",
         "model": payload.model,
-        # Только пользовательский промпт из тела запроса (без rules_preview и без блока «Текст для извлечения»).
         "prompt_preview": (payload.prompt or "")[:500],
         "sample_preview": (payload.sample_text or "")[:500],
         "runtime": payload.runtime or {},
         "effective_runtime": eff,
         "rules_preview_excerpt": (payload.rules_preview or "")[:500],
-        # Фактическая строка, уходящая в Ollama: rules + prompt + подписанный образец (см. _build_feature_extraction_prompt).
         "assembled_prompt_preview": assembled_for_ollama[:4000],
     }
 
@@ -749,10 +720,10 @@ async def _execute_few_shot_assist(
         for text in candidates:
             cand_pos += 1
             responses: list[str] = []
-            assembled = _assemble_extraction_prompt(
+            assembled = assemble_feature_extraction_prompt(
+                payload.prompt,
+                text,
                 rules_preview=payload.rules_preview,
-                prompt=payload.prompt,
-                sample_text=text,
             )
             for variant in range(k):
                 body = {
@@ -1163,6 +1134,7 @@ async def generate_extraction_system_prompt(payload: GenerateExtractionPromptReq
 class PipelineConfigBody(BaseModel):
     semantic_similarity_threshold: Optional[float] = None
     semantic_neighbor_similarity_floor_s0: Optional[float] = None
+    semantic_neighbor_weight_gamma: Optional[float] = None
     semantic_support_threshold_tau2: Optional[float] = None
 
 
@@ -1179,7 +1151,7 @@ FEATURE_EXTRACTION_PROMPT_GENERATOR_META_PATH = Path(
 
 
 def _default_feature_extraction_prompt_generator_meta() -> str:
-    # Синхронизировано с frontend/src/expert/featureExtractionPromptGenerator.ts
+    """Начальное содержимое файла, если шаблон ещё не сохраняли (единственный источник на сервере)."""
     return (
         "Ты — промпт-инженер, специализирующийся на создании системных инструкций для LLM, которые извлекают "
         "структурированные числовые и количественные характеристики из неструктурированных текстов.\n\n"

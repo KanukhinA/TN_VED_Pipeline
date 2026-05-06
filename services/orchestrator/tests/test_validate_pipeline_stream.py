@@ -44,6 +44,8 @@ class _FakeAsyncClient:
         return None
 
     async def get(self, url: str, timeout: float | None = None) -> _FakeResponse:
+        if url.endswith("/health"):
+            return _FakeResponse(200, {"status": "ok", "service": "semantic-search"})
         if url.endswith("/api/rules/RULE-1/reference-examples"):
             return _FakeResponse(
                 200,
@@ -153,3 +155,26 @@ def test_validate_stream_emits_phase_partial_complete(monkeypatch: pytest.Monkey
     assert "phase" in kinds
     assert "partial" in kinds
     assert kinds[-1] == "complete"
+
+
+def test_validate_returns_503_when_semantic_search_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _SemanticDownClient(_FakeAsyncClient):
+        async def get(self, url: str, timeout: float | None = None) -> _FakeResponse:
+            if url.endswith("/health"):
+                return _FakeResponse(503, {"status": "down"})
+            return await super().get(url, timeout=timeout)
+
+    monkeypatch.setattr(orchestrator_main.httpx, "AsyncClient", _SemanticDownClient)
+
+    payload = orchestrator_main.ValidationRequest(
+        declaration_id="OFFICER-ERR-1",
+        description="Тест",
+        tnved_code="31",
+        gross_weight_kg=1.0,
+        net_weight_kg=1.0,
+        price=1.0,
+    )
+    with pytest.raises(orchestrator_main.HTTPException) as exc:
+        asyncio.run(orchestrator_main._run_validate_pipeline(payload))
+    assert exc.value.status_code == 503
+    assert "Сервис семантического поиска недоступен" in str(exc.value.detail)

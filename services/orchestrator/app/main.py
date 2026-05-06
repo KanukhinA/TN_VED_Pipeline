@@ -14,6 +14,7 @@ import psycopg2
 
 from app.pipeline_config import (
     load_semantic_neighbor_similarity_floor_s0,
+    load_semantic_neighbor_weight_gamma,
     load_semantic_similarity_threshold,
     load_semantic_support_threshold_tau2,
 )
@@ -185,6 +186,24 @@ def _http_exception_detail(exc: HTTPException) -> str:
         return str(d)
 
 
+async def _ensure_semantic_search_alive(client: httpx.AsyncClient) -> None:
+    """Проверяет, что semantic-search доступен до старта обработки декларации."""
+    try:
+        resp = await client.get(f"{SEMANTIC_SEARCH_URL}/health", timeout=5.0)
+        resp.raise_for_status()
+        data = resp.json()
+        if not isinstance(data, dict) or str(data.get("status") or "").lower() != "ok":
+            raise RuntimeError(f"unexpected health payload: {data!r}")
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Сервис семантического поиска недоступен. "
+                "Проверьте контейнер semantic-search и повторите запуск проверки декларации."
+            ),
+        ) from exc
+
+
 async def _run_validate_pipeline(
     payload: ValidationRequest,
     on_phase: Callable[[str, str, str], Awaitable[None]] | None = None,
@@ -201,10 +220,10 @@ async def _run_validate_pipeline(
 
     flow: dict[str, Any] = {"declaration_id": payload.declaration_id, "steps": []}
     class_id: str | None = None
-    problem_registry_record_created = False
 
     async with httpx.AsyncClient(timeout=900.0) as client:
         try:
+            await _ensure_semantic_search_alive(client)
             await phase(
                 "catalog",
                 "Подбор справочника",
@@ -231,20 +250,16 @@ async def _run_validate_pipeline(
                 )
                 kind = (crev or {}).get("kind") if isinstance(crev, dict) else None
                 if kind == "none_match":
-                    expl = (
-                        "Ни одно правило классификации не подошло — запись попала в очередь «Решение спорных ситуаций»."
-                    )
+                    expl = "Ни одно правило классификации не подошло — требуется решение эксперта (фиксация в архиве — после действия инспектора)."
                 elif kind == "ambiguous":
                     ids = (crev or {}).get("matched_class_ids") or []
                     expl = (
                         "Подошло несколько классов: "
                         + ", ".join(str(x) for x in ids)
-                        + ". Нужно решение эксперта — запись в очереди «Решение спорных ситуаций»."
+                        + ". Нужно решение эксперта (запись в очереди создаётся после решения инспектора)."
                     )
                 else:
-                    expl = (
-                        "Требуется экспертное рассмотрение по классификации — см. страницу «Решение спорных ситуаций»."
-                    )
+                    expl = "Требуется экспертное рассмотрение по классификации (архив — после действия инспектора)."
                 await push_step(
                     "expert-review-routing",
                     {
@@ -254,36 +269,9 @@ async def _run_validate_pipeline(
                         "explanation_ru": expl,
                     },
                 )
-                # Чтобы спорные случаи по классификации стабильно попадали в архив и очередь
-                # экспертных решений, создаём explicit запись expert-decision.
-                try:
-                    cat = officer_json.get("catalog")
-                    rid = None
-                    if isinstance(cat, dict) and cat.get("rule_id") is not None:
-                        rid = str(cat.get("rule_id")).strip() or None
-                    body_ed: dict[str, Any] = {
-                        "category": "classification_expert_review",
-                        "declaration_id": payload.declaration_id,
-                        "summary_ru": f"Требуется подтверждение эксперта по классификации для декларации {payload.declaration_id}",
-                        "payload": {
-                            "source": "orchestrator",
-                            "step": "expert-review-routing",
-                            "classification_expert_review": crev,
-                            "explanation_ru": expl,
-                            "officer_result": officer_json,
-                        },
-                    }
-                    if rid:
-                        body_ed["rule_id"] = rid
-                    pr_ed = await client.post(
-                        f"{RULES_ENGINE_URL}/api/expert-decisions",
-                        json=body_ed,
-                        timeout=30.0,
-                    )
-                    pr_ed.raise_for_status()
-                    problem_registry_record_created = True
-                except Exception:
-                    pass
+                # Запись expert_decision_items здесь не создаём: officer-run вызывается при каждой
+                # проверке в UI; архив и полный payload (ТН ВЭД, цена) — по кнопкам инспектора
+                # (см. backend officer-run и OfficerValidationPage).
             elif not class_id:
                 cat = officer_json.get("catalog")
                 rule_id_from_catalog: str | None = None
@@ -303,6 +291,7 @@ async def _run_validate_pipeline(
                     if knn_k < 1:
                         knn_k = 1
                     neighbor_floor_s0 = load_semantic_neighbor_similarity_floor_s0()
+                    neighbor_weight_gamma = load_semantic_neighbor_weight_gamma()
                     support_tau2 = load_semantic_support_threshold_tau2()
                     ss = await client.post(
                         f"{SEMANTIC_SEARCH_URL}/api/v1/search",
@@ -312,6 +301,7 @@ async def _run_validate_pipeline(
                             "similarity_threshold": threshold,
                             "knn_k": knn_k,
                             "neighbor_similarity_floor_s0": neighbor_floor_s0,
+                            "neighbor_weight_gamma": neighbor_weight_gamma,
                             "support_threshold_tau2": support_tau2,
                             "rule_id": rule_id_from_catalog,
                             "reference_examples": reference_examples,
@@ -427,93 +417,6 @@ async def _run_validate_pipeline(
                             "explanation_ru": "Имя класса сгенерировано LLM и не применяется к декларации, пока эксперт не подтвердит его в интерфейсе.",
                         },
                     )
-                    try:
-                        cat = officer_json.get("catalog")
-                        rid = None
-                        if isinstance(cat, dict) and cat.get("rule_id") is not None:
-                            rid = str(cat.get("rule_id")).strip() or None
-                        sug = str(nm_data.get("suggested_class_name") or "").strip()
-                        fe = officer_json.get("feature_extraction")
-                        fe_summary = ""
-                        if isinstance(fe, dict):
-                            fe_summary = str(fe.get("extracted_document_ru") or "").strip()
-                        body_ed: dict[str, Any] = {
-                            "category": "class_name_confirmation",
-                            "declaration_id": payload.declaration_id,
-                            "summary_ru": (
-                                f"Подтвердите идентификатор класса для декларации {payload.declaration_id}: «{sug}»"
-                            ),
-                            "payload": {
-                                "source": "orchestrator",
-                                "step": "llm-class-name-suggestion",
-                                "llm_result": nm_data,
-                                "extracted_features_summary_ru": fe_summary,
-                            },
-                        }
-                        if rid:
-                            body_ed["rule_id"] = rid
-                        pr_ed = await client.post(
-                            f"{RULES_ENGINE_URL}/api/expert-decisions",
-                            json=body_ed,
-                            timeout=30.0,
-                        )
-                        pr_ed.raise_for_status()
-                        problem_registry_record_created = True
-                    except Exception:
-                        pass
-
-                # Страховка: если автоклассификация не завершилась итоговым классом
-                # и до этого не удалось создать запись в реестре проблемных деклараций,
-                # создаём универсальную запись независимо от последующих действий инспектора.
-                if not class_id and not problem_registry_record_created:
-                    try:
-                        cat = officer_json.get("catalog")
-                        rid = None
-                        if isinstance(cat, dict) and cat.get("rule_id") is not None:
-                            rid = str(cat.get("rule_id")).strip() or None
-                        semantic_step = next(
-                            (
-                                s.get("result")
-                                for s in flow.get("steps", [])
-                                if isinstance(s, dict) and s.get("step") == "semantic-search"
-                            ),
-                            None,
-                        )
-                        semantic_rule_step = next(
-                            (
-                                s.get("result")
-                                for s in flow.get("steps", [])
-                                if isinstance(s, dict) and s.get("step") == "semantic-class-rule-check"
-                            ),
-                            None,
-                        )
-                        reason_ru = "Автоматическая классификация не назначила итоговый класс; требуется решение эксперта."
-                        if isinstance(semantic_rule_step, dict) and semantic_rule_step.get("consistent") is False:
-                            reason_ru = "Семантический кандидат не прошёл проверку правила класса; требуется решение эксперта."
-                        body_ed_fallback: dict[str, Any] = {
-                            "category": "classification_unresolved",
-                            "declaration_id": payload.declaration_id,
-                            "summary_ru": f"Автоклассификация не сработала для декларации {payload.declaration_id}; требуется решение эксперта.",
-                            "payload": {
-                                "source": "orchestrator",
-                                "step": "classification-unresolved-fallback",
-                                "reason_ru": reason_ru,
-                                "semantic_search": semantic_step if isinstance(semantic_step, dict) else {},
-                                "semantic_rule_check": semantic_rule_step if isinstance(semantic_rule_step, dict) else {},
-                                "officer_result": officer_json,
-                            },
-                        }
-                        if rid:
-                            body_ed_fallback["rule_id"] = rid
-                        pr_ed = await client.post(
-                            f"{RULES_ENGINE_URL}/api/expert-decisions",
-                            json=body_ed_fallback,
-                            timeout=30.0,
-                        )
-                        pr_ed.raise_for_status()
-                        problem_registry_record_created = True
-                    except Exception:
-                        pass
 
             await phase("price-validation", "Проверка стоимости", "Сравниваем заявленную стоимость с ориентировочной.")
             price = await client.post(
@@ -554,6 +457,8 @@ async def _run_validate_pipeline(
             if sc in (400, 404, 422, 502):
                 raise HTTPException(status_code=sc, detail=detail) from exc
             raise HTTPException(status_code=502, detail=f"rules-engine error {sc}: {detail}") from exc
+        except HTTPException:
+            raise
         except Exception as exc:
             raise HTTPException(status_code=502, detail=f"pipeline dependency unavailable: {exc}") from exc
 

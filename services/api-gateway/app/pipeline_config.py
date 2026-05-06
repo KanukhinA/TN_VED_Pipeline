@@ -15,6 +15,7 @@ from typing import Any
 CODE_DEFAULT: dict[str, Any] = {
     "semantic_similarity_threshold": 0.75,
     "semantic_neighbor_similarity_floor_s0": 0.35,
+    "semantic_neighbor_weight_gamma": 2.0,
     "semantic_support_threshold_tau2": 0.55,
 }
 
@@ -58,6 +59,11 @@ def _clamp_config(merged: dict[str, Any]) -> dict[str, Any]:
         out["semantic_support_threshold_tau2"] = max(0.0, min(tau2, 1.0))
     except (TypeError, ValueError):
         out["semantic_support_threshold_tau2"] = CODE_DEFAULT["semantic_support_threshold_tau2"]
+    try:
+        gamma = float(out["semantic_neighbor_weight_gamma"])
+        out["semantic_neighbor_weight_gamma"] = max(1.0, min(gamma, 32.0))
+    except (TypeError, ValueError):
+        out["semantic_neighbor_weight_gamma"] = CODE_DEFAULT["semantic_neighbor_weight_gamma"]
     return out
 
 

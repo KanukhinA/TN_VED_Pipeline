@@ -52,11 +52,118 @@ const initialForm: OfficerForm = {
   graph42: "",
 };
 
-function truncateMiddle(s: string, max = 36): string {
-  const t = s.trim();
-  if (t.length <= max) return t;
-  const half = Math.floor((max - 3) / 2);
-  return `${t.slice(0, half)}…${t.slice(-half)}`;
+const FEATURE_SPACE_VIEW_W = 860;
+const FEATURE_SPACE_VIEW_H = 480;
+const FEATURE_SPACE_LABEL_FONT_SIZE = 14;
+
+type FeatureSpaceLabelRect = { L: number; R: number; T: number; B: number };
+
+function estimateFeatureSpaceLabelMetrics(text: string, fontSize: number): { w: number; h: number } {
+  const t = text.trim();
+  const charW = fontSize * 0.58;
+  const w = Math.max(fontSize * 2.5, t.length * charW);
+  const h = fontSize * 1.28;
+  return { w, h };
+}
+
+function rectCirclePenalty(rect: FeatureSpaceLabelRect, cx: number, cy: number, r: number): number {
+  const px = Math.max(rect.L, Math.min(cx, rect.R));
+  const py = Math.max(rect.T, Math.min(cy, rect.B));
+  const dx = cx - px;
+  const dy = cy - py;
+  const d2 = dx * dx + dy * dy;
+  const thr = (r + 3) * (r + 3);
+  if (d2 >= thr) return 0;
+  return (thr - d2) * 0.12 + 45;
+}
+
+function rectOverlapPenalty(rect: FeatureSpaceLabelRect, placed: FeatureSpaceLabelRect[]): number {
+  let pen = 0;
+  for (const o of placed) {
+    const L = Math.max(rect.L, o.L);
+    const R = Math.min(rect.R, o.R);
+    const T = Math.max(rect.T, o.T);
+    const B = Math.min(rect.B, o.B);
+    if (L < R && T < B) {
+      const a = (R - L) * (B - T);
+      pen += a * 2.5 + 130;
+    }
+  }
+  return pen;
+}
+
+function outOfViewPenalty(rect: FeatureSpaceLabelRect): number {
+  const p = 6;
+  let pen = 0;
+  if (rect.L < p) pen += (p - rect.L) * 6;
+  if (rect.T < p) pen += (p - rect.T) * 6;
+  if (rect.R > FEATURE_SPACE_VIEW_W - p) pen += (rect.R - (FEATURE_SPACE_VIEW_W - p)) * 6;
+  if (rect.B > FEATURE_SPACE_VIEW_H - p) pen += (rect.B - (FEATURE_SPACE_VIEW_H - p)) * 6;
+  return pen;
+}
+
+type FeatureSpaceLabelCandidate = {
+  rect: FeatureSpaceLabelRect;
+  x: number;
+  y: number;
+  anchor: "start" | "middle" | "end";
+};
+
+function buildFeatureSpaceLabelCandidates(cx: number, cy: number, w: number, h: number, gapBase: number): FeatureSpaceLabelCandidate[] {
+  const out: FeatureSpaceLabelCandidate[] = [];
+  const scales = [1, 1.65, 2.25];
+  for (const s of scales) {
+    const g = gapBase * s;
+    const Le = cx + g;
+    out.push({ rect: { L: Le, R: Le + w, T: cy - h / 2, B: cy + h / 2 }, x: Le, y: cy, anchor: "start" });
+    const Rw = cx - g;
+    out.push({ rect: { L: Rw - w, R: Rw, T: cy - h / 2, B: cy + h / 2 }, x: Rw, y: cy, anchor: "end" });
+    const yn = cy - g - h / 2;
+    out.push({
+      rect: { L: cx - w / 2, R: cx + w / 2, T: yn - h / 2, B: yn + h / 2 },
+      x: cx,
+      y: yn,
+      anchor: "middle",
+    });
+    const ys = cy + g + h / 2;
+    out.push({
+      rect: { L: cx - w / 2, R: cx + w / 2, T: ys - h / 2, B: ys + h / 2 },
+      x: cx,
+      y: ys,
+      anchor: "middle",
+    });
+  }
+  const k = 0.72;
+  for (const s of [1, 1.55]) {
+    const g = gapBase * s;
+    const gx = g * k;
+    const gy = g * k;
+    out.push({
+      rect: { L: cx + gx, R: cx + gx + w, T: cy - gy - h, B: cy - gy },
+      x: cx + gx,
+      y: cy - gy - h / 2,
+      anchor: "start",
+    });
+    out.push({
+      rect: { L: cx + gx, R: cx + gx + w, T: cy + gy, B: cy + gy + h },
+      x: cx + gx,
+      y: cy + gy + h / 2,
+      anchor: "start",
+    });
+    out.push({
+      rect: { L: cx - gx - w, R: cx - gx, T: cy - gy - h, B: cy - gy },
+      x: cx - gx,
+      y: cy - gy - h / 2,
+      anchor: "end",
+    });
+    out.push({
+      rect: { L: cx - gx - w, R: cx - gx, T: cy + gy, B: cy + gy + h },
+      x: cx - gx,
+      y: cy + gy + h / 2,
+      anchor: "end",
+    });
+  }
+  return out;
 }
 
 /** Ответ оркестратора кладёт полный officer-run в steps; дублирует summary_ru наверх. */
@@ -184,6 +291,7 @@ function recalculateSemanticForK(semanticPayload: Record<string, unknown> | null
       return {
         class_id: String(row.class_id ?? "").trim(),
         similarity: typeof row.similarity === "number" ? row.similarity : Number(row.similarity ?? NaN),
+        description_text: String(row.text ?? "").trim(),
       };
     })
     .filter((r) => r.class_id && Number.isFinite(r.similarity))
@@ -193,6 +301,13 @@ function recalculateSemanticForK(semanticPayload: Record<string, unknown> | null
   const top = refs.slice(0, kEff);
   const s0Raw = semanticPayload.neighbor_similarity_floor_s0;
   const s0 = typeof s0Raw === "number" ? s0Raw : Number(s0Raw ?? 0.35);
+  const gammaRaw = semanticPayload.neighbor_weight_gamma;
+  const gamma =
+    typeof gammaRaw === "number" && Number.isFinite(gammaRaw) && gammaRaw >= 1 ? gammaRaw : 2;
+  const voteW = (sim: number) => {
+    const margin = Math.max(0, sim - s0);
+    return margin <= 0 ? 0 : margin ** gamma;
+  };
   const tau1Raw = semanticPayload.threshold_tau1 ?? semanticPayload.similarity_threshold;
   const tau1 = typeof tau1Raw === "number" ? tau1Raw : Number(tau1Raw ?? NaN);
   const tau2Raw = semanticPayload.threshold_tau2;
@@ -201,7 +316,7 @@ function recalculateSemanticForK(semanticPayload: Record<string, unknown> | null
   const votes = new Map<string, { vw: number; count: number; best: number }>();
   let totalWeight = 0;
   for (const n of top) {
-    const w = Math.max(0, n.similarity - s0);
+    const w = voteW(n.similarity);
     totalWeight += w;
     const cur = votes.get(n.class_id) ?? { vw: 0, count: 0, best: -Infinity };
     cur.vw += w;
@@ -227,8 +342,8 @@ function recalculateSemanticForK(semanticPayload: Record<string, unknown> | null
     index: idx,
     class_id: n.class_id,
     similarity: n.similarity,
-    weight: Math.max(0, n.similarity - s0),
-    description_text: "",
+    weight: voteW(n.similarity),
+    description_text: n.description_text,
   }));
   return {
     ...semanticPayload,
@@ -240,30 +355,6 @@ function recalculateSemanticForK(semanticPayload: Record<string, unknown> | null
     matched,
     below_threshold: Number.isFinite(tau1) && Number.isFinite(bestSim as number) ? (bestSim as number) <= tau1 : semanticPayload.below_threshold,
   };
-}
-
-function describeFeatureSpaceProjectionRu(raw: unknown): string {
-  if (raw === "classical_mds_cosine") {
-    return (
-      "Координаты на плоскости получены классическим MDS (PCoA) из попарных косинусных расстояний эмбеддингов: " +
-      "близкие в модели точки стремятся оказаться ближе на карте (по аналогии с визуализацией word2vec, где часто берут t-SNE/UMAP; " +
-      "здесь — явное сохранение метрики расстояния, а не раскладка по кругу). Точная схожесть — по полю «Схожесть», не по пикселям."
-    );
-  }
-  if (raw === "pca_mean_centered_query_origin") {
-    return "MDS оказался вырожденным (мало разброса векторов); использован запасной PCA-проектор с центром на запросе.";
-  }
-  return "";
-}
-
-function describeFeatureSpaceProjectionRuShort(raw: unknown): string {
-  if (raw === "classical_mds_cosine") {
-    return "Карта: MDS по косинусным расстояниям эмбеддингов (подробнее — в открывшемся окне).";
-  }
-  if (raw === "pca_mean_centered_query_origin") {
-    return "Карта: запасной PCA (MDS вырожден); подробнее — в окне.";
-  }
-  return "";
 }
 
 function hasAnyMeaningfulExtractedFeature(value: unknown): boolean {
@@ -339,6 +430,23 @@ type FeatureSpaceHover = {
   y: number;
 };
 
+function featureSpacePointLabel(
+  p: FeatureSpacePoint,
+  i: number,
+  refOrdinalByIndex: (number | null)[],
+  knnRing: number,
+): string {
+  const isQuery = p.kind === "query";
+  const classKey = String(p.class_id ?? "").trim();
+  const refOrd = refOrdinalByIndex[i] ?? null;
+  const isKnnActive = refOrd != null && refOrd <= knnRing;
+  if (isQuery) return "Текущая декларация";
+  if (!isKnnActive) return "";
+  const knnRank = isKnnActive ? refOrd : undefined;
+  if (knnRank != null && classKey) return `${knnRank}. ${classKey}`;
+  return classKey || (knnRank != null ? `#${knnRank}` : "");
+}
+
 /** Подпись класса из справочника (catalog_classification_classes) для KPI. */
 function catalogTitleForClassId(catalogClasses: unknown, classId: string | null | undefined): string | null {
   if (classId == null || String(classId).trim() === "") return null;
@@ -368,6 +476,10 @@ export default function OfficerValidationPage() {
   const declarationSessionRef = useRef<string | null>(null);
   const [featuresEditMode, setFeaturesEditMode] = useState(false);
   const [editedFeatures, setEditedFeatures] = useState<Record<string, unknown> | null>(null);
+  const [pendingFeatureCorrection, setPendingFeatureCorrection] = useState<{
+    parsedBefore: Record<string, unknown>;
+    parsedAfter: Record<string, unknown>;
+  } | null>(null);
   const [correctionLogError, setCorrectionLogError] = useState<string | null>(null);
   const [correctionLogOk, setCorrectionLogOk] = useState(false);
   const [serverPhase, setServerPhase] = useState<{ title: string; detail: string } | null>(null);
@@ -531,29 +643,11 @@ export default function OfficerValidationPage() {
         logParsedBeforeOverride != null &&
         !deepEqualJson(logParsedBeforeOverride, extracted_features_override)
       ) {
-        const officer = officerPayloadFromResult(response);
-        const declId = typeof officer?.declaration_id === "string" ? officer.declaration_id.trim() : "";
-        const ruleRaw = officer?.catalog && typeof officer.catalog === "object" ? (officer.catalog as Record<string, unknown>).rule_id : null;
-        const ruleId = ruleRaw != null && String(ruleRaw).trim() ? String(ruleRaw).trim() : undefined;
-        if (declId) {
-          try {
-            await createExpertDecision({
-              category: "inspector_feature_correction",
-              declaration_id: declId,
-              rule_id: ruleId,
-              summary_ru: `Инспектор скорректировал извлечённые признаки (декларация ${declId})`,
-              payload: {
-                source: "officer_validation",
-                parsed_before_override: logParsedBeforeOverride,
-                parsed_after_override: extracted_features_override,
-                recorded_at: new Date().toISOString(),
-              },
-            });
-            setCorrectionLogOk(true);
-          } catch (e: any) {
-            setCorrectionLogError(e?.message ?? String(e));
-          }
-        }
+        setPendingFeatureCorrection({
+          parsedBefore: deepClone(logParsedBeforeOverride),
+          parsedAfter: deepClone(extracted_features_override),
+        });
+        setCorrectionLogOk(true);
       }
     } catch (e: any) {
       if (isAbortError(e)) {
@@ -577,6 +671,7 @@ export default function OfficerValidationPage() {
     setRejectReasonCustom("");
     declarationSessionRef.current = null;
     setCorrectionLogOk(false);
+    setPendingFeatureCorrection(null);
     setCorrectionLogError(null);
     setLastServerElapsedMs(null);
     setOfficerFinalDecision(null);
@@ -670,33 +765,28 @@ export default function OfficerValidationPage() {
       }))
       .filter((p) => Number.isFinite(p.x) && Number.isFinite(p.y));
   }, [semanticPayload]);
-  const featureSpaceProjectionRu = useMemo(
-    () => describeFeatureSpaceProjectionRu(semanticPayload?.feature_space_projection),
-    [semanticPayload?.feature_space_projection],
-  );
-  const featureSpaceProjectionRuShort = useMemo(
-    () => describeFeatureSpaceProjectionRuShort(semanticPayload?.feature_space_projection),
-    [semanticPayload?.feature_space_projection],
-  );
-  const knnActivePointKeys = useMemo(() => {
-    const neighbors = semanticPayload?.knn_neighbors;
-    if (!Array.isArray(neighbors)) return new Set<string>();
-    const keys = new Set<string>();
-    for (const n of neighbors) {
-      if (!n || typeof n !== "object") continue;
-      const row = n as Record<string, unknown>;
-      const wRaw = row.weight;
-      const w = typeof wRaw === "number" ? wRaw : Number(wRaw ?? NaN);
-      if (!Number.isFinite(w) || w <= 0) continue;
-      const classId = String(row.class_id ?? "").trim();
-      const text = String(row.description_text ?? "").trim();
-      const simRaw = row.similarity;
-      const sim = typeof simRaw === "number" ? simRaw : Number(simRaw ?? NaN);
-      const simKey = Number.isFinite(sim) ? sim.toFixed(6) : "nan";
-      keys.add(`${classId}|${text}|${simKey}`);
+  /** Порядок эталонов в `feature_space_points` совпадает с рангом по схожести (бэкенд: query, затем top-N по убыванию sim). Кольца kNN — по этому порядку, без сопоставления по тексту/округлению similarity и без отсечения weight=0. */
+  const featureSpaceRefOrdinalByIndex = useMemo(() => {
+    const ordinals: (number | null)[] = [];
+    let ord = 0;
+    for (const p of featureSpacePoints) {
+      if (p.kind === "reference") {
+        ord += 1;
+        ordinals.push(ord);
+      } else {
+        ordinals.push(null);
+      }
     }
-    return keys;
-  }, [semanticPayload]);
+    return ordinals;
+  }, [featureSpacePoints]);
+  const featureSpaceKnnRingCount = useMemo(() => {
+    const knnKRaw = semanticPayload?.knn_k;
+    const kFromPayload =
+      typeof knnKRaw === "number" && Number.isFinite(knnKRaw) && knnKRaw >= 1 ? Math.floor(knnKRaw) : null;
+    const k = kFromPayload ?? Math.max(1, Math.floor(semanticK));
+    const refN = featureSpacePoints.reduce((n, p) => n + (p.kind === "reference" ? 1 : 0), 0);
+    return Math.min(Math.max(1, k), refN);
+  }, [semanticPayload?.knn_k, semanticK, featureSpacePoints]);
   const featureSpaceExtent = useMemo(() => {
     if (featureSpacePoints.length === 0) return { minX: -1, maxX: 1, minY: -1, maxY: 1 };
     const xs = featureSpacePoints.map((p) => p.x);
@@ -717,10 +807,13 @@ export default function OfficerValidationPage() {
       const W = 860;
       const H = 480;
       const pad = 42;
-      const nx = (p.x - featureSpaceExtent.minX) / (featureSpaceExtent.maxX - featureSpaceExtent.minX);
-      const ny = (p.y - featureSpaceExtent.minY) / (featureSpaceExtent.maxY - featureSpaceExtent.minY);
-      const x0 = pad + nx * (W - 2 * pad);
-      const y0 = H - pad - ny * (H - 2 * pad);
+      const innerW = W - 2 * pad;
+      const innerH = H - 2 * pad;
+      const rangeX = Math.max(featureSpaceExtent.maxX - featureSpaceExtent.minX, 1e-9);
+      const rangeY = Math.max(featureSpaceExtent.maxY - featureSpaceExtent.minY, 1e-9);
+      const k = Math.min(innerW / rangeX, innerH / rangeY);
+      const x0 = pad + (innerW - rangeX * k) / 2 + (p.x - featureSpaceExtent.minX) * k;
+      const y0 = pad + innerH - (p.y - featureSpaceExtent.minY) * k - (innerH - rangeY * k) / 2;
       return {
         x: W / 2 + (x0 - W / 2) * featureSpaceZoom + featureSpacePan.x,
         y: H / 2 + (y0 - H / 2) * featureSpaceZoom + featureSpacePan.y,
@@ -728,6 +821,62 @@ export default function OfficerValidationPage() {
     },
     [featureSpaceExtent, featureSpaceZoom, featureSpacePan.x, featureSpacePan.y],
   );
+  const featureSpaceLabelLayout = useMemo(() => {
+    const fontSize = FEATURE_SPACE_LABEL_FONT_SIZE;
+    const knnRing = featureSpaceKnnRingCount;
+    const circles = featureSpacePoints.map((p) => {
+      const q = projectFeatureSpacePoint(p);
+      const r = p.kind === "query" ? 9 : 7;
+      return { cx: q.x, cy: q.y, r };
+    });
+    type Item = { i: number; cx: number; cy: number; label: string; isQuery: boolean; gapBase: number };
+    const items: Item[] = [];
+    featureSpacePoints.forEach((p, i) => {
+      const label = featureSpacePointLabel(p, i, featureSpaceRefOrdinalByIndex, knnRing);
+      if (!label.trim()) return;
+      const pt = projectFeatureSpacePoint(p);
+      items.push({
+        i,
+        cx: pt.x,
+        cy: pt.y,
+        label,
+        isQuery: p.kind === "query",
+        gapBase: p.kind === "query" ? 15 : 12,
+      });
+    });
+    items.sort((a, b) => {
+      if (a.isQuery !== b.isQuery) return a.isQuery ? -1 : 1;
+      const ra = featureSpaceRefOrdinalByIndex[a.i] ?? 9999;
+      const rb = featureSpaceRefOrdinalByIndex[b.i] ?? 9999;
+      return ra - rb;
+    });
+    const placed: FeatureSpaceLabelRect[] = [];
+    const layout = new Map<number, { x: number; y: number; anchor: "start" | "middle" | "end" }>();
+    for (const it of items) {
+      const { w, h } = estimateFeatureSpaceLabelMetrics(it.label, fontSize);
+      const cands = buildFeatureSpaceLabelCandidates(it.cx, it.cy, w, h, it.gapBase);
+      let best: FeatureSpaceLabelCandidate | null = null;
+      let bestScore = Infinity;
+      for (const cand of cands) {
+        let score = outOfViewPenalty(cand.rect) + rectOverlapPenalty(cand.rect, placed);
+        for (const circ of circles) {
+          score += rectCirclePenalty(cand.rect, circ.cx, circ.cy, circ.r);
+        }
+        const dx = cand.x - (it.cx + 10);
+        const dy = cand.y - (it.cy - 10);
+        score += (dx * dx + dy * dy) * 0.0008;
+        if (score < bestScore) {
+          bestScore = score;
+          best = cand;
+        }
+      }
+      if (best) {
+        layout.set(it.i, { x: best.x, y: best.y, anchor: best.anchor });
+        placed.push(best.rect);
+      }
+    }
+    return layout;
+  }, [featureSpacePoints, projectFeatureSpacePoint, featureSpaceRefOrdinalByIndex, featureSpaceKnnRingCount]);
   const featureSpaceClassColorMap = useMemo(() => {
     const palette = ["#f59e0b", "#10b981", "#8b5cf6", "#ef4444", "#06b6d4", "#84cc16", "#ec4899", "#f97316"];
     const ids = Array.from(
@@ -956,8 +1105,12 @@ export default function OfficerValidationPage() {
           officer_input: {
             graph31: form.graph31.trim(),
             graph33: form.graph33.trim(),
+            graph35: Number(form.graph35),
+            graph38: Number(form.graph38),
             graph42: Number(form.graph42),
           },
+          gross_weight_kg: Number(form.graph35),
+          net_weight_kg: Number(form.graph38),
           llm_result: {
             prompt_includes: {
               tnved_code: form.graph33.trim(),
@@ -984,30 +1137,89 @@ export default function OfficerValidationPage() {
         },
       });
       await patchExpertDecision(created.id, {
-        status: decision === "approved" ? "resolved" : decision === "rejected" ? "dismissed" : "pending",
+        status:
+          decision === "approved" ? "resolved" : decision === "rejected" ? "dismissed" : "dismissed",
         resolution:
           decision === "approved"
             ? { chosen_class_id: effectiveDecisionClass || null, source: "officer_final_decision" }
-            : { source: "officer_final_decision", ...(decision === "rejected" && rejectReason?.trim() ? { note: rejectReason.trim() } : {}) },
+            : decision === "rejected"
+              ? { source: "officer_final_decision", ...(rejectReason?.trim() ? { note: rejectReason.trim() } : {}) }
+              : {
+                  source: "officer_final_decision",
+                  note: "Инспектор направил декларацию в экспертизу; рабочая задача эксперта — в очереди проверки классификации.",
+                },
       });
-      if (autoClassificationFailed || manualClassAssignedByOfficer) {
-        const reviewReasonRu = autoClassificationFailed
-          ? autoClassificationFailureReason || "Автоклассификация не сработала."
-          : "Класс для декларации задан инспектором вручную и требует проверки экспертом.";
+      if (pendingFeatureCorrection) {
+        try {
+          await createExpertDecision({
+            category: "inspector_feature_correction",
+            declaration_id: declId,
+            rule_id: ruleId,
+            summary_ru: `Правка извлечённых признаков инспектором — на проверку эксперта (${declId})`,
+            payload: {
+              source: "officer_validation",
+              correction_requires_expert_review: true,
+              parsed_before_override: pendingFeatureCorrection.parsedBefore,
+              parsed_after_override: pendingFeatureCorrection.parsedAfter,
+              recorded_at: new Date().toISOString(),
+              linked_officer_final_decision_id: created.id,
+              officer_input: {
+                graph31: form.graph31.trim(),
+                graph33: form.graph33.trim(),
+                graph35: Number(form.graph35),
+                graph38: Number(form.graph38),
+                graph42: Number(form.graph42),
+              },
+              llm_result: {
+                prompt_includes: {
+                  tnved_code: form.graph33.trim(),
+                  declared_price: Number(form.graph42),
+                  description_excerpt: form.graph31.trim().slice(0, 1200),
+                },
+              },
+              gross_weight_kg: Number(form.graph35),
+              net_weight_kg: Number(form.graph38),
+            },
+          });
+          setPendingFeatureCorrection(null);
+          setCorrectionLogOk(false);
+        } catch (e: any) {
+          setCorrectionLogError(
+            `Решение инспектора сохранено, но отправить правки признаков эксперту не удалось: ${e?.message ?? String(e)}`,
+          );
+        }
+      }
+      const needsExpertClassificationTask =
+        decision === "expert_review" || autoClassificationFailed || manualClassAssignedByOfficer;
+      if (needsExpertClassificationTask) {
+        const reviewReasonRu =
+          decision === "expert_review" && !autoClassificationFailed && !manualClassAssignedByOfficer
+            ? "Инспектор направил декларацию на экспертную проверку."
+            : autoClassificationFailed
+              ? autoClassificationFailureReason || "Автоклассификация не сработала."
+              : "Класс для декларации задан инспектором вручную и требует проверки экспертом.";
+        const summaryRu =
+          decision === "expert_review" && !autoClassificationFailed && !manualClassAssignedByOfficer
+            ? `Экспертная проверка по запросу инспектора (${declId})`
+            : autoClassificationFailed
+              ? `Требуется экспертная валидация автоклассификации (${declId})`
+              : `Требуется экспертная проверка ручного выбора класса (${declId})`;
         await createExpertDecision({
           category: "auto_classification_review",
           declaration_id: declId,
           rule_id: ruleId,
-          summary_ru: autoClassificationFailed
-            ? `Требуется экспертная валидация автоклассификации (${declId})`
-            : `Требуется экспертная проверка ручного выбора класса (${declId})`,
+          summary_ru: summaryRu,
           payload: {
             source: "officer_validation",
             officer_input: {
               graph31: form.graph31.trim(),
               graph33: form.graph33.trim(),
+              graph35: Number(form.graph35),
+              graph38: Number(form.graph38),
               graph42: Number(form.graph42),
             },
+            gross_weight_kg: Number(form.graph35),
+            net_weight_kg: Number(form.graph38),
             llm_result: {
               prompt_includes: {
                 tnved_code: form.graph33.trim(),
@@ -1402,22 +1614,9 @@ export default function OfficerValidationPage() {
                   role="status"
                   style={{ marginBottom: "0.75rem", fontSize: "0.84rem", lineHeight: 1.45 }}
                 >
-                  <div style={{ fontWeight: 650, marginBottom: 6, color: "#0f172a" }}>Отладка: модель не дала пригодных признаков</div>
-                  {extractionDebugLines.length > 0 ? (
-                    <ul style={{ margin: 0, paddingLeft: "1.15rem" }}>
-                      {extractionDebugLines.map((line, i) => (
-                        <li key={i} style={{ marginBottom: 4 }}>
-                          {line}
-                        </li>
-                      ))}
-                    </ul>
-                  ) : (
-                    <p style={{ margin: 0 }}>См. сырой ответ модели по каждой попытке и промпт в JSON ниже (шестерёнка).</p>
-                  )}
-                  <p style={{ margin: "0.5rem 0 0", fontSize: "0.8rem", color: "#475569" }}>
-                    В блоке «Служебные данные» — поля <code className="fe-font-mono">llm_request.attempt_results</code> (фрагмент{" "}
-                    <code className="fe-font-mono">raw_response_excerpt</code> до 8000 символов на попытку), параметры генерации и{" "}
-                    <code className="fe-font-mono">runtime_generation</code>.
+                  <p style={{ margin: 0, color: "#0f172a" }}>
+                    {(extractionDebugLines[0] as string | undefined)?.trim() ||
+                      "Отладка: модель не дала пригодных признаков"}
                   </p>
                 </div>
               ) : null}
@@ -1498,8 +1697,8 @@ export default function OfficerValidationPage() {
                     <p style={{ margin: "0.65rem 0 0", fontSize: "0.8125rem", color: "#b91c1c" }}>{correctionLogError}</p>
                   ) : null}
                   {correctionLogOk ? (
-                    <p style={{ margin: "0.65rem 0 0", fontSize: "0.8125rem", color: "#166534" }}>
-                      Корректировка записана для эксперта.
+                    <p style={{ margin: "0.65rem 0 0", fontSize: "0.8125rem", color: "#166534", lineHeight: 1.45 }}>
+                      Правка сохранена. Она попадёт в очередь эксперта после того, как вы примете итоговое решение по декларации.
                     </p>
                   ) : null}
                 </>
@@ -1559,19 +1758,40 @@ export default function OfficerValidationPage() {
                 <h3 style={{ margin: "0 0 0.5rem", fontSize: "0.95rem", fontWeight: 650, color: "#78350f" }}>
                   Семантический поиск
                 </h3>
-                <p style={{ margin: "0 0 0.3rem", fontSize: "0.9rem", color: "#78350f", lineHeight: 1.3 }}>
-                  Класс: <strong>{semanticCandidateClassId || "не определён"}</strong>
-                </p>
-                <p style={{ margin: "0 0 0.35rem", fontSize: "0.84rem", color: "#92400e", lineHeight: 1.3 }}>
-                  Схожесть:{" "}
-                  <strong>
-                    {typeof semanticPayload.similarity === "number"
-                      ? semanticPayload.similarity.toFixed(4)
-                      : String(semanticPayload.similarity ?? "—")}
-                  </strong>
-                  {" · k="}
-                  <strong>{typeof semanticPayload.knn_k === "number" ? semanticPayload.knn_k : semanticK}</strong>
-                </p>
+                <div
+                  style={{
+                    display: "flex",
+                    flexWrap: "wrap",
+                    alignItems: "baseline",
+                    justifyContent: "space-between",
+                    gap: "6px 16px",
+                    margin: "0 0 0.35rem",
+                    fontSize: "0.9rem",
+                    color: "#78350f",
+                    lineHeight: 1.35,
+                  }}
+                >
+                  <span style={{ flex: "1 1 12rem", minWidth: 0 }}>
+                    Класс: <strong>{semanticCandidateClassId || "не определён"}</strong>
+                  </span>
+                  <span
+                    style={{
+                      flex: "0 0 auto",
+                      fontSize: "0.84rem",
+                      color: "#92400e",
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    Схожесть:{" "}
+                    <strong>
+                      {typeof semanticPayload.similarity === "number"
+                        ? semanticPayload.similarity.toFixed(4)
+                        : String(semanticPayload.similarity ?? "—")}
+                    </strong>
+                    {" · k="}
+                    <strong>{typeof semanticPayload.knn_k === "number" ? semanticPayload.knn_k : semanticK}</strong>
+                  </span>
+                </div>
                 <p style={{ margin: 0, fontSize: "0.84rem", color: "#451a03", lineHeight: 1.3 }}>
                   {semanticNarrative} {semanticInspectorActionHint}
                 </p>
@@ -1589,11 +1809,6 @@ export default function OfficerValidationPage() {
                     >
                       Навигация в пространстве признаков
                     </button>
-                    {featureSpaceProjectionRuShort ? (
-                      <p style={{ margin: "6px 0 0", fontSize: "0.78rem", color: "#78716c", lineHeight: 1.35 }}>
-                        {featureSpaceProjectionRuShort}
-                      </p>
-                    ) : null}
                   </div>
                 ) : null}
                 {/* Убрали техподробности (service_mode/model/note_ru) как нерелевантные для инспектора. */}
@@ -2021,12 +2236,6 @@ export default function OfficerValidationPage() {
               <h3 style={{ margin: 0, fontSize: 17, color: "#0f172a" }}>Пространство признаков (kNN)</h3>
               <ModalCloseButton onClick={() => setFeatureSpaceOpen(false)} />
             </div>
-            <p style={{ margin: "0 0 10px", fontSize: 13, color: "#475569" }}>
-              Синий маркер — текущий запрос инспектора. Цвета эталонных точек соответствуют присвоенным классам.
-            </p>
-            {featureSpaceProjectionRu ? (
-              <p style={{ margin: "0 0 10px", fontSize: 12, color: "#64748b", lineHeight: 1.4 }}>{featureSpaceProjectionRu}</p>
-            ) : null}
             <div style={{ display: "flex", flexWrap: "wrap", gap: 10, alignItems: "center", marginBottom: 10 }}>
               <span style={{ fontSize: 13, fontWeight: 600, color: "#334155" }}>Масштаб</span>
               <button type="button" className="btn-secondary" onClick={() => setFeatureSpaceZoom((z) => Math.max(0.6, z / 1.2))}>
@@ -2071,8 +2280,10 @@ export default function OfficerValidationPage() {
                 Применить k
               </button>
               <span style={{ fontSize: 12, color: "#64748b" }}>Точек: {featureSpacePoints.length}</span>
-         
             </div>
+            <p style={{ margin: "0 0 10px", fontSize: 12, lineHeight: 1.45, color: "#64748b" }}>
+              Плоскость 2D — проекция эмбеддингов. Расстояние от точки до текущей декларации на карте соответствует косинусной дистанции; подписи и ранги соседей задаются данными сервера.
+            </p>
             <div style={{ display: "flex", gap: 12, alignItems: "stretch" }}>
             <div style={{ flex: "1 1 auto", border: "1px solid #e2e8f0", borderRadius: 10, overflow: "hidden", background: "#f8fafc" }}>
               <svg
@@ -2115,10 +2326,10 @@ export default function OfficerValidationPage() {
                   const classKey = String(p.class_id ?? "").trim();
                   const fill = isQuery ? "#2563eb" : featureSpaceClassColorMap.get(classKey) ?? "#f59e0b";
                   const stroke = isQuery ? "#1d4ed8" : "#78350f";
-                  const simKey = Number.isFinite(Number(p.similarity)) ? Number(p.similarity).toFixed(6) : "nan";
-                  const pointKey = `${classKey}|${String(p.text ?? "").trim()}|${simKey}`;
-                  const isKnnActive = !isQuery && knnActivePointKeys.has(pointKey);
-                  const pointLabel = isQuery ? "Текущая декларация" : isKnnActive ? classKey : "";
+                  const refOrd = featureSpaceRefOrdinalByIndex[i] ?? null;
+                  const isKnnActive = refOrd != null && refOrd <= featureSpaceKnnRingCount;
+                  const pointLabel = featureSpacePointLabel(p, i, featureSpaceRefOrdinalByIndex, featureSpaceKnnRingCount);
+                  const labelPos = featureSpaceLabelLayout.get(i);
                   return (
                     <g key={`${p.kind}-${i}`}>
                       <circle
@@ -2129,11 +2340,14 @@ export default function OfficerValidationPage() {
                         stroke={stroke}
                         strokeWidth={1}
                         opacity={isQuery ? 0.95 : 0.78}
+                        aria-label={
+                          isQuery
+                            ? `Текущая декларация. ${(p.text || "").slice(0, 240)}${(p.text || "").length > 240 ? "…" : ""}`
+                            : `Эталон ${classKey || "—"}. ${(p.text || "").slice(0, 240)}${(p.text || "").length > 240 ? "…" : ""}`
+                        }
                         onMouseEnter={() => setFeatureSpaceHovered({ point: p, x: pt.x, y: pt.y })}
                         onMouseLeave={() => setFeatureSpaceHovered((prev) => (prev?.point === p ? null : prev))}
-                      >
-                        <title>{p.text}</title>
-                      </circle>
+                      />
                       {isKnnActive ? (
                         <circle
                           cx={pt.x}
@@ -2148,17 +2362,19 @@ export default function OfficerValidationPage() {
                       ) : null}
                       {pointLabel ? (
                         <text
-                          x={pt.x + (isQuery ? 8 : 6)}
-                          y={pt.y - (isQuery ? 8 : 6)}
-                          fontSize={11}
+                          x={labelPos?.x ?? pt.x + (isQuery ? 8 : 6)}
+                          y={labelPos?.y ?? pt.y - (isQuery ? 8 : 6)}
+                          fontSize={FEATURE_SPACE_LABEL_FONT_SIZE}
                           fontWeight={isQuery ? 700 : 500}
                           fill={isQuery ? "#1d4ed8" : "#334155"}
                           stroke="#f8fafc"
-                          strokeWidth={2}
+                          strokeWidth={2.5}
                           paintOrder="stroke"
                           pointerEvents="none"
+                          textAnchor={labelPos?.anchor ?? "start"}
+                          dominantBaseline="middle"
                         >
-                          {truncateMiddle(pointLabel, 26)}
+                          {pointLabel}
                         </text>
                       ) : null}
                     </g>
@@ -2166,8 +2382,14 @@ export default function OfficerValidationPage() {
                 })}
                 {featureSpaceHovered ? (
                   <foreignObject
-                    x={Math.max(46, Math.min(520, featureSpaceHovered.x + 10))}
-                    y={Math.max(46, Math.min(360, featureSpaceHovered.y - 14))}
+                    x={Math.max(
+                      36,
+                      Math.min(860 - 300 - 16, featureSpaceHovered.x + 26),
+                    )}
+                    y={Math.max(
+                      36,
+                      Math.min(480 - 180 - 16, featureSpaceHovered.y + 22),
+                    )}
                     width={300}
                     height={180}
                   >

@@ -10,6 +10,7 @@ COPY backend/requirements.docker.txt /tmp/requirements.docker.txt
 RUN pip install --no-cache-dir -r /tmp/requirements.docker.txt
 
 COPY backend/app /app/app
+COPY shared/extraction_prompt.py /app/shared/extraction_prompt.py
 COPY config/llm_models.json /app/config/llm_models.json
 
 ENV FEATURE_EXTRACTION_MODEL_DEFAULTS_PATH=/app/config/llm_models.json

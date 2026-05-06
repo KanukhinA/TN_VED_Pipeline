@@ -1,0 +1,15 @@
+@startuml classes_backend_pipeline
+set namespaceSeparator none
+class "app.pipeline.validator.CompiledRuleCache" as app.pipeline.validator.CompiledRuleCache {
+  _cache : Dict[CompiledRuleCacheKey, Any]
+  __init__() -> None
+  get_or_compile(rv: RuleVersion) -> Any
+}
+class "app.pipeline.validator.CompiledRuleCacheKey" as app.pipeline.validator.CompiledRuleCacheKey {
+  rule_id : UUID
+  rule_version_id : UUID
+  version : int
+  __init__(self, rule_id: uuid.UUID, rule_version_id: uuid.UUID, version: int) -> None
+}
+app.pipeline.validator.CompiledRuleCache --> app.pipeline.validator.CompiledRuleCacheKey : _cache
+@enduml

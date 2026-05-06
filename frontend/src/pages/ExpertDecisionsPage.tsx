@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, type Dispatch, type SetStateAction } from "react";
 import {
   getRule,
   listExpertDecisions,
@@ -7,15 +7,32 @@ import {
 } from "../api/client";
 import { TN_VED_SECTION_DEFS } from "../catalog/tnVedSectionTree";
 
+/**
+ * Соответствие category → источник в системе (для сопровождения и UI):
+ * - class_name_confirmation: предложение модели / каталог (POST API, реже — внешний клиент).
+ * - auto_classification_review, classification_unresolved: проверка декларации (OfficerValidationPage).
+ * - officer_final_decision, inspector_feature_correction: проверка декларации (OfficerValidationPage).
+ * - classification_ambiguous, classification_none: правила справочника (в репозитории сейчас не создаются; возможны старые БД / ручной POST).
+ */
 const CATEGORY_LABEL: Record<string, string> = {
   classification_ambiguous: "Несколько подходящих классов",
   classification_none: "Ни одно правило классификации не подошло",
   class_name_confirmation: "Нужно подтвердить название класса",
-  inspector_feature_correction: "Правка извлечения признаков (инспектор)",
+  inspector_feature_correction: "Согласование правок извлечённых признаков",
   auto_classification_review: "Проверка сбоя авто-классификации",
   officer_final_decision: "Решение инспектора",
-  other: "Другое",
+  classification_unresolved: "Классификация не разрешена",
 };
+
+const STANDARD_EXPERT_CATEGORIES = new Set<string>([
+  "class_name_confirmation",
+  "auto_classification_review",
+  "classification_unresolved",
+  "classification_ambiguous",
+  "classification_none",
+  "officer_final_decision",
+  "inspector_feature_correction",
+]);
 
 const STATUS_LABEL: Record<string, string> = {
   pending: "В экспертизе",
@@ -23,45 +40,67 @@ const STATUS_LABEL: Record<string, string> = {
   dismissed: "Не корректна",
 };
 
+/** Фильтр списка: совпадает с query listExpertDecisions (category / issue_type) и группировкой карточек. */
 type UiIssueType =
   | "all"
-  | "class_confirmation"
+  | "model_class"
+  | "post_customs_control"
   | "classification"
   | "inspector_correction"
-  | "officer_decision"
-  | "other";
+  | "officer_decision";
 
 const UI_ISSUE_TYPE_LABEL: Record<UiIssueType, string> = {
-  all: "Все типы проблем",
-  class_confirmation: "Подтверждение класса",
-  classification: "Проблемы классификации",
-  inspector_correction: "Корректировка инспектора",
-  officer_decision: "Решения инспектора",
-  other: "Прочее",
+  all: "Все",
+  model_class: "Класс: модель",
+  post_customs_control: "После контроля",
+  classification: "По справочнику",
+  inspector_correction: "Правки признаков",
+  officer_decision: "Итог инспектора",
 };
 
 function labelCategory(cat: string): string {
-  return CATEGORY_LABEL[cat] ?? CATEGORY_LABEL.other;
+  return CATEGORY_LABEL[cat] ?? cat;
 }
 
 function labelStatus(status: string): string {
   return STATUS_LABEL[status] ?? status;
 }
 
-function issueTypeFromCategory(category: string): UiIssueType {
-  if (["class_name_confirmation", "auto_classification_review", "classification_unresolved"].includes(category)) {
-    return "class_confirmation";
-  }
-  if (["classification_ambiguous", "classification_none"].includes(category)) {
-    return "classification";
-  }
-  if (category === "inspector_feature_correction") {
-    return "inspector_correction";
-  }
-  if (category === "officer_final_decision") {
-    return "officer_decision";
-  }
-  return "other";
+const NAMING_DECISION_CATEGORIES = ["class_name_confirmation", "auto_classification_review", "classification_unresolved"] as const;
+
+const NAMING_MODEL_CATEGORIES = ["class_name_confirmation"] as const;
+const NAMING_POST_CONTROL_CATEGORIES = ["auto_classification_review", "classification_unresolved"] as const;
+
+const WORK_QUEUE_RULE_CATEGORIES = ["classification_ambiguous", "classification_none"] as const;
+
+function isNamingDecisionCategory(category: string): boolean {
+  return (NAMING_DECISION_CATEGORIES as readonly string[]).includes(category);
+}
+
+function isNamingModelCategory(category: string): boolean {
+  return (NAMING_MODEL_CATEGORIES as readonly string[]).includes(category);
+}
+
+function isNamingPostControlCategory(category: string): boolean {
+  return (NAMING_POST_CONTROL_CATEGORIES as readonly string[]).includes(category);
+}
+
+function isWorkQueueRuleCategory(category: string): boolean {
+  return (WORK_QUEUE_RULE_CATEGORIES as readonly string[]).includes(category);
+}
+
+function isStandardExpertCategory(category: string): boolean {
+  return STANDARD_EXPERT_CATEGORIES.has(category);
+}
+
+/** Для счётчика в селекторе «Тип проблемы»: какой фильтр соответствует категории записи. */
+function toolbarIssueTypeFromCategory(category: string): UiIssueType {
+  if (isNamingModelCategory(category)) return "model_class";
+  if (isNamingPostControlCategory(category)) return "post_customs_control";
+  if (isWorkQueueRuleCategory(category)) return "classification";
+  if (category === "inspector_feature_correction") return "inspector_correction";
+  if (category === "officer_final_decision") return "officer_decision";
+  return "all";
 }
 
 /** Краткие строки по вложенному объекту признаков (без сырого JSON в интерфейсе). */
@@ -144,6 +183,51 @@ function formatResolutionRu(res: Record<string, unknown> | null | undefined): st
   } catch {
     return "";
   }
+}
+
+type WorkSectionGroup = { sectionKey: string; sectionLabel: string; items: ExpertDecisionItem[] };
+
+type WorkQueueViewState =
+  | { kind: "lane"; lane: "rules" | "officer" | "features" }
+  | { kind: "orphan"; category: string };
+
+function workQueueTnvedCode(item: ExpertDecisionItem): string {
+  const res = item.resolution_json as Record<string, unknown> | undefined;
+  const override = String(res?.tnved_code_override ?? "").trim();
+  if (override) return override;
+  const payload = item.payload_json as Record<string, unknown> | undefined;
+  if (!payload) return "";
+  const llm = payload.llm_result as Record<string, unknown> | undefined;
+  const pi = llm?.prompt_includes as Record<string, unknown> | undefined;
+  const fromPrompt = String(pi?.tnved_code ?? "").trim();
+  if (fromPrompt) return fromPrompt;
+  const officer = payload.officer_input as Record<string, unknown> | undefined;
+  return String(officer?.graph33 ?? "").trim();
+}
+
+function workQueueDescriptionRu(item: ExpertDecisionItem): string {
+  const payload = item.payload_json as Record<string, unknown> | undefined;
+  if (!payload) return String(item.summary_ru ?? "").trim() || "—";
+  const llm = payload.llm_result as Record<string, unknown> | undefined;
+  const pi = llm?.prompt_includes as Record<string, unknown> | undefined;
+  const fromPrompt = String(pi?.description_excerpt ?? "").trim();
+  if (fromPrompt) return fromPrompt;
+  const officer = payload.officer_input as Record<string, unknown> | undefined;
+  const g31 = String(officer?.graph31 ?? "").trim();
+  if (g31) return g31;
+  const summary = String(payload.extracted_features_summary_ru ?? "").trim();
+  if (summary) return summary;
+  return String(item.summary_ru ?? "").trim() || "—";
+}
+
+function officerSuggestedClassId(item: ExpertDecisionItem): string {
+  const p = item.payload_json as Record<string, unknown> | undefined;
+  if (!p) return "";
+  const manual = String(p.manual_class_assigned_by_officer ?? "").trim();
+  if (manual) return manual;
+  const fin = String(p.final_decision_class ?? "").trim();
+  if (fin) return fin;
+  return String(p.auto_class_before_decision ?? "").trim();
 }
 
 type ClassOption = { id: string; label: string };
@@ -266,6 +350,28 @@ function sectionInfoFromDecision(item: ExpertDecisionItem): { tnvedCode: string;
   };
 }
 
+function itemMatchesTnvedSection(item: ExpertDecisionItem, selectedSection: string): boolean {
+  if (selectedSection === "all") return true;
+  return sectionInfoFromDecision(item).sectionKey === selectedSection;
+}
+
+function groupItemsIntoWorkSections(rows: ExpertDecisionItem[]): WorkSectionGroup[] {
+  const map = new Map<string, { label: string; items: ExpertDecisionItem[] }>();
+  for (const it of rows) {
+    const sec = sectionInfoFromDecision(it);
+    const prev = map.get(sec.sectionKey);
+    if (!prev) map.set(sec.sectionKey, { label: sec.sectionLabel, items: [it] });
+    else prev.items.push(it);
+  }
+  return [...map.entries()]
+    .map(([key, value]) => ({
+      sectionKey: key,
+      sectionLabel: value.label,
+      items: value.items.sort((a, b) => b.created_at.localeCompare(a.created_at)),
+    }))
+    .sort((a, b) => a.sectionLabel.localeCompare(b.sectionLabel, "ru"));
+}
+
 function dedupeNamingDecisionRows(rows: NamingDecisionRow[]): NamingDecisionRow[] {
   const byDeclaration = new Map<string, NamingDecisionRow>();
   for (const row of rows) {
@@ -331,6 +437,414 @@ function aggregateNamingRows(rows: NamingDecisionRow[]): AggregatedNamingRow[] {
   return [...byKey.values()].sort((a, b) => b.latestItem.created_at.localeCompare(a.latestItem.created_at));
 }
 
+function WorkQueueTable({
+  sections,
+  busyId,
+  catalogOptionsByRule,
+  workQueueClassByItemId,
+  setWorkQueueClassByItemId,
+  openWorkClassPickerKey,
+  setOpenWorkClassPickerKey,
+  onResolve,
+  onDismiss,
+}: {
+  sections: WorkSectionGroup[];
+  busyId: string | null;
+  catalogOptionsByRule: Record<string, ClassOption[]>;
+  workQueueClassByItemId: Record<string, string>;
+  setWorkQueueClassByItemId: Dispatch<SetStateAction<Record<string, string>>>;
+  openWorkClassPickerKey: string | null;
+  setOpenWorkClassPickerKey: Dispatch<SetStateAction<string | null>>;
+  onResolve: (id: string, resolution: Record<string, unknown>) => void | Promise<void>;
+  onDismiss: (id: string) => void | Promise<void>;
+}) {
+  if (sections.length === 0) {
+    return <div style={{ color: "#64748b", fontSize: 14 }}>Нет записей для выбранных фильтров.</div>;
+  }
+  return (
+    <div style={{ display: "grid", gap: 22 }}>
+      {sections.map((section) => (
+        <section key={section.sectionKey}>
+          <h3 style={{ fontSize: 15, fontWeight: 700, color: "#0f172a", margin: "0 0 10px" }}>
+            {section.sectionLabel} ({section.items.length})
+          </h3>
+          <div style={{ border: "1px solid #e2e8f0", borderRadius: 10, overflow: "hidden" }}>
+            <div style={{ overflowX: "auto" }}>
+              <table style={{ width: "100%", minWidth: 1080, borderCollapse: "collapse", fontSize: 13, tableLayout: "fixed" }}>
+                <thead style={{ background: "#f8fafc" }}>
+                  <tr>
+                    <th style={{ width: 125, textAlign: "left", padding: "8px 10px", borderBottom: "1px solid #e2e8f0" }}>Дата</th>
+                    <th style={{ width: 120, textAlign: "left", padding: "8px 10px", borderBottom: "1px solid #e2e8f0" }}>Декларация</th>
+                    <th style={{ width: 115, textAlign: "left", padding: "8px 10px", borderBottom: "1px solid #e2e8f0" }}>ТН ВЭД</th>
+                    <th style={{ width: "22%", textAlign: "left", padding: "8px 10px", borderBottom: "1px solid #e2e8f0" }}>Описание</th>
+                    <th style={{ width: 155, textAlign: "left", padding: "8px 10px", borderBottom: "1px solid #e2e8f0" }}>Тип</th>
+                    <th style={{ width: "26%", textAlign: "left", padding: "8px 10px", borderBottom: "1px solid #e2e8f0" }}>Действия эксперта</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {section.items.map((it) => {
+                    const tn = workQueueTnvedCode(it) || "—";
+                    const desc = workQueueDescriptionRu(it);
+                    const typeLabel = labelCategory(it.category);
+                    const rid = String(it.rule_id ?? "").trim();
+                    const options = rid ? catalogOptionsByRule[rid] ?? [] : [];
+                    const isClassification =
+                      it.category === "classification_ambiguous" || it.category === "classification_none";
+                    const isInspector = it.category === "inspector_feature_correction";
+                    const isOfficer = it.category === "officer_final_decision";
+                    const suggestedOfficer = officerSuggestedClassId(it);
+                    const classDraft =
+                      workQueueClassByItemId[it.id] ??
+                      (isClassification ? "" : suggestedOfficer);
+                    const pending = it.status === "pending";
+
+                    return (
+                      <tr key={it.id} style={{ background: pending ? "#fff" : "#f8fafc", verticalAlign: "top" }}>
+                        <td style={{ padding: "8px 10px", borderBottom: "1px solid #f1f5f9", fontSize: 12, color: "#64748b", whiteSpace: "nowrap" }}>
+                          {it.created_at?.slice(0, 19) ?? "—"}
+                        </td>
+                        <td style={{ padding: "8px 10px", borderBottom: "1px solid #f1f5f9", fontFamily: "ui-monospace, monospace", fontSize: 12 }}>
+                          {it.declaration_id}
+                        </td>
+                        <td style={{ padding: "8px 10px", borderBottom: "1px solid #f1f5f9", fontSize: 12 }}>{tn}</td>
+                        <td style={{ padding: "8px 10px", borderBottom: "1px solid #f1f5f9", lineHeight: 1.4, wordBreak: "break-word" }}>
+                          <div style={{ color: "#0f172a" }}>{desc}</div>
+                          {it.rule_id ? (
+                            <div style={{ fontSize: 11, color: "#94a3b8", marginTop: 4 }}>Справочник: {it.rule_id}</div>
+                          ) : null}
+                        </td>
+                        <td style={{ padding: "8px 10px", borderBottom: "1px solid #f1f5f9", fontWeight: 600, color: "#334155" }}>{typeLabel}</td>
+                        <td style={{ padding: "8px 10px", borderBottom: "1px solid #f1f5f9" }}>
+                          {!pending ? (
+                            <div style={{ fontSize: 13, color: "#64748b" }}>
+                              <span style={{ fontWeight: 600 }}>{labelStatus(it.status)}</span>
+                              {it.resolution_json && Object.keys(it.resolution_json).length > 0 ? (
+                                <div style={{ marginTop: 6 }}>Итог: {formatResolutionRu(it.resolution_json)}</div>
+                              ) : null}
+                            </div>
+                          ) : isInspector ? (
+                            <div style={{ display: "grid", gap: 8 }}>
+                              <details style={{ fontSize: 12, color: "#475569" }}>
+                                <summary style={{ cursor: "pointer" }}>Сравнение признаков</summary>
+                                <div style={{ marginTop: 8 }}>
+                                  <InspectorCorrectionView payload={it.payload_json} />
+                                </div>
+                              </details>
+                              <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                                <button
+                                  type="button"
+                                  className="btn"
+                                  disabled={busyId === it.id}
+                                  onClick={() => void onResolve(it.id, { acknowledged_by_expert: true })}
+                                >
+                                  Принять к сведению
+                                </button>
+                                <button type="button" className="btn-secondary" disabled={busyId === it.id} onClick={() => void onDismiss(it.id)}>
+                                  Отклонить
+                                </button>
+                              </div>
+                            </div>
+                          ) : isClassification ? (
+                            <div style={{ display: "grid", gap: 8 }}>
+                              <div style={{ position: "relative", display: "grid", gridTemplateColumns: "1fr auto", gap: 6 }}>
+                                <input
+                                  type="text"
+                                  value={classDraft}
+                                  onChange={(e) => {
+                                    const v = e.target.value;
+                                    setWorkQueueClassByItemId((prev) => ({ ...prev, [it.id]: v }));
+                                    setOpenWorkClassPickerKey(it.id);
+                                  }}
+                                  onFocus={() => setOpenWorkClassPickerKey(it.id)}
+                                  placeholder="Класс из справочника"
+                                  autoComplete="off"
+                                  style={{ padding: "7px 9px", borderRadius: 8, border: "1px solid #cbd5e1" }}
+                                />
+                                <button
+                                  type="button"
+                                  className="btn-secondary"
+                                  onClick={() => setOpenWorkClassPickerKey((prev) => (prev === it.id ? null : it.id))}
+                                  style={{ padding: "6px 10px" }}
+                                  title="Варианты из справочника"
+                                >
+                                  ▼
+                                </button>
+                                {openWorkClassPickerKey === it.id && options.length > 0 ? (
+                                  <div
+                                    style={{
+                                      position: "absolute",
+                                      top: "100%",
+                                      left: 0,
+                                      right: 0,
+                                      zIndex: 20,
+                                      marginTop: 4,
+                                      background: "#fff",
+                                      border: "1px solid #cbd5e1",
+                                      borderRadius: 8,
+                                      boxShadow: "0 8px 18px rgba(15, 23, 42, 0.12)",
+                                      maxHeight: 200,
+                                      overflow: "auto",
+                                    }}
+                                  >
+                                    {options
+                                      .filter((opt) => {
+                                        const q = String(classDraft ?? "").trim().toLowerCase();
+                                        if (!q) return true;
+                                        return opt.id.toLowerCase().includes(q) || opt.label.toLowerCase().includes(q);
+                                      })
+                                      .slice(0, 60)
+                                      .map((opt) => (
+                                        <button
+                                          key={opt.id}
+                                          type="button"
+                                          onMouseDown={(e) => e.preventDefault()}
+                                          onClick={() => {
+                                            setWorkQueueClassByItemId((prev) => ({ ...prev, [it.id]: opt.id }));
+                                            setOpenWorkClassPickerKey(null);
+                                          }}
+                                          style={{
+                                            display: "block",
+                                            width: "100%",
+                                            textAlign: "left",
+                                            background: "transparent",
+                                            border: "none",
+                                            borderBottom: "1px solid #f1f5f9",
+                                            padding: "7px 9px",
+                                            cursor: "pointer",
+                                            fontSize: 13,
+                                            color: "#0f172a",
+                                          }}
+                                        >
+                                          {opt.label}
+                                        </button>
+                                      ))}
+                                  </div>
+                                ) : null}
+                              </div>
+                              <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                                <button
+                                  type="button"
+                                  className="btn"
+                                  disabled={busyId === it.id}
+                                  onClick={() => void onResolve(it.id, { chosen_class_id: String(classDraft ?? "").trim() })}
+                                >
+                                  Подтвердить класс
+                                </button>
+                                <button type="button" className="btn-secondary" disabled={busyId === it.id} onClick={() => void onDismiss(it.id)}>
+                                  Отклонить
+                                </button>
+                              </div>
+                            </div>
+                          ) : isOfficer ? (
+                            <div style={{ display: "grid", gap: 8 }}>
+                              {suggestedOfficer ? (
+                                <div style={{ fontSize: 12, color: "#64748b" }}>
+                                  Класс по данным инспектора: <strong style={{ color: "#334155" }}>{suggestedOfficer}</strong>
+                                </div>
+                              ) : null}
+                              <div style={{ position: "relative", display: "grid", gridTemplateColumns: "1fr auto", gap: 6 }}>
+                                <input
+                                  type="text"
+                                  value={classDraft}
+                                  onChange={(e) => {
+                                    setWorkQueueClassByItemId((prev) => ({ ...prev, [it.id]: e.target.value }));
+                                    setOpenWorkClassPickerKey(`officer-${it.id}`);
+                                  }}
+                                  onFocus={() => setOpenWorkClassPickerKey(`officer-${it.id}`)}
+                                  placeholder="Итоговый класс для эталона"
+                                  autoComplete="off"
+                                  style={{ padding: "7px 9px", borderRadius: 8, border: "1px solid #cbd5e1" }}
+                                />
+                                {rid ? (
+                                  <button
+                                    type="button"
+                                    className="btn-secondary"
+                                    onClick={() => setOpenWorkClassPickerKey((prev) => (prev === `officer-${it.id}` ? null : `officer-${it.id}`))}
+                                    style={{ padding: "6px 10px" }}
+                                    title="Варианты из справочника"
+                                  >
+                                    ▼
+                                  </button>
+                                ) : null}
+                                {openWorkClassPickerKey === `officer-${it.id}` && options.length > 0 ? (
+                                  <div
+                                    style={{
+                                      position: "absolute",
+                                      top: "100%",
+                                      left: 0,
+                                      right: 0,
+                                      zIndex: 20,
+                                      marginTop: 4,
+                                      background: "#fff",
+                                      border: "1px solid #cbd5e1",
+                                      borderRadius: 8,
+                                      boxShadow: "0 8px 18px rgba(15, 23, 42, 0.12)",
+                                      maxHeight: 200,
+                                      overflow: "auto",
+                                    }}
+                                  >
+                                    {options
+                                      .filter((opt) => {
+                                        const q = String(classDraft ?? "").trim().toLowerCase();
+                                        if (!q) return true;
+                                        return opt.id.toLowerCase().includes(q) || opt.label.toLowerCase().includes(q);
+                                      })
+                                      .slice(0, 60)
+                                      .map((opt) => (
+                                        <button
+                                          key={opt.id}
+                                          type="button"
+                                          onMouseDown={(e) => e.preventDefault()}
+                                          onClick={() => {
+                                            setWorkQueueClassByItemId((prev) => ({ ...prev, [it.id]: opt.id }));
+                                            setOpenWorkClassPickerKey(null);
+                                          }}
+                                          style={{
+                                            display: "block",
+                                            width: "100%",
+                                            textAlign: "left",
+                                            background: "transparent",
+                                            border: "none",
+                                            borderBottom: "1px solid #f1f5f9",
+                                            padding: "7px 9px",
+                                            cursor: "pointer",
+                                            fontSize: 13,
+                                            color: "#0f172a",
+                                          }}
+                                        >
+                                          {opt.label}
+                                        </button>
+                                      ))}
+                                  </div>
+                                ) : null}
+                              </div>
+                              <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                                <button
+                                  type="button"
+                                  className="btn"
+                                  disabled={busyId === it.id}
+                                  onClick={() => {
+                                    const chosen = String(classDraft ?? "").trim();
+                                    void onResolve(it.id, { chosen_class_id: chosen || null, source: "expert_queue" });
+                                  }}
+                                >
+                                  Подтвердить
+                                </button>
+                                <button type="button" className="btn-secondary" disabled={busyId === it.id} onClick={() => void onDismiss(it.id)}>
+                                  Отклонить
+                                </button>
+                              </div>
+                            </div>
+                          ) : (
+                            <div style={{ display: "grid", gap: 8 }}>
+                              <div style={{ position: "relative", display: "grid", gridTemplateColumns: rid ? "1fr auto" : "1fr", gap: 6 }}>
+                                <input
+                                  type="text"
+                                  value={classDraft}
+                                  onChange={(e) => {
+                                    setWorkQueueClassByItemId((prev) => ({ ...prev, [it.id]: e.target.value }));
+                                    setOpenWorkClassPickerKey(`other-${it.id}`);
+                                  }}
+                                  onFocus={() => setOpenWorkClassPickerKey(`other-${it.id}`)}
+                                  placeholder="Класс (при необходимости)"
+                                  autoComplete="off"
+                                  style={{ padding: "7px 9px", borderRadius: 8, border: "1px solid #cbd5e1" }}
+                                />
+                                {rid ? (
+                                  <button
+                                    type="button"
+                                    className="btn-secondary"
+                                    onClick={() => setOpenWorkClassPickerKey((prev) => (prev === `other-${it.id}` ? null : `other-${it.id}`))}
+                                    style={{ padding: "6px 10px" }}
+                                    title="Варианты из справочника"
+                                  >
+                                    ▼
+                                  </button>
+                                ) : null}
+                                {openWorkClassPickerKey === `other-${it.id}` && options.length > 0 ? (
+                                  <div
+                                    style={{
+                                      position: "absolute",
+                                      top: "100%",
+                                      left: 0,
+                                      right: 0,
+                                      zIndex: 20,
+                                      marginTop: 4,
+                                      background: "#fff",
+                                      border: "1px solid #cbd5e1",
+                                      borderRadius: 8,
+                                      boxShadow: "0 8px 18px rgba(15, 23, 42, 0.12)",
+                                      maxHeight: 200,
+                                      overflow: "auto",
+                                    }}
+                                  >
+                                    {options
+                                      .filter((opt) => {
+                                        const q = String(classDraft ?? "").trim().toLowerCase();
+                                        if (!q) return true;
+                                        return opt.id.toLowerCase().includes(q) || opt.label.toLowerCase().includes(q);
+                                      })
+                                      .slice(0, 60)
+                                      .map((opt) => (
+                                        <button
+                                          key={opt.id}
+                                          type="button"
+                                          onMouseDown={(e) => e.preventDefault()}
+                                          onClick={() => {
+                                            setWorkQueueClassByItemId((prev) => ({ ...prev, [it.id]: opt.id }));
+                                            setOpenWorkClassPickerKey(null);
+                                          }}
+                                          style={{
+                                            display: "block",
+                                            width: "100%",
+                                            textAlign: "left",
+                                            background: "transparent",
+                                            border: "none",
+                                            borderBottom: "1px solid #f1f5f9",
+                                            padding: "7px 9px",
+                                            cursor: "pointer",
+                                            fontSize: 13,
+                                            color: "#0f172a",
+                                          }}
+                                        >
+                                          {opt.label}
+                                        </button>
+                                      ))}
+                                  </div>
+                                ) : null}
+                              </div>
+                              <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                                <button
+                                  type="button"
+                                  className="btn"
+                                  disabled={busyId === it.id}
+                                  onClick={() => {
+                                    const chosen = String(classDraft ?? "").trim();
+                                    void onResolve(it.id, chosen ? { chosen_class_id: chosen } : { acknowledged_by_expert: true });
+                                  }}
+                                >
+                                  Подтвердить
+                                </button>
+                                <button type="button" className="btn-secondary" disabled={busyId === it.id} onClick={() => void onDismiss(it.id)}>
+                                  Отклонить
+                                </button>
+                              </div>
+                            </div>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+      ))}
+    </div>
+  );
+}
+
 export default function ExpertDecisionsPage() {
   const [items, setItems] = useState<ExpertDecisionItem[]>([]);
   const [status, setStatus] = useState<string | null>(null);
@@ -341,99 +855,222 @@ export default function ExpertDecisionsPage() {
   const [manualClassById, setManualClassById] = useState<Record<string, string>>({});
   const [catalogOptionsByRule, setCatalogOptionsByRule] = useState<Record<string, ClassOption[]>>({});
   const [namingModalOpen, setNamingModalOpen] = useState(false);
+  const [namingModalLane, setNamingModalLane] = useState<"model" | "post" | null>(null);
+  const [workQueueModalOpen, setWorkQueueModalOpen] = useState(false);
+  const [workQueueView, setWorkQueueView] = useState<WorkQueueViewState | null>(null);
+  const [workQueueClassByItemId, setWorkQueueClassByItemId] = useState<Record<string, string>>({});
+  const [openWorkClassPickerKey, setOpenWorkClassPickerKey] = useState<string | null>(null);
   const [openClassPickerKey, setOpenClassPickerKey] = useState<string | null>(null);
   const [pendingStatusChange, setPendingStatusChange] = useState<PendingStatusChange | null>(null);
 
   const load = useCallback(async () => {
     setStatus(null);
     try {
-      const list = await listExpertDecisions(
-        filter === "pending"
-          ? {
-              status: "pending",
-              issue_type: issueTypeFilter === "all" ? undefined : issueTypeFilter,
-              page: 1,
-              page_size: 100,
-            }
-          : {
-              issue_type: issueTypeFilter === "all" ? undefined : issueTypeFilter,
-              page: 1,
-              page_size: 100,
-            },
-      );
+      const list = await listExpertDecisions({
+        page: 1,
+        page_size: 100,
+        ...(filter === "pending" ? { status: "pending" } : {}),
+      });
       setItems(list.items);
     } catch (e: unknown) {
       setStatus(e instanceof Error ? e.message : "Не удалось загрузить данные.");
     }
-  }, [filter, issueTypeFilter]);
+  }, [filter]);
 
   useEffect(() => {
     void load();
   }, [load]);
 
-  const namingRows = useMemo(() => {
-    const raw = items
-      .filter((it) =>
-        ["class_name_confirmation", "auto_classification_review", "classification_unresolved"].includes(it.category),
-      )
-      .map(namingRowFromDecision);
+  const displayItems = useMemo(() => {
+    if (issueTypeFilter === "all") return items;
+    return items.filter((it) => toolbarIssueTypeFromCategory(it.category) === issueTypeFilter);
+  }, [items, issueTypeFilter]);
+
+  const namingRowsAll = useMemo(() => {
+    const raw = displayItems.filter((it) => isNamingDecisionCategory(it.category)).map(namingRowFromDecision);
     return dedupeNamingDecisionRows(raw);
-  }, [items]);
+  }, [displayItems]);
+
+  const namingRowsForModalTable = useMemo(() => {
+    if (!namingModalOpen || namingModalLane == null) {
+      return namingRowsAll;
+    }
+    const allow =
+      namingModalLane === "model"
+        ? new Set<string>(NAMING_MODEL_CATEGORIES as unknown as string[])
+        : new Set<string>(NAMING_POST_CONTROL_CATEGORIES as unknown as string[]);
+    const raw = displayItems.filter((it) => allow.has(it.category)).map(namingRowFromDecision);
+    return dedupeNamingDecisionRows(raw);
+  }, [displayItems, namingModalOpen, namingModalLane, namingRowsAll]);
+
+  const modelLaneUniqueCount = useMemo(() => {
+    const ids = new Set<string>();
+    for (const it of displayItems) {
+      if (!isNamingModelCategory(it.category)) continue;
+      if (!itemMatchesTnvedSection(it, selectedSection)) continue;
+      const id = String(it.declaration_id ?? "").trim().toLowerCase();
+      if (id) ids.add(id);
+    }
+    return ids.size;
+  }, [displayItems, selectedSection]);
+
+  const postLaneUniqueCount = useMemo(() => {
+    const ids = new Set<string>();
+    for (const it of displayItems) {
+      if (!isNamingPostControlCategory(it.category)) continue;
+      if (!itemMatchesTnvedSection(it, selectedSection)) continue;
+      const id = String(it.declaration_id ?? "").trim().toLowerCase();
+      if (id) ids.add(id);
+    }
+    return ids.size;
+  }, [displayItems, selectedSection]);
+
+  const namingUniqueDeclCountBySectionModel = useMemo(() => {
+    const m = new Map<string, Set<string>>();
+    for (const it of displayItems) {
+      if (!isNamingModelCategory(it.category)) continue;
+      const id = String(it.declaration_id ?? "").trim().toLowerCase();
+      if (!id) continue;
+      const sec = sectionInfoFromDecision(it).sectionKey;
+      if (!m.has(sec)) m.set(sec, new Set());
+      m.get(sec)!.add(id);
+    }
+    return m;
+  }, [displayItems]);
+
+  const namingUniqueDeclCountBySectionPost = useMemo(() => {
+    const m = new Map<string, Set<string>>();
+    for (const it of displayItems) {
+      if (!isNamingPostControlCategory(it.category)) continue;
+      const id = String(it.declaration_id ?? "").trim().toLowerCase();
+      if (!id) continue;
+      const sec = sectionInfoFromDecision(it).sectionKey;
+      if (!m.has(sec)) m.set(sec, new Set());
+      m.get(sec)!.add(id);
+    }
+    return m;
+  }, [displayItems]);
+
+  const namingModalAllSectionDeclCount = useMemo(() => {
+    if (namingModalLane === "model") {
+      const ids = new Set<string>();
+      for (const it of displayItems) {
+        if (!isNamingModelCategory(it.category)) continue;
+        const id = String(it.declaration_id ?? "").trim().toLowerCase();
+        if (id) ids.add(id);
+      }
+      return ids.size;
+    }
+    if (namingModalLane === "post") {
+      const ids = new Set<string>();
+      for (const it of displayItems) {
+        if (!isNamingPostControlCategory(it.category)) continue;
+        const id = String(it.declaration_id ?? "").trim().toLowerCase();
+        if (id) ids.add(id);
+      }
+      return ids.size;
+    }
+    const ids = new Set<string>();
+    for (const it of displayItems) {
+      if (!isNamingDecisionCategory(it.category)) continue;
+      const id = String(it.declaration_id ?? "").trim().toLowerCase();
+      if (id) ids.add(id);
+    }
+    return ids.size;
+  }, [displayItems, namingModalLane]);
+
+  const namingModalDeclBySection = useMemo(() => {
+    if (namingModalLane === "model") return namingUniqueDeclCountBySectionModel;
+    if (namingModalLane === "post") return namingUniqueDeclCountBySectionPost;
+    const merged = new Map<string, Set<string>>();
+    for (const it of displayItems) {
+      if (!isNamingDecisionCategory(it.category)) continue;
+      const id = String(it.declaration_id ?? "").trim().toLowerCase();
+      if (!id) continue;
+      const sec = sectionInfoFromDecision(it).sectionKey;
+      if (!merged.has(sec)) merged.set(sec, new Set());
+      merged.get(sec)!.add(id);
+    }
+    return merged;
+  }, [displayItems, namingModalLane, namingUniqueDeclCountBySectionModel, namingUniqueDeclCountBySectionPost]);
+
+  const hasModelLaneItems = useMemo(() => displayItems.some((it) => isNamingModelCategory(it.category)), [displayItems]);
+  const hasPostLaneItems = useMemo(() => displayItems.some((it) => isNamingPostControlCategory(it.category)), [displayItems]);
+
   const sectionCounts = useMemo(() => {
     const m = new Map<string, { label: string; count: number }>();
-    for (const it of items) {
+    for (const it of displayItems) {
       const sec = sectionInfoFromDecision(it);
       const prev = m.get(sec.sectionKey);
       if (!prev) m.set(sec.sectionKey, { label: sec.sectionLabel, count: 1 });
       else m.set(sec.sectionKey, { label: prev.label, count: prev.count + 1 });
     }
     return [...m.entries()].sort((a, b) => a[1].label.localeCompare(b[1].label, "ru"));
-  }, [items]);
+  }, [displayItems]);
+
   const issueTypeCounts = useMemo(() => {
     const base: Record<UiIssueType, number> = {
       all: items.length,
-      class_confirmation: 0,
+      model_class: 0,
+      post_customs_control: 0,
       classification: 0,
       inspector_correction: 0,
       officer_decision: 0,
-      other: 0,
     };
     for (const it of items) {
-      const key = issueTypeFromCategory(it.category);
-      base[key] += 1;
+      const t = toolbarIssueTypeFromCategory(it.category);
+      if (t !== "all") base[t] += 1;
     }
     return base;
   }, [items]);
+
   const visibleNamingRows = useMemo(() => {
-    if (selectedSection === "all") return namingRows;
-    return namingRows.filter((row) => row.sectionKey === selectedSection);
-  }, [namingRows, selectedSection]);
+    if (selectedSection === "all") return namingRowsForModalTable;
+    return namingRowsForModalTable.filter((row) => row.sectionKey === selectedSection);
+  }, [namingRowsForModalTable, selectedSection]);
   const aggregatedNamingRows = useMemo(() => aggregateNamingRows(visibleNamingRows), [visibleNamingRows]);
 
-  const visibleWorkItemsBySection = useMemo(() => {
-    const rows = items.filter(
-      (it) => !["class_name_confirmation", "auto_classification_review", "classification_unresolved"].includes(it.category),
-    );
-    const filtered = rows.filter((it) => {
-      const issueType = issueTypeFromCategory(it.category);
-      if (issueTypeFilter !== "all" && issueType !== issueTypeFilter) return false;
-      if (selectedSection === "all") return true;
-      return sectionInfoFromDecision(it).sectionKey === selectedSection;
-    });
-    const map = new Map<string, { label: string; items: ExpertDecisionItem[] }>();
-    for (const it of filtered) {
-      const sec = sectionInfoFromDecision(it);
-      const prev = map.get(sec.sectionKey);
-      if (!prev) {
-        map.set(sec.sectionKey, { label: sec.sectionLabel, items: [it] });
-      } else {
-        prev.items.push(it);
-      }
+  const rulesLaneCount = useMemo(
+    () =>
+      displayItems.filter((it) => isWorkQueueRuleCategory(it.category) && itemMatchesTnvedSection(it, selectedSection)).length,
+    [displayItems, selectedSection],
+  );
+  const officerLaneCount = useMemo(
+    () =>
+      displayItems.filter((it) => it.category === "officer_final_decision" && itemMatchesTnvedSection(it, selectedSection))
+        .length,
+    [displayItems, selectedSection],
+  );
+  const featuresLaneCount = useMemo(
+    () =>
+      displayItems.filter(
+        (it) => it.category === "inspector_feature_correction" && itemMatchesTnvedSection(it, selectedSection),
+      ).length,
+    [displayItems, selectedSection],
+  );
+
+  const orphanCategories = useMemo(() => {
+    const s = new Set<string>();
+    for (const it of displayItems) {
+      if (!isStandardExpertCategory(it.category)) s.add(it.category);
     }
-    return [...map.entries()]
-      .map(([key, value]) => ({ sectionKey: key, sectionLabel: value.label, items: value.items.sort((a, b) => b.created_at.localeCompare(a.created_at)) }))
-      .sort((a, b) => a.sectionLabel.localeCompare(b.sectionLabel, "ru"));
-  }, [items, issueTypeFilter, selectedSection]);
+    return [...s].sort((a, b) => a.localeCompare(b, "ru"));
+  }, [displayItems]);
+
+  const workQueueModalSections = useMemo(() => {
+    if (!workQueueView) return [];
+    const pred = (cat: string) => {
+      if (workQueueView.kind === "orphan") return cat === workQueueView.category;
+      if (workQueueView.lane === "rules") return isWorkQueueRuleCategory(cat);
+      if (workQueueView.lane === "officer") return cat === "officer_final_decision";
+      return cat === "inspector_feature_correction";
+    };
+    const rows = displayItems.filter((it) => pred(it.category) && itemMatchesTnvedSection(it, selectedSection));
+    return groupItemsIntoWorkSections(rows);
+  }, [displayItems, workQueueView, selectedSection]);
+
+  const anyWorkStandardLane =
+    rulesLaneCount > 0 || officerLaneCount > 0 || featuresLaneCount > 0 || orphanCategories.length > 0;
 
   useEffect(() => {
     if (selectedSection === "all") return;
@@ -443,17 +1080,17 @@ export default function ExpertDecisionsPage() {
 
   useEffect(() => {
     const next: Record<string, string> = {};
-    for (const row of namingRows) {
+    for (const row of namingRowsAll) {
       if (row.item.status !== "pending") continue;
       const fallback = row.suggestedClassName === "—" ? "" : row.suggestedClassName;
       next[row.item.id] = manualClassById[row.item.id] ?? fallback;
     }
     if (Object.keys(next).length === 0) return;
     setManualClassById((prev) => ({ ...next, ...prev }));
-  }, [namingRows]);
+  }, [namingRowsAll]);
 
   useEffect(() => {
-    const ruleIds = Array.from(new Set(namingRows.map((row) => String(row.item.rule_id ?? "").trim()).filter(Boolean)));
+    const ruleIds = Array.from(new Set(items.map((it) => String(it.rule_id ?? "").trim()).filter(Boolean)));
     const missing = ruleIds.filter((rid) => catalogOptionsByRule[rid] == null);
     if (missing.length === 0) return;
     let cancelled = false;
@@ -478,7 +1115,27 @@ export default function ExpertDecisionsPage() {
     return () => {
       cancelled = true;
     };
-  }, [catalogOptionsByRule, namingRows]);
+  }, [catalogOptionsByRule, items]);
+
+  useEffect(() => {
+    setWorkQueueClassByItemId((prev) => {
+      const next = { ...prev };
+      let changed = false;
+      for (const sec of workQueueModalSections) {
+        for (const it of sec.items) {
+          if (it.status !== "pending") continue;
+          if (next[it.id] != null && String(next[it.id]).length > 0) continue;
+          if (it.category !== "officer_final_decision") continue;
+          const suggested = officerSuggestedClassId(it);
+          if (suggested) {
+            next[it.id] = suggested;
+            changed = true;
+          }
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [workQueueModalSections]);
 
   async function onResolve(id: string, resolution: Record<string, unknown>) {
     setBusyId(id);
@@ -558,11 +1215,29 @@ export default function ExpertDecisionsPage() {
     paddingBottom: 28,
   };
 
+  const namingModalTitle =
+    namingModalLane === "model"
+      ? "Утверждение класса по предложению модели"
+      : namingModalLane === "post"
+        ? "Проверка класса после таможенного контроля"
+        : "Наименование класса";
+
+  const workQueueModalTitle =
+    workQueueView == null
+      ? "Таблица очереди"
+      : workQueueView.kind === "orphan"
+        ? labelCategory(workQueueView.category)
+        : workQueueView.lane === "rules"
+          ? "Выбор класса по правилам справочника"
+          : workQueueView.lane === "officer"
+            ? "Записи по итогам решения инспектора"
+            : "Согласование правок признаков";
+
   return (
     <div style={shell}>
       <header style={{ textAlign: "center", marginBottom: 22 }}>
         <h1 style={{ margin: "0 0 10px", fontSize: 24, fontWeight: 700, color: "#0f172a", letterSpacing: "-0.02em" }}>
-          Очередь решений
+          Очередь на проверку эксперта
         </h1>
         <p
           style={{
@@ -570,14 +1245,13 @@ export default function ExpertDecisionsPage() {
             color: "#64748b",
             fontSize: 15,
             lineHeight: 1.6,
-            maxWidth: 560,
+            maxWidth: 620,
             marginLeft: "auto",
             marginRight: "auto",
           }}
         >
-          Здесь накапливаются ситуации, где система не может завершить шаг без вашего выбора: неоднозначная классификация,
-          отсутствие подходящего правила или сомнительное имя класса, предложенное моделью. Записи появляются при обработке
-          деклараций и когда при проверке декларации требуется ваше решение.
+          Заявки по проверке декларации, по правилам справочника и по предложению модели. Решения принимаются в таблицах
+          во всплывающих окнах.
         </p>
       </header>
 
@@ -654,7 +1328,7 @@ export default function ExpertDecisionsPage() {
         </div>
       ) : null}
 
-      {items.length === 0 ? (
+      {displayItems.length === 0 ? (
         <div
           className="card"
           style={{
@@ -669,225 +1343,179 @@ export default function ExpertDecisionsPage() {
         </div>
       ) : (
         <div style={{ display: "grid", gap: 28 }}>
-          {namingRows.length > 0 && (issueTypeFilter === "all" || issueTypeFilter === "class_confirmation") ? (
+          {(hasModelLaneItems || hasPostLaneItems) &&
+          (issueTypeFilter === "all" || issueTypeFilter === "model_class" || issueTypeFilter === "post_customs_control") ? (
             <section>
               <h2 style={{ fontSize: 16, fontWeight: 700, color: "#0f172a", margin: "0 0 12px" }}>
-                Подтверждение имени класса (таблица по категориям) ({namingRows.length})
+                Классификация и наименование
               </h2>
-              <div
-                className="card"
-                style={{
-                  border: "1px solid #e2e8f0",
-                  borderRadius: 12,
-                  padding: 14,
-                  background: "#fff",
-                }}
-              >
-                <p style={{ margin: "0 0 10px", fontSize: 14, color: "#475569", lineHeight: 1.45 }}>
-                  Сначала выберите категорию, затем откройте таблицу деклараций для анализа.
-                </p>
-                <div style={{ display: "flex", flexWrap: "wrap", gap: 10, alignItems: "center" }}>
-                  <select
-                    value={selectedSection}
-                    onChange={(e) => setSelectedSection(e.target.value)}
-                    style={{ padding: "8px 10px", borderRadius: 8, border: "1px solid #cbd5e1", minWidth: 360 }}
+              <div style={{ display: "grid", gap: 14 }}>
+                {hasModelLaneItems && (issueTypeFilter === "all" || issueTypeFilter === "model_class") ? (
+                  <div
+                    className="card"
+                    style={{
+                      border: "1px solid #e2e8f0",
+                      borderRadius: 12,
+                      padding: 14,
+                      background: "#fff",
+                    }}
                   >
-                    <option value="all">Все категории ({namingRows.length})</option>
-                    {sectionCounts.map(([key, meta]) => (
-                      <option key={key} value={key}>
-                        {meta.label} ({meta.count})
-                      </option>
-                    ))}
-                  </select>
-                  <button type="button" className="btn" onClick={() => setNamingModalOpen(true)}>
-                  Открыть таблицу подтверждения ({namingRows.length})
-                  </button>
-                </div>
+                    <h3 style={{ margin: "0 0 8px", fontSize: 15, fontWeight: 700, color: "#0f172a" }}>
+                      Утверждение класса по предложению модели
+                    </h3>
+                    <p style={{ margin: "0 0 12px", fontSize: 14, color: "#475569", lineHeight: 1.45 }}>
+                      Система предложила класс или наименование — нужно подтвердить или исправить.
+                    </p>
+                    <button
+                      type="button"
+                      className="btn"
+                      onClick={() => {
+                        setNamingModalLane("model");
+                        setNamingModalOpen(true);
+                      }}
+                    >
+                      Открыть таблицу ({modelLaneUniqueCount})
+                    </button>
+                  </div>
+                ) : null}
+                {hasPostLaneItems && (issueTypeFilter === "all" || issueTypeFilter === "post_customs_control") ? (
+                  <div
+                    className="card"
+                    style={{
+                      border: "1px solid #e2e8f0",
+                      borderRadius: 12,
+                      padding: 14,
+                      background: "#fff",
+                    }}
+                  >
+                    <h3 style={{ margin: "0 0 8px", fontSize: 15, fontWeight: 700, color: "#0f172a" }}>
+                      Проверка класса после таможенного контроля
+                    </h3>
+                    <p style={{ margin: "0 0 12px", fontSize: 14, color: "#475569", lineHeight: 1.45 }}>
+                      Заявки с проверки декларации: автоклассификация не сработала, класс задан вручную или инспектор направил
+                      груз на вашу проверку.
+                    </p>
+                    <button
+                      type="button"
+                      className="btn"
+                      onClick={() => {
+                        setNamingModalLane("post");
+                        setNamingModalOpen(true);
+                      }}
+                    >
+                      Открыть таблицу ({postLaneUniqueCount})
+                    </button>
+                  </div>
+                ) : null}
               </div>
             </section>
           ) : null}
-          {visibleWorkItemsBySection.map((section) => (
-              <section key={section.sectionKey}>
-                <h2 style={{ fontSize: 16, fontWeight: 700, color: "#0f172a", margin: "0 0 12px" }}>
-                  {section.sectionLabel} ({section.items.length})
-                </h2>
-                <div style={{ display: "grid", gap: 12 }}>
-                  {section.items.map((it) => (
-                    <div
-                      key={it.id}
-                      className="card"
-                      style={{
-                        padding: 16,
-                        border: "1px solid #e2e8f0",
-                        borderRadius: 10,
-                        background: it.status === "pending" ? "#fff" : "#f8fafc",
+
+          {anyWorkStandardLane &&
+          (issueTypeFilter === "all" ||
+            issueTypeFilter === "classification" ||
+            issueTypeFilter === "officer_decision" ||
+            issueTypeFilter === "inspector_correction") ? (
+            <section>
+              <h2 style={{ fontSize: 16, fontWeight: 700, color: "#0f172a", margin: "0 0 12px" }}>
+                Очередь по источнику заявки
+              </h2>
+              <div style={{ display: "grid", gap: 14 }}>
+                {rulesLaneCount > 0 && (issueTypeFilter === "all" || issueTypeFilter === "classification") ? (
+                  <div className="card" style={{ border: "1px solid #e2e8f0", borderRadius: 12, padding: 14, background: "#fff" }}>
+                    <h3 style={{ margin: "0 0 8px", fontSize: 15, fontWeight: 700, color: "#0f172a" }}>
+                      Выбор класса по правилам справочника
+                    </h3>
+                    <p style={{ margin: "0 0 12px", fontSize: 14, color: "#475569", lineHeight: 1.45 }}>
+                      Несколько подходящих классов или ни один не подошёл — решение по правилам каталога ТН ВЭД.
+                    </p>
+                    <button
+                      type="button"
+                      className="btn"
+                      onClick={() => {
+                        setWorkQueueView({ kind: "lane", lane: "rules" });
+                        setWorkQueueModalOpen(true);
                       }}
                     >
-                      <div
-                        style={{
-                          fontSize: 13,
-                          color: "#64748b",
-                          marginBottom: 8,
-                          display: "flex",
-                          flexWrap: "wrap",
-                          gap: "6px 10px",
-                          alignItems: "baseline",
+                      Открыть таблицу ({rulesLaneCount})
+                    </button>
+                  </div>
+                ) : null}
+                {officerLaneCount > 0 && (issueTypeFilter === "all" || issueTypeFilter === "officer_decision") ? (
+                  <div className="card" style={{ border: "1px solid #e2e8f0", borderRadius: 12, padding: 14, background: "#fff" }}>
+                    <h3 style={{ margin: "0 0 8px", fontSize: 15, fontWeight: 700, color: "#0f172a" }}>
+                      Записи по итогам решения инспектора
+                    </h3>
+                    <p style={{ margin: "0 0 12px", fontSize: 14, color: "#475569", lineHeight: 1.45 }}>
+                      Сюда попадают только декларации, по которым инспектор нажал кнопку решения: принять, отклонить или
+                      направить на проверку эксперту — в том числе если класс был указан вручную. Если противоречий не
+                      было и достаточно обычного подтверждения без этих действий, отдельная заявка в эту очередь не
+                      формируется. Нужна ваша оценка именно таких записей.
+                    </p>
+                    <button
+                      type="button"
+                      className="btn"
+                      onClick={() => {
+                        setWorkQueueView({ kind: "lane", lane: "officer" });
+                        setWorkQueueModalOpen(true);
+                      }}
+                    >
+                      Открыть таблицу ({officerLaneCount})
+                    </button>
+                  </div>
+                ) : null}
+                {featuresLaneCount > 0 && (issueTypeFilter === "all" || issueTypeFilter === "inspector_correction") ? (
+                  <div className="card" style={{ border: "1px solid #e2e8f0", borderRadius: 12, padding: 14, background: "#fff" }}>
+                    <h3 style={{ margin: "0 0 8px", fontSize: 15, fontWeight: 700, color: "#0f172a" }}>
+                      Согласование правок признаков
+                    </h3>
+                    <p style={{ margin: "0 0 12px", fontSize: 14, color: "#475569", lineHeight: 1.45 }}>
+                      Инспектор изменил автоматически извлечённые характеристики — примите правку или отклоните.
+                    </p>
+                    <button
+                      type="button"
+                      className="btn"
+                      onClick={() => {
+                        setWorkQueueView({ kind: "lane", lane: "features" });
+                        setWorkQueueModalOpen(true);
+                      }}
+                    >
+                      Открыть таблицу ({featuresLaneCount})
+                    </button>
+                  </div>
+                ) : null}
+                {orphanCategories.map((oc) => {
+                  const cnt = displayItems.filter((it) => it.category === oc && itemMatchesTnvedSection(it, selectedSection)).length;
+                  if (cnt === 0) return null;
+                  return (
+                    <div key={oc} className="card" style={{ border: "1px solid #e2e8f0", borderRadius: 12, padding: 14, background: "#fff" }}>
+                      <h3 style={{ margin: "0 0 8px", fontSize: 15, fontWeight: 700, color: "#0f172a" }}>{labelCategory(oc)}</h3>
+                      <p style={{ margin: "0 0 12px", fontSize: 14, color: "#475569", lineHeight: 1.45 }}>
+                        Запись с нестандартным типом; уточните источник в данных.
+                      </p>
+                      <button
+                        type="button"
+                        className="btn"
+                        onClick={() => {
+                          setWorkQueueView({ kind: "orphan", category: oc });
+                          setWorkQueueModalOpen(true);
                         }}
                       >
-                        <span>{it.created_at}</span>
-                        <span aria-hidden="true" style={{ color: "#cbd5e1" }}>
-                          ·
-                        </span>
-                        <span>декларация {it.declaration_id}</span>
-                        {it.rule_id ? (
-                          <>
-                            <span aria-hidden="true" style={{ color: "#cbd5e1" }}>
-                              ·
-                            </span>
-                            <span>справочник {it.rule_id}</span>
-                          </>
-                        ) : null}
-                        <span aria-hidden="true" style={{ color: "#cbd5e1" }}>
-                          ·
-                        </span>
-                        <span style={{ fontWeight: 600, color: "#475569" }}>{labelStatus(it.status)}</span>
-                        <span aria-hidden="true" style={{ color: "#cbd5e1" }}>
-                          ·
-                        </span>
-                        <span style={{ fontWeight: 600, color: "#334155" }}>{UI_ISSUE_TYPE_LABEL[issueTypeFromCategory(it.category)]}</span>
-                      </div>
-                      <div style={{ fontSize: 15, color: "#0f172a", marginBottom: 12, lineHeight: 1.5 }}>{it.summary_ru}</div>
-                      {it.category === "inspector_feature_correction" ? (
-                        <InspectorCorrectionView payload={it.payload_json} />
-                      ) : (
-                        <details style={{ fontSize: 12, color: "#475569", marginBottom: 12 }}>
-                          <summary style={{ cursor: "pointer" }}>Технические подробности</summary>
-                          <pre
-                            style={{
-                              marginTop: 10,
-                              padding: 10,
-                              background: "#f1f5f9",
-                              borderRadius: 8,
-                              overflow: "auto",
-                              maxHeight: 220,
-                              fontSize: 11,
-                              textAlign: "left",
-                            }}
-                          >
-                            {JSON.stringify(it.payload_json, null, 2)}
-                          </pre>
-                        </details>
-                      )}
-                      {it.status === "pending" ? (
-                        <div
-                          style={{
-                            display: "flex",
-                            flexWrap: "wrap",
-                            gap: 12,
-                            alignItems: "flex-end",
-                            justifyContent: "space-between",
-                          }}
-                        >
-                          <div
-                            style={{
-                              display: "flex",
-                              flexWrap: "wrap",
-                              gap: 10,
-                              alignItems: "flex-end",
-                              flex: "1 1 240px",
-                            }}
-                          >
-                            {(it.category === "classification_ambiguous" || it.category === "classification_none") && (
-                              <>
-                                <label style={{ display: "grid", gap: 6, fontSize: 13, color: "#334155", minWidth: 200 }}>
-                                  <span style={{ fontWeight: 600 }}>Класс в справочнике</span>
-                                  <input
-                                    type="text"
-                                    id={`chosen-${it.id}`}
-                                    placeholder="идентификатор из справочника"
-                                    autoComplete="off"
-                                    style={{ padding: "8px 10px", borderRadius: 8, border: "1px solid #cbd5e1" }}
-                                  />
-                                </label>
-                                <button
-                                  type="button"
-                                  className="btn"
-                                  disabled={busyId === it.id}
-                                  onClick={() => {
-                                    const el = document.getElementById(`chosen-${it.id}`) as HTMLInputElement | null;
-                                    const chosen = (el?.value ?? "").trim();
-                                    void onResolve(it.id, { chosen_class_id: chosen });
-                                  }}
-                                >
-                                  Сохранить выбор
-                                </button>
-                              </>
-                            )}
-                            {it.category === "class_name_confirmation" && (
-                              <>
-                                <label style={{ display: "grid", gap: 6, fontSize: 13, color: "#334155", minWidth: 220 }}>
-                                  <span style={{ fontWeight: 600 }}>Название класса</span>
-                                  <input
-                                    type="text"
-                                    id={`name-${it.id}`}
-                                    defaultValue={String(
-                                      (it.payload_json?.llm_result as { suggested_class_name?: string } | undefined)
-                                        ?.suggested_class_name ?? "",
-                                    )}
-                                    autoComplete="off"
-                                    style={{ padding: "8px 10px", borderRadius: 8, border: "1px solid #cbd5e1" }}
-                                  />
-                                </label>
-                                <button
-                                  type="button"
-                                  className="btn"
-                                  disabled={busyId === it.id}
-                                  onClick={() => {
-                                    const el = document.getElementById(`name-${it.id}`) as HTMLInputElement | null;
-                                    const name = (el?.value ?? "").trim();
-                                    void onResolve(it.id, { confirmed_class_id: name });
-                                  }}
-                                >
-                                  Подтвердить
-                                </button>
-                              </>
-                            )}
-                            {it.category === "inspector_feature_correction" && (
-                              <button
-                                type="button"
-                                className="btn"
-                                disabled={busyId === it.id}
-                                onClick={() => void onResolve(it.id, { acknowledged_by_expert: true })}
-                              >
-                                Принять к сведению
-                              </button>
-                            )}
-                          </div>
-                          <button
-                            type="button"
-                            className="btn-secondary"
-                            disabled={busyId === it.id}
-                            onClick={() => void onDismiss(it.id)}
-                            style={{ flex: "0 0 auto", alignSelf: "center" }}
-                          >
-                            Закрыть без решения
-                          </button>
-                        </div>
-                      ) : it.resolution_json && Object.keys(it.resolution_json).length > 0 ? (
-                        <div style={{ fontSize: 13, color: "#64748b" }}>Итог: {formatResolutionRu(it.resolution_json)}</div>
-                      ) : null}
+                        Открыть таблицу ({cnt})
+                      </button>
                     </div>
-                  ))}
-                </div>
-              </section>
-            ))}
+                  );
+                })}
+              </div>
+            </section>
+          ) : null}
         </div>
       )}
       {namingModalOpen ? (
         <div
           role="dialog"
           aria-modal="true"
-          aria-label="Подтверждение имени класса"
+          aria-label={namingModalTitle}
           style={{
             position: "fixed",
             inset: 0,
@@ -899,7 +1527,10 @@ export default function ExpertDecisionsPage() {
             padding: 18,
           }}
           onMouseDown={(e) => {
-            if (e.target === e.currentTarget) setNamingModalOpen(false);
+            if (e.target === e.currentTarget) {
+              setNamingModalOpen(false);
+              setNamingModalLane(null);
+            }
           }}
         >
           <div
@@ -929,21 +1560,30 @@ export default function ExpertDecisionsPage() {
               }}
             >
               <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-                <strong style={{ color: "#0f172a", fontSize: 14 }}>Раздел ТН ВЭД:</strong>
+                <strong style={{ color: "#0f172a", fontSize: 14 }}>{namingModalTitle}</strong>
+                <span style={{ color: "#94a3b8", fontSize: 13 }}>·</span>
+                <span style={{ color: "#475569", fontSize: 13 }}>Раздел ТН ВЭД:</span>
                 <select
                   value={selectedSection}
                   onChange={(e) => setSelectedSection(e.target.value)}
                   style={{ padding: "6px 9px", borderRadius: 8, border: "1px solid #cbd5e1", minWidth: 360 }}
                 >
-                  <option value="all">Все категории ({namingRows.length})</option>
+                  <option value="all">Все категории ({namingModalAllSectionDeclCount})</option>
                   {sectionCounts.map(([key, meta]) => (
                     <option key={key} value={key}>
-                      {meta.label} ({meta.count})
+                      {meta.label} ({namingModalDeclBySection.get(key)?.size ?? 0})
                     </option>
                   ))}
                 </select>
               </div>
-              <button type="button" className="btn-secondary" onClick={() => setNamingModalOpen(false)}>
+              <button
+                type="button"
+                className="btn-secondary"
+                onClick={() => {
+                  setNamingModalOpen(false);
+                  setNamingModalLane(null);
+                }}
+              >
                 Закрыть
               </button>
             </div>
@@ -1119,6 +1759,88 @@ export default function ExpertDecisionsPage() {
                       </div>
                   </div>
                 )}
+            </div>
+          </div>
+        </div>
+      ) : null}
+      {workQueueModalOpen ? (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label={workQueueModalTitle}
+          style={{
+            position: "fixed",
+            inset: 0,
+            zIndex: 1350,
+            background: "rgba(15, 23, 42, 0.45)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            padding: 18,
+          }}
+          onMouseDown={(e) => {
+            if (e.target === e.currentTarget) {
+              setWorkQueueModalOpen(false);
+              setWorkQueueView(null);
+            }
+          }}
+        >
+          <div
+            className="card"
+            style={{
+              width: "min(98vw, 1560px)",
+              maxHeight: "94vh",
+              overflow: "auto",
+              padding: 0,
+              background: "#fff",
+              border: "1px solid #cbd5e1",
+              borderRadius: 12,
+            }}
+          >
+            <div
+              style={{
+                position: "sticky",
+                top: 0,
+                zIndex: 1,
+                background: "#fff",
+                borderBottom: "1px solid #e2e8f0",
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+                gap: 8,
+                padding: "10px 14px",
+              }}
+            >
+              <strong style={{ color: "#0f172a", fontSize: 15 }}>{workQueueModalTitle}</strong>
+              <button
+                type="button"
+                className="btn-secondary"
+                onClick={() => {
+                  setWorkQueueModalOpen(false);
+                  setWorkQueueView(null);
+                }}
+              >
+                Закрыть окно
+              </button>
+            </div>
+            <div style={{ padding: 14, display: "grid", gap: 22 }}>
+              {workQueueView?.kind === "lane" && workQueueView.lane === "officer" ? (
+                <p style={{ margin: 0, fontSize: 13, color: "#64748b", lineHeight: 1.5 }}>
+                  В таблице — только записи по кнопкам инспектора «Принять», «Отклонить» или «На экспертизу» (включая
+                  ручной ввод класса). Обычное подтверждение без этих действий сюда не попадает.
+                </p>
+              ) : null}
+              <WorkQueueTable
+                sections={workQueueModalSections}
+                busyId={busyId}
+                catalogOptionsByRule={catalogOptionsByRule}
+                workQueueClassByItemId={workQueueClassByItemId}
+                setWorkQueueClassByItemId={setWorkQueueClassByItemId}
+                openWorkClassPickerKey={openWorkClassPickerKey}
+                setOpenWorkClassPickerKey={setOpenWorkClassPickerKey}
+                onResolve={onResolve}
+                onDismiss={onDismiss}
+              />
             </div>
           </div>
         </div>

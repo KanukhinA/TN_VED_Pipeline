@@ -48,6 +48,28 @@ function emptyDsl(): any {
   };
 }
 
+/** Пример признаков одной строкой: без JSON-скобок и многострочной вложенности. */
+function formatAmbiguousExampleAsPlainText(data: unknown): string {
+  if (data === null || data === undefined) return "—";
+  if (typeof data === "string") return data;
+  if (typeof data === "number" || typeof data === "boolean") return String(data);
+  if (Array.isArray(data)) {
+    if (data.length === 0) return "";
+    return data
+      .map((item, i) => {
+        const inner = formatAmbiguousExampleAsPlainText(item);
+        return data.length > 1 ? `${i + 1}. ${inner}` : inner;
+      })
+      .join(" · ");
+  }
+  if (typeof data === "object") {
+    return Object.entries(data as Record<string, unknown>)
+      .map(([k, v]) => `${k}: ${formatAmbiguousExampleAsPlainText(v)}`)
+      .join(", ");
+  }
+  return String(data);
+}
+
 export default function CatalogUnifiedWizard() {
   const [flowStep, setFlowStep] = useState<FlowStep>(1);
   const [numericCharsDraft, setNumericCharsDraft] = useState<NumericCharacteristicsDraft>(() => defaultNumericCharacteristicsDraft());
@@ -669,22 +691,214 @@ export default function CatalogUnifiedWizard() {
                   : "Пересечений между созданными правилами не обнаружено"}
               </div>
               {ruleConflictsResult.has_conflicts && Array.isArray(ruleConflictsResult.conflicts) ? (
-                <div style={{ display: "grid", gap: 8 }}>
+                <div style={{ display: "grid", gap: 10 }}>
                   {(() => {
-                    const grouped = new Map<string, { left: string; rights: string[] }>();
-                    for (const c of ruleConflictsResult.conflicts as any[]) {
-                      const left = `#${c.left_rule_index} ${c.left_class_id ?? ""}`.trim();
-                      const right = `#${c.right_rule_index} ${c.right_class_id ?? ""}`.trim();
-                      const key = `${c.left_rule_index}|${c.left_class_id ?? ""}`;
-                      const row = grouped.get(key) ?? { left, rights: [] };
-                      row.rights.push(right);
-                      grouped.set(key, row);
+                    const conflicts = ruleConflictsResult.conflicts as any[];
+                    const grouped = new Map<string, { anchor: string; items: any[] }>();
+                    function ruleEntryLabel(c: any, idx: number, classFallback: string) {
+                      const titles = Array.isArray(c.rule_titles) ? c.rule_titles : [];
+                      const ids = Array.isArray(c.rule_class_ids) ? c.rule_class_ids : [];
+                      const t = titles[idx];
+                      const id = ids[idx];
+                      return `#${c.rule_indices?.[idx] ?? (idx === 0 ? c.left_rule_index : c.right_rule_index)} ${String(t || id || classFallback || "").trim()}`.trim();
+                    }
+                    for (const c of conflicts) {
+                      const ri = Array.isArray(c.rule_indices) && c.rule_indices.length > 0 ? c.rule_indices : [c.left_rule_index, c.right_rule_index];
+                      const anchorKey = ri.join(",");
+                      const anchorLabel =
+                        ri.length > 2
+                          ? `Группа: ${ri.map((_: number, i: number) => ruleEntryLabel(c, i, "")).join(", ")}`
+                          : ruleEntryLabel(c, 0, c.left_class_id || "");
+                      const row = grouped.get(anchorKey) ?? { anchor: anchorLabel, items: [] };
+                      row.items.push(c);
+                      grouped.set(anchorKey, row);
                     }
                     return [...grouped.values()].map((g, idx) => (
-                      <div key={`${g.left}-${idx}`} style={{ border: "1px solid #fecaca", borderRadius: 6, background: "#fff", padding: "8px 10px" }}>
-                        <div style={{ fontWeight: 700, color: "#7f1d1d", marginBottom: 4 }}>{g.left}</div>
-                        <div style={{ fontSize: 13, color: "#991b1b", lineHeight: 1.4 }}>
-                          Пересекается с: {g.rights.join(", ")}
+                      <div
+                        key={`${g.anchor}-${idx}`}
+                        style={{ border: "1px solid #fecaca", borderRadius: 6, background: "#fff", padding: "8px 10px" }}
+                      >
+                        <div style={{ fontWeight: 700, color: "#7f1d1d", marginBottom: 6 }}>{g.anchor}</div>
+                        {g.items.some((c: any) => Array.isArray(c.rule_indices) && c.rule_indices.length > 2) ? (
+                          <div style={{ fontSize: 12, color: "#991b1b", marginBottom: 8, lineHeight: 1.35 }}>
+                            Одна и та же декларация по эвристике может удовлетворить всем перечисленным правилам сразу (см. пример ниже).
+                          </div>
+                        ) : (
+                          <div style={{ fontSize: 12, color: "#991b1b", marginBottom: 8, lineHeight: 1.35 }}>
+                            Пересекается с:{" "}
+                            {g.items
+                              .map(
+                                (c: any) =>
+                                  `#${c.right_rule_index} ${String(c.right_title || c.right_class_id || "").trim()}`.trim(),
+                              )
+                              .join(", ")}
+                          </div>
+                        )}
+                        <div style={{ display: "grid", gap: 10 }}>
+                          {g.items.map((c: any, j: number) => {
+                            const ri = Array.isArray(c.rule_indices) && c.rule_indices.length > 0 ? c.rule_indices : [c.left_rule_index, c.right_rule_index];
+                            const isGroup = ri.length > 2;
+                            const pairOrGroupLabel = isGroup
+                              ? `Группа из ${ri.length} правил`
+                              : `#${c.left_rule_index} ${String(c.left_title || c.left_class_id || "").trim()} ↔ #${c.right_rule_index} ${String(c.right_title || c.right_class_id || "").trim()}`;
+                            const ex = c.ambiguous_example;
+                            const note = c.ambiguous_example_note_ru;
+                            return (
+                              <div
+                                key={`${ri.join("-")}-${j}`}
+                                style={{
+                                  borderTop: j === 0 ? undefined : "1px solid #fee2e2",
+                                  paddingTop: j === 0 ? 0 : 10,
+                                }}
+                              >
+                                {Array.isArray(c.overlap_columns) && c.overlap_columns.length > 0 ? (
+                                  <div style={{ marginBottom: 12 }}>
+                                    <div
+                                      style={{
+                                        display: "grid",
+                                        gridTemplateColumns: `repeat(${c.overlap_columns.length}, minmax(0, 1fr))`,
+                                        gap: 10,
+                                        alignItems: "start",
+                                      }}
+                                    >
+                                      {(c.overlap_columns as any[]).map((col: any) => (
+                                        <div
+                                          key={col.rule_index}
+                                          style={{
+                                            border: "1px solid #fecaca",
+                                            borderRadius: 8,
+                                            padding: "10px 12px",
+                                            background: "#fffdfd",
+                                            minHeight: 52,
+                                          }}
+                                        >
+                                          <div
+                                            style={{
+                                              fontWeight: 700,
+                                              fontSize: 13,
+                                              color: "#7f1d1d",
+                                              lineHeight: 1.35,
+                                              marginBottom: 8,
+                                            }}
+                                          >
+                                            {String(col.label_ru || "").trim() || `Правило ${col.rule_index}`}
+                                          </div>
+                                          <div
+                                            style={{
+                                              fontSize: 13,
+                                              color: "#0f172a",
+                                              lineHeight: 1.4,
+                                              wordBreak: "break-word",
+                                            }}
+                                          >
+                                            {String(col.constraints_compact_ru || "—")}
+                                          </div>
+                                        </div>
+                                      ))}
+                                    </div>
+                                    {c.overlap_axis_summary_ru && String(c.overlap_axis_summary_ru).trim() ? (
+                                      <div
+                                        style={{
+                                          fontSize: 13,
+                                          color: "#334155",
+                                          marginTop: 10,
+                                          lineHeight: 1.45,
+                                        }}
+                                      >
+                                        <span style={{ fontWeight: 700 }}>Пересечения: </span>
+                                        {String(c.overlap_axis_summary_ru)}
+                                      </div>
+                                    ) : null}
+                                  </div>
+                                ) : (
+                                  <div style={{ fontSize: 12, fontWeight: 650, color: "#7f1d1d", marginBottom: 4 }}>
+                                    {isGroup ? pairOrGroupLabel : `Пара: ${pairOrGroupLabel}`}
+                                  </div>
+                                )}
+                                {Array.isArray(c.range_intersections_ru) && c.range_intersections_ru.length > 0 ? (
+                                  <div style={{ marginTop: 6 }}>
+                                    <div style={{ fontSize: 12, fontWeight: 650, color: "#334155", marginBottom: 4 }}>
+                                      Пересечение диапазонов
+                                    </div>
+                                    <ul
+                                      style={{
+                                        margin: 0,
+                                        paddingLeft: 18,
+                                        fontSize: 12,
+                                        color: "#475569",
+                                        lineHeight: 1.45,
+                                      }}
+                                    >
+                                      {c.range_intersections_ru.map((line: string, k: number) => (
+                                        <li key={k}>{line}</li>
+                                      ))}
+                                    </ul>
+                                  </div>
+                                ) : null}
+                                {Array.isArray(c.adjustment_recommendations_ru) && c.adjustment_recommendations_ru.length > 0 ? (
+                                  <div style={{ marginTop: 8 }}>
+                                    <div style={{ fontSize: 12, fontWeight: 650, color: "#334155", marginBottom: 4 }}>
+                                      Рекомендации по правкам правил
+                                    </div>
+                                    <ul
+                                      style={{
+                                        margin: 0,
+                                        paddingLeft: 18,
+                                        fontSize: 12,
+                                        color: "#1e3a5f",
+                                        lineHeight: 1.45,
+                                      }}
+                                    >
+                                      {c.adjustment_recommendations_ru.map((line: string, k: number) => (
+                                        <li key={k}>{line}</li>
+                                      ))}
+                                    </ul>
+                                  </div>
+                                ) : null}
+                                {c.corridor_risk_ru && String(c.corridor_risk_ru).trim() ? (
+                                  <div style={{ fontSize: 12, color: "#9a3412", marginTop: 8, lineHeight: 1.35 }}>
+                                    {String(c.corridor_risk_ru)}
+                                  </div>
+                                ) : null}
+                                {c.priority_resolution_ru && String(c.priority_resolution_ru).trim() ? (
+                                  <div style={{ fontSize: 12, color: "#475569", marginTop: 6, lineHeight: 1.35 }}>
+                                    {String(c.priority_resolution_ru)}
+                                  </div>
+                                ) : null}
+                                {ex !== null && ex !== undefined ? (
+                                  <>
+                                    <div style={{ fontSize: 12, color: "#475569", marginBottom: 4, fontWeight: 650 }}>Пример:</div>
+                                    {!(Array.isArray(c.overlap_columns) && c.overlap_columns.length > 0) ? (
+                                      <div style={{ fontSize: 11, color: "#64748b", marginBottom: 4, lineHeight: 1.35 }}>
+                                        Признаки (текстом), по эвристике подходят под{" "}
+                                        {isGroup ? "все перечисленные классы" : "оба класса"} — проверьте вручную.
+                                      </div>
+                                    ) : null}
+                                    <div
+                                      style={{
+                                        margin: 0,
+                                        padding: "8px 10px",
+                                        background: "#f8fafc",
+                                        borderRadius: 6,
+                                        fontSize: 12,
+                                        lineHeight: 1.45,
+                                        color: "#0f172a",
+                                        border: "1px solid #e2e8f0",
+                                        wordBreak: "break-word",
+                                      }}
+                                    >
+                                      {formatAmbiguousExampleAsPlainText(ex)}
+                                    </div>
+                                  </>
+                                ) : (
+                                  <div style={{ fontSize: 12, color: "#94a3b8" }}>Пример признаков не сгенерирован.</div>
+                                )}
+                                {note && String(note).trim() ? (
+                                  <div style={{ fontSize: 12, color: "#92400e", marginTop: 6, lineHeight: 1.35 }}>{note}</div>
+                                ) : null}
+                              </div>
+                            );
+                          })}
                         </div>
                       </div>
                     ));

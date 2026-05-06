@@ -12,6 +12,7 @@ RUN PIP_CONFIG_FILE=/dev/null PIP_REQUIRE_HASHES=0 pip install --no-cache-dir -r
 COPY services/api-gateway/app /app/app
 COPY services/api-gateway/config /app/config
 COPY shared/json_recovery.py /app/app/json_recovery.py
+COPY shared/extraction_prompt.py /app/shared/extraction_prompt.py
 
 EXPOSE 8000
 

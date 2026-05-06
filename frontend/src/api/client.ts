@@ -146,7 +146,18 @@ export async function getClassificationRuleConflicts(ruleId: string): Promise<{
     right_class_id: string;
     left_title?: string | null;
     right_title?: string | null;
+    rule_indices?: number[];
+    rule_class_ids?: string[];
+    rule_titles?: Array<string | null | undefined>;
     reason_ru: string;
+    ambiguous_example?: Record<string, unknown> | null;
+    ambiguous_example_note_ru?: string | null;
+    range_intersections_ru?: string[];
+    adjustment_recommendations_ru?: string[];
+    overlap_axis_summary_ru?: string | null;
+    overlap_columns?: Array<{ rule_index: number; label_ru: string; constraints_compact_ru: string }>;
+    corridor_risk_ru?: string | null;
+    priority_resolution_ru?: string | null;
   }>;
 }> {
   const res = await fetchWithRetry(`${API_BASE}/rules/${ruleId}/classification-conflicts`, { method: "GET" });
@@ -439,6 +450,7 @@ export async function getPipelineConfig(): Promise<any> {
 export async function savePipelineConfig(body: {
   semantic_similarity_threshold?: number;
   semantic_neighbor_similarity_floor_s0?: number;
+  semantic_neighbor_weight_gamma?: number;
   semantic_support_threshold_tau2?: number;
 }): Promise<any> {
   const res = await fetchWithRetry(`${API_BASE}/admin/pipeline-config`, {

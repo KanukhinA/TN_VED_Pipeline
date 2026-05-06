@@ -50,7 +50,8 @@ export default function PromptGeneratorSettingsPage() {
       <div style={{ padding: "16px 18px", display: "grid", gap: 12 }}>
         <h2 style={{ margin: 0, fontSize: 17, fontWeight: 700, color: "#0f172a" }}>Генератор промптов</h2>
         <p style={{ margin: 0, color: "#334155", lineHeight: 1.5, fontSize: 14 }}>
-          Этот базовый текст используется как инструкция для модели, которая формирует системный текст извлечения признаков.
+          Только для кнопки «Сгенерировать основу промпта из справочника» на шаге извлечения признаков. В инспекторе и при
+          проверке извлечения этот текст не используется — там идёт поле «Промпт конфигурации».
         </p>
         {promptGeneratorMetaPath ? (
           <p style={{ margin: 0, color: "#64748b", lineHeight: 1.45, fontSize: 12 }}>

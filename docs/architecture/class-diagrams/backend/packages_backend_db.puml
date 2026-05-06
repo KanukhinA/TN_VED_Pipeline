@@ -1,0 +1,13 @@
+@startuml packages_backend_db
+set namespaceSeparator none
+package "app.db" as app.db {
+}
+package "app.db.base" as app.db.base {
+}
+package "app.db.models" as app.db.models {
+}
+package "app.db.session" as app.db.session {
+}
+app.db.models --> app.db.base
+app.db.session --> app.db.base
+@enduml

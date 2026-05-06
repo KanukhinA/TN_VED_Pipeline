@@ -1,0 +1,90 @@
+@startuml classes_backend_db
+set namespaceSeparator none
+class "app.db.base.Base" as app.db.base.Base {
+}
+class "app.db.models.AppSetting" as app.db.models.AppSetting {
+  __tablename__ : str
+  key : Mapped[str]
+  updated_at : Mapped[datetime]
+  value_json : Mapped[Dict[str, Any]]
+}
+class "app.db.models.ExpertDecisionItem" as app.db.models.ExpertDecisionItem {
+  __table_args__ : tuple
+  __tablename__ : str
+  category : Mapped[str]
+  created_at : Mapped[datetime]
+  declaration_id : Mapped[str]
+  id : Mapped[uuid.UUID]
+  payload_json : Mapped[Dict[str, Any]]
+  resolution_json : Mapped[Optional[Dict[str, Any]]]
+  resolved_at : Mapped[Optional[datetime]]
+  rule : Mapped[Optional['Rule']]
+  rule_id : Mapped[Optional[uuid.UUID]]
+  status : Mapped[str]
+  summary_ru : Mapped[str]
+}
+class "app.db.models.FewShotAssistRun" as app.db.models.FewShotAssistRun {
+  __table_args__ : tuple
+  __tablename__ : str
+  created_at : Mapped[datetime]
+  id : Mapped[uuid.UUID]
+  result_json : Mapped[Dict[str, Any]]
+  rule : Mapped['Rule']
+  rule_id : Mapped[uuid.UUID]
+}
+class "app.db.models.Rule" as app.db.models.Rule {
+  __table_args__ : tuple
+  __tablename__ : str
+  created_at : Mapped[datetime]
+  description : Mapped[Optional[str]]
+  few_shot_runs : Mapped[list['FewShotAssistRun']]
+  id : Mapped[uuid.UUID]
+  is_archived : Mapped[bool]
+  model_id : Mapped[str]
+  name : Mapped[Optional[str]]
+  reference_examples : Mapped[list['RuleReferenceExample']]
+  versions : Mapped[list['RuleVersion']]
+}
+class "app.db.models.RuleReferenceEmbedding" as app.db.models.RuleReferenceEmbedding {
+  __table_args__ : tuple
+  __tablename__ : str
+  created_at : Mapped[datetime]
+  embedding_json : Mapped[Dict[str, Any]]
+  embedding_model : Mapped[str]
+  id : Mapped[uuid.UUID]
+  reference_example : Mapped['RuleReferenceExample']
+  reference_example_id : Mapped[uuid.UUID]
+  updated_at : Mapped[datetime]
+}
+class "app.db.models.RuleReferenceExample" as app.db.models.RuleReferenceExample {
+  __table_args__ : tuple
+  __tablename__ : str
+  assigned_class_id : Mapped[str]
+  created_at : Mapped[datetime]
+  description_text : Mapped[str]
+  embedding : Mapped[Optional['RuleReferenceEmbedding']]
+  features_json : Mapped[Dict[str, Any]]
+  id : Mapped[uuid.UUID]
+  rule : Mapped['Rule']
+  rule_id : Mapped[uuid.UUID]
+}
+class "app.db.models.RuleVersion" as app.db.models.RuleVersion {
+  __table_args__ : tuple
+  __tablename__ : str
+  created_at : Mapped[datetime]
+  dsl_json : Mapped[Dict[str, Any]]
+  id : Mapped[uuid.UUID]
+  is_active : Mapped[bool]
+  model_id : Mapped[str]
+  rule : Mapped[Rule]
+  rule_id : Mapped[uuid.UUID]
+  version : Mapped[int]
+}
+app.db.models.AppSetting --|> app.db.base.Base
+app.db.models.ExpertDecisionItem --|> app.db.base.Base
+app.db.models.FewShotAssistRun --|> app.db.base.Base
+app.db.models.Rule --|> app.db.base.Base
+app.db.models.RuleReferenceEmbedding --|> app.db.base.Base
+app.db.models.RuleReferenceExample --|> app.db.base.Base
+app.db.models.RuleVersion --|> app.db.base.Base
+@enduml

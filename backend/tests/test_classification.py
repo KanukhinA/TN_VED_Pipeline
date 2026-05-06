@@ -27,6 +27,37 @@ def test_first_match_priority_and_order():
     assert ok and cls == "a" and not err
 
 
+def test_first_match_same_priority_prefers_stricter_gte():
+    """При одинаковом priority выигрывает правило с более высоким нижним порогом (gte)."""
+    g12 = RowIndicatorCondition(
+        type="rowIndicator",
+        array_path="показатели",
+        name_field="наименование",
+        name_equals="азот",
+        value_field="значение",
+        op="gte",
+        value=12.0,
+    )
+    g20 = RowIndicatorCondition(
+        type="rowIndicator",
+        array_path="показатели",
+        name_field="наименование",
+        name_equals="азот",
+        value_field="значение",
+        op="gte",
+        value=20.0,
+    )
+    cfg = ClassificationConfig(
+        strategy="first_match",
+        rules=[
+            ClassificationRule(class_id="lo", priority=0, conditions=[g12]),
+            ClassificationRule(class_id="hi", priority=0, conditions=[g20]),
+        ],
+    )
+    ok, cls, err = evaluate_classification({"показатели": [_row("азот", 25.0)]}, cfg)
+    assert ok and cls == "hi" and not err
+
+
 def test_row_indicator_primary_false_skipped_for_match():
     """Условие с primary=False не участвует в срабатывании правила."""
     cfg = ClassificationConfig(
@@ -97,7 +128,7 @@ def test_first_match_row_indicator_name_and_threshold():
 
 
 def test_row_indicator_value_min_max_one_row():
-    """При min и max цель — среднее; односторонне при одной границе."""
+    """При min+max используется включённый диапазон [min, max]."""
     cfg = ClassificationConfig(
         strategy="first_match",
         rules=[
@@ -123,7 +154,7 @@ def test_row_indicator_value_min_max_one_row():
     assert ok and cls == "band" and not err
 
     ok_mid, cls_mid, _ = evaluate_classification({"показатели": [_row("азот", 14.0)]}, cfg)
-    assert ok_mid and cls_mid == "other"
+    assert ok_mid and cls_mid == "band"
 
     ok_lo, cls_lo, _ = evaluate_classification({"показатели": [_row("азот", 9.0)]}, cfg)
     assert ok_lo and cls_lo == "other"

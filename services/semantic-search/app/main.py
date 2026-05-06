@@ -20,6 +20,9 @@ SPACE_MAX_POINTS = max(20, int(os.getenv("SEMANTIC_SEARCH_SPACE_MAX_POINTS", "25
 CACHE_MAX_ITEMS = max(1, int(os.getenv("SEMANTIC_SEARCH_EMBED_CACHE_MAX_ITEMS", "12")))
 DEFAULT_S0 = float(os.getenv("SEMANTIC_SEARCH_NEIGHBOR_FLOOR_S0", "0.35"))
 DEFAULT_TAU2 = float(os.getenv("SEMANTIC_SEARCH_SUPPORT_THRESHOLD_TAU2", "0.55"))
+# Степень γ для веса соседа: w_i = max(0, s_i - s0)^γ (γ=1 — линейно, как раньше; γ>1 — сильнее тянет решение к более похожим эталонам).
+# По смыслу близко к distance-weighted kNN (Dudani, 1976) и к ядрам K(d) на расстоянии до соседа; здесь маржа (s_i-s0) монотонна отступу по косинусу.
+DEFAULT_WEIGHT_GAMMA = float(os.getenv("SEMANTIC_SEARCH_NEIGHBOR_WEIGHT_GAMMA", "2"))
 EPS = float(os.getenv("SEMANTIC_SEARCH_SUPPORT_EPSILON", "1e-9"))
 
 _encoder: SentenceTransformer | None = None
@@ -91,6 +94,12 @@ class SearchRequest(BaseModel):
         le=1.0,
         description="Порог соседства s0: вклад соседей с sim<=s0 обнуляется.",
     )
+    neighbor_weight_gamma: float | None = Field(
+        default=None,
+        ge=1.0,
+        le=32.0,
+        description="Показатель степени для веса: w=max(0,s-s0)^γ (γ=1 — линейный вес по отступу от s0).",
+    )
     support_threshold_tau2: float | None = Field(
         default=None,
         ge=0.0,
@@ -108,6 +117,26 @@ class EmbedRequest(BaseModel):
     texts: list[str]
 
 
+def _neighbor_vote_weight(sim: float, s0: float, gamma: float) -> float:
+    margin = max(0.0, float(sim) - float(s0))
+    if margin <= 0.0:
+        return 0.0
+    g = float(gamma)
+    if not math.isfinite(g) or g < 1.0:
+        g = 1.0
+    return float(margin**g)
+
+
+def _effective_weight_gamma(payload: SearchRequest) -> float:
+    raw = payload.neighbor_weight_gamma
+    if raw is None:
+        return DEFAULT_WEIGHT_GAMMA
+    g = float(raw)
+    if not math.isfinite(g):
+        return DEFAULT_WEIGHT_GAMMA
+    return max(1.0, min(g, 32.0))
+
+
 def _stub_response(payload: SearchRequest, *, service_mode: str, note_ru: str) -> dict[str, Any]:
     matched = payload.tnved_code is not None and str(payload.tnved_code).startswith("27")
     similarity = 0.91 if matched else 0.41
@@ -115,6 +144,7 @@ def _stub_response(payload: SearchRequest, *, service_mode: str, note_ru: str) -
     tau1 = payload.similarity_threshold
     tau2 = payload.support_threshold_tau2 if payload.support_threshold_tau2 is not None else DEFAULT_TAU2
     s0 = payload.neighbor_similarity_floor_s0 if payload.neighbor_similarity_floor_s0 is not None else DEFAULT_S0
+    gamma = _effective_weight_gamma(payload)
     return {
         "matched": matched,
         "similarity": similarity,
@@ -123,6 +153,7 @@ def _stub_response(payload: SearchRequest, *, service_mode: str, note_ru: str) -
         "threshold_tau1": tau1,
         "threshold_tau2": tau2,
         "neighbor_similarity_floor_s0": s0,
+        "neighbor_weight_gamma": gamma,
         "support_p": 1.0 if matched else 0.0,
         "rule_id": payload.rule_id,
         "service_mode": service_mode,
@@ -247,6 +278,31 @@ def _build_feature_space_points(
     subset = pv[np.asarray(top_idx, dtype=np.intp)]
     stack = np.vstack([qv, subset])
     coords, method = _layout_embeddings_2d(stack)
+    # Коррекция радиуса в 2D:
+    # сохраняем направление из MDS, но расстояние от запроса задаём по реальной
+    # косинусной дистанции d = sqrt(2 * (1 - sim)). Это убирает ситуации, когда
+    # визуально "дальний" сосед выглядит ближе к запросу, чем "ближний".
+    if coords.shape[0] > 1:
+        qvec = qv[0]
+        dots = np.clip((subset @ qvec).astype(np.float64, copy=False), -1.0, 1.0)
+        target_r = np.sqrt(np.maximum(2.0 * (1.0 - dots), 0.0))
+        rmax = float(np.max(target_r)) if target_r.size else 0.0
+        if rmax > 1e-9:
+            target_r_norm = target_r / rmax
+            tail = coords[1:].astype(np.float64, copy=False)
+            cur_norm = np.linalg.norm(tail, axis=1)
+            for j in range(tail.shape[0]):
+                if cur_norm[j] > 1e-9:
+                    ux = tail[j, 0] / cur_norm[j]
+                    uy = tail[j, 1] / cur_norm[j]
+                else:
+                    # Детерминированное направление для вырожденных случаев.
+                    ang = 2.0 * math.pi * (j / max(1, tail.shape[0]))
+                    ux, uy = math.cos(ang), math.sin(ang)
+                tail[j, 0] = ux * target_r_norm[j]
+                tail[j, 1] = uy * target_r_norm[j]
+            coords[1:] = tail.astype(np.float32, copy=False)
+            method = f"{method}+query_radius_cosine"
 
     points.append(
         {
@@ -303,8 +359,9 @@ def _embedding_search(payload: SearchRequest, valid: list[tuple[str, str]]) -> d
     knn_k = max(1, min(int(payload.knn_k or 3), n_all))
     topk_idx = np.argsort(sims)[::-1][:knn_k]
 
-    # Взвешивание соседей: w_i = max(0, s_i - s0)
+    # Взвешивание соседей: w_i = max(0, s_i - s0)^γ (γ>=1; при γ=1 — линейно по отступу от порога s0).
     s0 = payload.neighbor_similarity_floor_s0 if payload.neighbor_similarity_floor_s0 is not None else DEFAULT_S0
+    gamma = _effective_weight_gamma(payload)
     tau1 = payload.similarity_threshold
     tau2 = payload.support_threshold_tau2 if payload.support_threshold_tau2 is not None else DEFAULT_TAU2
     votes: dict[str, dict[str, float]] = {}
@@ -312,7 +369,7 @@ def _embedding_search(payload: SearchRequest, valid: list[tuple[str, str]]) -> d
     for idx in topk_idx:
         cid = valid[int(idx)][1]
         sim = float(sims[int(idx)])
-        w = max(0.0, sim - s0)
+        w = _neighbor_vote_weight(sim, s0, gamma)
         total_weight += w
         bucket = votes.setdefault(cid, {"vw": 0.0, "count": 0.0, "best": -1.0})
         bucket["vw"] += w
@@ -351,12 +408,13 @@ def _embedding_search(payload: SearchRequest, valid: list[tuple[str, str]]) -> d
         "threshold_tau1": tau1,
         "threshold_tau2": tau2,
         "neighbor_similarity_floor_s0": s0,
+        "neighbor_weight_gamma": gamma,
         "support_p": support_p,
         "rule_id": payload.rule_id,
         "service_mode": "reference_embeddings",
         "note_ru": (
             f"Векторный поиск по эталонам справочника (модель {E5_MODEL_NAME}): "
-            f"класс выбран по kNN (k={knn_k}) с отсечением слабых соседей (s0={s0:.3f}), "
+            f"класс выбран по kNN (k={knn_k}) с отсечением слабых соседей (s0={s0:.3f}, вес ∝ max(0,s-s0)^{gamma:g}), "
             f"нормированной поддержкой P(c)={support_p:.3f} и двойным критерием (τ1={float(tau1 if tau1 is not None else -1.0):.3f}, τ2={tau2:.3f})."
         ),
         "embedding_model": E5_MODEL_NAME,
@@ -369,7 +427,7 @@ def _embedding_search(payload: SearchRequest, valid: list[tuple[str, str]]) -> d
                 "index": int(idx),
                 "class_id": valid[int(idx)][1],
                 "similarity": float(sims[int(idx)]),
-                "weight": float(max(0.0, float(sims[int(idx)]) - s0)),
+                "weight": float(_neighbor_vote_weight(float(sims[int(idx)]), s0, gamma)),
                 "description_text": valid[int(idx)][0],
             }
             for idx in topk_idx
@@ -466,6 +524,7 @@ def search(payload: SearchRequest) -> dict[str, object]:
                 knn_k = max(1, min(int(payload.knn_k or 3), n_all))
                 topk_idx = np.argsort(sims)[::-1][:knn_k]
                 s0 = payload.neighbor_similarity_floor_s0 if payload.neighbor_similarity_floor_s0 is not None else DEFAULT_S0
+                gamma = _effective_weight_gamma(payload)
                 tau1 = payload.similarity_threshold
                 tau2 = payload.support_threshold_tau2 if payload.support_threshold_tau2 is not None else DEFAULT_TAU2
                 votes: dict[str, dict[str, float]] = {}
@@ -473,7 +532,7 @@ def search(payload: SearchRequest) -> dict[str, object]:
                 for i in topk_idx:
                     cls = classes[int(i)]
                     sim = float(sims[int(i)])
-                    w = max(0.0, sim - s0)
+                    w = _neighbor_vote_weight(sim, s0, gamma)
                     total_weight += w
                     v = votes.get(cls) or {"vw": 0.0, "count": 0.0, "best": -1e9}
                     v["vw"] += w
@@ -518,6 +577,7 @@ def search(payload: SearchRequest) -> dict[str, object]:
                     "threshold_tau1": payload.similarity_threshold,
                     "threshold_tau2": tau2,
                     "neighbor_similarity_floor_s0": s0,
+                    "neighbor_weight_gamma": gamma,
                     "support_p": support_p,
                     "rule_id": payload.rule_id,
                     "service_mode": "reference_embeddings_precomputed",
@@ -531,7 +591,7 @@ def search(payload: SearchRequest) -> dict[str, object]:
                             "description_text": valid[int(i)][0],
                             "class_id": valid[int(i)][1],
                             "similarity": float(sims[int(i)]),
-                            "weight": max(0.0, float(sims[int(i)]) - s0),
+                            "weight": float(_neighbor_vote_weight(float(sims[int(i)]), s0, gamma)),
                         }
                         for i in topk_idx
                     ],

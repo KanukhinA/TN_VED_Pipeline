@@ -107,6 +107,11 @@ function extractionRuntimeFromStored(c: any): FeatureExtractionConfig["extractio
   };
 }
 
+/**
+ * Краткое текстовое резюме схемы справочника для UI и поля meta.extraction_rules_preview.
+ * Не подмешивается в запрос к модели при проверке промпта — как и в officer_run
+ * (там только пользовательский промпт + «Текст для извлечения»).
+ */
 function buildRulesPreviewFromDsl(dsl: any): string {
   const lines: string[] = [];
   const modelId = String(dsl?.model_id ?? "").trim();
@@ -115,11 +120,11 @@ function buildRulesPreviewFromDsl(dsl: any): string {
   const ncDraft = dsl?.meta?.numeric_characteristics_draft;
   const draftChars: any[] = Array.isArray(ncDraft?.characteristics) ? ncDraft.characteristics : [];
 
-  lines.push("AUTO RULES FROM CATALOG");
+  lines.push("Справочник (кратко)");
   if (modelId) lines.push(`model_id: ${modelId}`);
   if (tnved) lines.push(`tn_ved_group_code: ${tnved}`);
   lines.push("");
-  lines.push("Extract numeric features:");
+  lines.push("Числовые признаки по схеме:");
 
   if (draftChars.length > 0) {
     for (const ch of draftChars) {
@@ -127,7 +132,7 @@ function buildRulesPreviewFromDsl(dsl: any): string {
       const col = String(ch?.componentColumnKey ?? "").trim();
       const unit = String(ch?.unit ?? "").trim();
       if (!key) continue;
-      lines.push(`- ${key}${unit ? ` [${unit}]` : ""}${col ? ` -> ${col}` : ""}`);
+      lines.push(`- ${key}${unit ? ` [${unit}]` : ""}${col ? ` → ${col}` : ""}`);
     }
   } else if (schemaProps.length > 0) {
     for (const p of schemaProps) {
@@ -141,10 +146,7 @@ function buildRulesPreviewFromDsl(dsl: any): string {
   }
 
   lines.push("");
-  lines.push("Output format:");
-  lines.push("- Return strict JSON object only");
-  lines.push('- Use key "numeric_features"');
-  lines.push("- Keep numeric values normalized (dot as decimal separator)");
+  lines.push("Формат JSON задаётся в промпте конфигурации; числа — с точкой как разделителем.");
 
   return lines.join("\n");
 }
@@ -992,12 +994,21 @@ export default function FeatureExtractionSettingsPage() {
       setError("Нет данных справочника или конфигурации.");
       return;
     }
-    let metaInstructionText: string | undefined;
+    let metaInstructionText: string;
     try {
       const savedMeta = await getFeatureExtractionPromptGeneratorMeta();
-      metaInstructionText = String(savedMeta.template ?? "").trim() || undefined;
+      metaInstructionText = String(savedMeta.template ?? "").trim();
     } catch {
-      metaInstructionText = undefined;
+      setError(
+        "Не удалось загрузить базовый текст генератора. Проверьте API и раздел «Генератор промптов» в общих настройках.",
+      );
+      return;
+    }
+    if (!metaInstructionText) {
+      setError(
+        "Базовый промпт генератора пуст. Откройте «Генератор промптов», введите инструкцию для модели-промпт-инженера и сохраните.",
+      );
+      return;
     }
     const built = buildFeatureExtractionPromptGeneratorRequest(loadedDsl, { metaInstructionText });
     if (!built.ok) {
@@ -1087,7 +1098,6 @@ export default function FeatureExtractionSettingsPage() {
     setTestDetailsExpanded(false);
     try {
       const rows: { sample: string; result: any }[] = [];
-      const rules_preview = loadedDsl ? buildRulesPreviewFromDsl(loadedDsl) : undefined;
       const runtime = extractionRuntimeToDsl(activeConfig.extraction_runtime);
       for (let i = 0; i < samples.length; i += 1) {
         setLlmOpProgress({ done: i, total });
@@ -1096,7 +1106,6 @@ export default function FeatureExtractionSettingsPage() {
           prompt: effectivePrompt,
           sample_text: samples[i],
           runtime,
-          rules_preview,
         });
         rows.push({ sample: samples[i], result: res });
       }
@@ -1176,7 +1185,6 @@ export default function FeatureExtractionSettingsPage() {
           prompt: effectivePrompt,
           sample_text: text,
           runtime: extractionRuntimeToDsl(activeConfig.extraction_runtime),
-          rules_preview: loadedDsl ? buildRulesPreviewFromDsl(loadedDsl) : undefined,
         });
         rows.push({
           rowNumber,
@@ -1642,7 +1650,13 @@ export default function FeatureExtractionSettingsPage() {
                   marginBottom: 8,
                 }}
               >
-                <span style={{ fontWeight: 600, fontSize: 15 }}>Промпт конфигурации</span>
+                <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                  <span style={{ fontWeight: 600, fontSize: 15 }}>Промпт конфигурации</span>
+                  <span style={{ fontSize: 12, color: "#64748b", lineHeight: 1.4, fontWeight: 400 }}>
+                    Используется при извлечении признаков и в интерфейсе инспектора. Базовый текст из «Генератора промптов»
+                    сюда не подставляется — он только для кнопки генерации основы ниже.
+                  </span>
+                </div>
                 <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
                   {activeConfig.selected_models.length > 0 ? (
                     <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, color: "#334155" }}>

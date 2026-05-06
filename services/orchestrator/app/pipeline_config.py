@@ -8,6 +8,7 @@ from pathlib import Path
 
 DEFAULT_THRESHOLD = 0.75
 DEFAULT_NEIGHBOR_FLOOR_S0 = 0.35
+DEFAULT_NEIGHBOR_WEIGHT_GAMMA = 2.0
 DEFAULT_SUPPORT_THRESHOLD_TAU2 = 0.55
 
 
@@ -48,6 +49,19 @@ def _load_pipeline_dict() -> dict:
     except Exception:
         pass
     return {}
+
+
+def load_semantic_neighbor_weight_gamma() -> float:
+    raw = _load_pipeline_dict()
+    if "semantic_neighbor_weight_gamma" in raw:
+        try:
+            return max(1.0, min(float(raw["semantic_neighbor_weight_gamma"]), 32.0))
+        except (TypeError, ValueError):
+            pass
+    try:
+        return float(os.getenv("SEMANTIC_NEIGHBOR_WEIGHT_GAMMA", str(DEFAULT_NEIGHBOR_WEIGHT_GAMMA)))
+    except (TypeError, ValueError):
+        return DEFAULT_NEIGHBOR_WEIGHT_GAMMA
 
 
 def load_semantic_neighbor_similarity_floor_s0() -> float:

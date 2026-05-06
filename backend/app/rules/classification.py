@@ -24,9 +24,6 @@ class ClassificationError(BaseModel):
     details: Optional[Dict[str, Any]] = None
 
 
-# Как у rowPairRatio: при value_min+value_max целевое значение — среднее, проверка «≈» по относительному допуску.
-_ROW_INDICATOR_RANGE_TARGET_TOLERANCE_REL = 0.001
-
 # Максимум относительной погрешности для rowPairRatio при сравнении фактического отношения value(left)/value(right)
 # с ratio_left/ratio_right. В DSL допускается до 1.0; иначе при tolerance_rel ≥ 0.5 пара 26:26 проходит проверку «2:1»
 # (|26·1−26·2|/max ≤ 0.5). Кламп не меняет типичные правила с tolerance_rel ≤ 0.01.
@@ -38,14 +35,83 @@ def _row_indicator_value_matches_range(lf: float, cond: RowIndicatorCondition) -
     vmin = cond.value_min
     vmax = cond.value_max
     if vmin is not None and vmax is not None:
-        # Для совместимости трактуем диапазон как цель со сравнением по относительному допуску.
-        target = (vmin + vmax) / 2.0
-        return _formula_compare_numeric(lf, "equals", target, _ROW_INDICATOR_RANGE_TARGET_TOLERANCE_REL)
+        return vmin <= lf <= vmax
     if vmin is not None:
         return lf >= vmin
     if vmax is not None:
         return lf <= vmax
     return False
+
+
+def row_indicator_numeric_value_satisfies(lf: float, cond: RowIndicatorCondition) -> bool:
+    """
+    Проверка числа для ячейки так же, как в рантайме при подстановке одного числового значения
+    (без обхода массива строк). Используется анализом пересечений правил.
+    """
+    has_range = cond.value_min is not None or cond.value_max is not None
+    if has_range:
+        return _row_indicator_value_matches_range(lf, cond)
+    if cond.op is not None:
+        return bool(_compare(lf, cond.op, cond.value))
+    return False
+
+
+def _rule_first_match_tiebreak_score(rule: ClassificationRule) -> float:
+    """
+    Эвристика «строгости» при равном priority: выше score — предпочтительнее при first_match.
+    Нижняя граница порога (gte/gt) увеличивает score; верхняя (lte/lt) — отрицательное смещение.
+    """
+    score = 0.0
+    for c in rule.conditions or []:
+        if not _condition_is_primary(c):
+            continue
+        if isinstance(c, RowIndicatorCondition):
+            if c.value_min is not None or c.value_max is not None:
+                continue
+            op = str(c.op or "")
+            try:
+                v = float(c.value)
+            except (TypeError, ValueError):
+                continue
+            if op in ("gte", "gt"):
+                score += v
+            elif op in ("lte", "lt"):
+                score -= v
+        elif isinstance(c, PathClassificationCondition):
+            op = str(c.op)
+            try:
+                v = float(c.value)
+            except (TypeError, ValueError):
+                continue
+            if op in ("gte", "gt"):
+                score += v
+            elif op in ("lte", "lt"):
+                score -= v
+    return score
+
+
+def select_rule_for_first_match(
+    matches: List[ClassificationRule],
+    ordered: List[ClassificationRule],
+) -> ClassificationRule:
+    """
+    Среди правил, для которых _rule_matches(data, rule) истинно, выбираем одно «победителя».
+
+    1) Один матч — возвращаем его.
+    2) Иначе узкий слой с минимальным priority (чем меньше число, тем выше приоритет в конфиге).
+    3) Внутри слоя с одинаковым priority — максимум tiebreak_score (более высокий нижний порог gte и т.п.).
+    4) При равном score — правило, что раньше в ordered (стабильный запасной тай-брейк).
+    """
+    if len(matches) == 1:
+        return matches[0]
+    best_pri = min(r.priority for r in matches)
+    tier = [r for r in matches if r.priority == best_pri]
+    if len(tier) == 1:
+        return tier[0]
+    return sorted(
+        tier,
+        key=lambda r: (-_rule_first_match_tiebreak_score(r), ordered.index(r)),
+    )[0]
 
 
 def _condition_is_primary(cond: ClassificationCondition) -> bool:
@@ -206,19 +272,26 @@ def _condition_to_ru(cond: ClassificationCondition) -> str:
         return f"{field_name}: {_op_to_text(cond.op)} {_value_to_ru(cond.value)}"
     if isinstance(cond, RowIndicatorCondition):
         if cond.value_min is not None or cond.value_max is not None:
+            lo = cond.value_min if cond.value_min is not None else "—"
+            hi = cond.value_max if cond.value_max is not None else "—"
             return (
-                f"rowIndicator `{cond.name_equals}`: "
-                f"{cond.value_min if cond.value_min is not None else '-inf'}.."
-                f"{cond.value_max if cond.value_max is not None else '+inf'}"
+                f"для строки с показателем «{cond.name_equals}» число должно соответствовать диапазону от {lo} до {hi} "
+                f"(как в мастере: «У поля с таким значением, диапазон числа»)"
             )
-        return f"rowIndicator `{cond.name_equals}`: {_op_to_text(str(cond.op or 'equals'))} {cond.value!r}"
+        return (
+            f"для строки с показателем «{cond.name_equals}» число в таблице: "
+            f"{_op_to_text(str(cond.op or 'equals'))} {_value_to_ru(cond.value)}"
+        )
     if isinstance(cond, RowPairRatioCondition):
         return (
-            f"rowPairRatio `{cond.left_name}`:`{cond.right_name}` ~= "
-            f"{cond.ratio_left}:{cond.ratio_right} (tol={cond.tolerance_rel})"
+            f"«Отношение двух показателей (A : B = …)»: «{cond.left_name}» к «{cond.right_name}» "
+            f"в пропорции {cond.ratio_left} : {cond.ratio_right} (допуск {cond.tolerance_rel})"
         )
     if isinstance(cond, RowFormulaCondition):
-        return f"rowFormula `{cond.formula}` {_op_to_text(cond.op)} {cond.expected}"
+        return (
+            f"«Формула по нескольким показателям»: выражение {cond.formula!r} — "
+            f"{_op_to_text(cond.op)} {_value_to_ru(cond.value)}"
+        )
     return "условие неизвестного типа"
 
 
@@ -372,16 +445,16 @@ def find_first_matching_classification_rule(
     data: Any,
     config: Optional[ClassificationConfig],
 ) -> Optional[ClassificationRule]:
-    """Для strategy first_match — первое подошедшее правило (для подписей в UI)."""
+    """Для strategy first_match — выигравшее подошедшее правило (тот же выбор, что при назначении класса)."""
     if config is None or not config.rules:
         return None
     if config.strategy != "first_match":
         return None
     ordered = _ordered_rules_list(config.rules)
-    for rule in ordered:
-        if _rule_matches(data, rule):
-            return rule
-    return None
+    matches = [r for r in ordered if _rule_matches(data, r)]
+    if not matches:
+        return None
+    return select_rule_for_first_match(matches, ordered)
 
 
 def evaluate_classification(
@@ -399,10 +472,12 @@ def evaluate_classification(
     ordered = _ordered_rules_list(config.rules)
 
     if config.strategy == "first_match":
-        # Возвращаем первый матч; при отсутствии используем default_class_id.
-        for rule in ordered:
-            if _rule_matches(data, rule):
-                return (True, rule.class_id, [])
+        # Перебираем не «первое совпавшее по списку», а все совпадения: затем select_rule_for_first_match
+        # уважает priority и при равенстве — более узкие числовые пороги (см. _rule_first_match_tiebreak_score).
+        matches = [r for r in ordered if _rule_matches(data, r)]
+        if matches:
+            winner = select_rule_for_first_match(matches, ordered)
+            return (True, winner.class_id, [])
         if config.default_class_id:
             return (True, config.default_class_id, [])
         return (
@@ -417,7 +492,7 @@ def evaluate_classification(
         )
 
     if config.strategy == "exactly_one":
-        # Для strictly-one собираем все совпадения и применяем стратегию разрешения неоднозначности.
+        # Ветвление по числу совпадений: 0 / 1 / несколько; при нескольких — отдельная политика из конфига.
         matched_indices = [i for i, r in enumerate(ordered) if _rule_matches(data, r)]
         if len(matched_indices) == 1:
             return (True, ordered[matched_indices[0]].class_id, [])
@@ -427,9 +502,10 @@ def evaluate_classification(
             return (True, None, [])
         res = config.ambiguous_match_resolution
         if res == "by_priority":
+            # Один класс: правило с минимальным priority; при равенстве — более ранний индекс в ordered.
             bi = min(matched_indices, key=lambda i: (ordered[i].priority, i))
             return (True, ordered[bi].class_id, [])
-        # comma_join и legacy reject: несколько правил — все подходящие class_id через запятую (порядок — порядок правил).
+        # comma_join (и устаревший reject): склеиваем уникальные class_id в порядке появления правил в списке.
         seen: set[str] = set()
         parts: List[str] = []
         for i in matched_indices:

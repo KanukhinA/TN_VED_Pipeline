@@ -12,6 +12,7 @@ import PrimaryCatalogSettingsSection from "../ui/PrimaryCatalogSettingsSection";
 export default function SemanticFallbackSettingsPage() {
   const [semanticThreshold, setSemanticThreshold] = React.useState<number>(0.75);
   const [semanticNeighborFloorS0, setSemanticNeighborFloorS0] = React.useState<number>(0.35);
+  const [semanticNeighborWeightGamma, setSemanticNeighborWeightGamma] = React.useState<number>(2);
   const [semanticSupportTau2, setSemanticSupportTau2] = React.useState<number>(0.55);
   const [status, setStatus] = React.useState<string | null>(null);
   const [busy, setBusy] = React.useState(false);
@@ -29,12 +30,16 @@ export default function SemanticFallbackSettingsPage() {
         const cfg = await getPipelineConfig();
         const t = cfg?.effective?.semantic_similarity_threshold;
         const s0 = cfg?.effective?.semantic_neighbor_similarity_floor_s0;
+        const gamma = cfg?.effective?.semantic_neighbor_weight_gamma;
         const tau2 = cfg?.effective?.semantic_support_threshold_tau2;
         if (!cancelled && typeof t === "number" && Number.isFinite(t)) {
           setSemanticThreshold(t);
         }
         if (!cancelled && typeof s0 === "number" && Number.isFinite(s0)) {
           setSemanticNeighborFloorS0(s0);
+        }
+        if (!cancelled && typeof gamma === "number" && Number.isFinite(gamma)) {
+          setSemanticNeighborWeightGamma(gamma);
         }
         if (!cancelled && typeof tau2 === "number" && Number.isFinite(tau2)) {
           setSemanticSupportTau2(tau2);
@@ -72,6 +77,7 @@ export default function SemanticFallbackSettingsPage() {
   async function onSave() {
     const next = Number(semanticThreshold);
     const nextS0 = Number(semanticNeighborFloorS0);
+    const nextGamma = Number(semanticNeighborWeightGamma);
     const nextTau2 = Number(semanticSupportTau2);
     if (!Number.isFinite(next) || next < 0 || next > 1) {
       setStatus("τ1 должен быть числом в диапазоне 0…1.");
@@ -79,6 +85,10 @@ export default function SemanticFallbackSettingsPage() {
     }
     if (!Number.isFinite(nextS0) || nextS0 < -1 || nextS0 > 1) {
       setStatus("s0 должен быть числом в диапазоне -1…1.");
+      return;
+    }
+    if (!Number.isFinite(nextGamma) || nextGamma < 1 || nextGamma > 32) {
+      setStatus("γ должна быть числом в диапазоне 1…32.");
       return;
     }
     if (!Number.isFinite(nextTau2) || nextTau2 < 0 || nextTau2 > 1) {
@@ -91,6 +101,7 @@ export default function SemanticFallbackSettingsPage() {
       await savePipelineConfig({
         semantic_similarity_threshold: next,
         semantic_neighbor_similarity_floor_s0: nextS0,
+        semantic_neighbor_weight_gamma: nextGamma,
         semantic_support_threshold_tau2: nextTau2,
       });
       setStatus("Параметры семантической проверки сохранены.");
@@ -180,10 +191,37 @@ export default function SemanticFallbackSettingsPage() {
             &gt; τ<sub>1</sub> и P(c<sup>^</sup>) &gt; τ<sub>2</sub>; иначе match = 0.
           </div>
           <div style={{ marginTop: 6 }}>
-            <strong>Смысл коэффициентов:</strong> τ<sub>1</sub> — минимальная сила лучшего совпадения; s<sub>0</sub> —
-            отсечка слабых соседей (вес соседа{" "}
-            <span style={{ fontFamily: `"Cambria Math", "Times New Roman", serif` }}>w = max(0, s - s<sub>0</sub>)</span>
-            ); τ<sub>2</sub> — минимальная коллективная поддержка выбранного класса.
+            <strong>Интерпретация параметров.</strong>{" "}
+            <span style={{ fontFamily: `"Cambria Math", "Times New Roman", serif` }}>τ<sub>1</sub></span> — нижняя
+            граница косинусной близости лучшего эталона среди соседей, претендующих на класс{" "}
+            <span style={{ fontFamily: `"Cambria Math", "Times New Roman", serif` }}>
+              c<sup>^</sup>
+            </span>
+            : рост τ<sub>1</sub> ужесточает критерий и снижает долю автоматически принимаемых решений, снижение τ<sub>1</sub>{" "}
+            делает допуск более мягким.{" "}
+            <span style={{ fontFamily: `"Cambria Math", "Times New Roman", serif` }}>s<sub>0</sub></span> — порог
+            отсечения по схожести: соседи с{" "}
+            <span style={{ fontFamily: `"Cambria Math", "Times New Roman", serif` }}>s ≤ s<sub>0</sub></span> не
+            участвуют в голосовании; при больших s<sub>0</sub> вносят вклад только наиболее близкие к запросу эталоны (весовая
+            поддержка классов сужается), при малых s<sub>0</sub> в голосовании участвует больше соседей со средней близостью.
+            Ненулевой вес соседа задаётся выражением{" "}
+            <span style={{ fontFamily: `"Cambria Math", "Times New Roman", serif` }}>
+              w = max(0, s - s<sub>0</sub>)<sup>γ</sup>
+            </span>
+            , где{" "}
+            <span style={{ fontFamily: `"Cambria Math", "Times New Roman", serif` }}>γ ≥ 1</span>: при{" "}
+            <span style={{ fontFamily: `"Cambria Math", "Times New Roman", serif` }}>γ = 1</span> вес линейно зависит от
+            отступа схожести над порогом — как во взвешенных схемах голосования по фиксированному числу ближайших соседей
+            при монотонном убывании веса с уменьшением близости к запросу; рост γ усиливает
+            преимущество соседей с максимальной схожестью и ослабляет влияние множества умеренно близких эталонов.{" "}
+            <span style={{ fontFamily: `"Cambria Math", "Times New Roman", serif` }}>τ<sub>2</sub></span> — минимальная
+            нормированная доля суммарного веса класса{" "}
+            <span style={{ fontFamily: `"Cambria Math", "Times New Roman", serif` }}>
+              P(c<sup>^</sup>)
+            </span>{" "}
+            среди соседей, участвующих в голосовании; увеличение τ<sub>2</sub> требует более выраженного консенсуса по классу и отсекает случаи
+            размытого распределения весов, уменьшение τ<sub>2</sub> допускает решение при более равномерном распределении
+            голосов между классами.
           </div>
         </div>
 
@@ -217,6 +255,20 @@ export default function SemanticFallbackSettingsPage() {
               step={0.01}
               value={semanticNeighborFloorS0}
               onChange={(e) => setSemanticNeighborFloorS0(Number(e.target.value))}
+              style={{ width: 90, padding: "6px 8px", borderRadius: 6, border: "1px solid #cbd5e1" }}
+            />
+          </label>
+          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span style={{ fontWeight: 600 }}>
+              γ · степень нелинейности веса max(0, s − s<sub>0</sub>)<sup>γ</sup> (1…32)
+            </span>
+            <input
+              type="number"
+              min={1}
+              max={32}
+              step={0.25}
+              value={semanticNeighborWeightGamma}
+              onChange={(e) => setSemanticNeighborWeightGamma(Number(e.target.value))}
               style={{ width: 90, padding: "6px 8px", borderRadius: 6, border: "1px solid #cbd5e1" }}
             />
           </label>

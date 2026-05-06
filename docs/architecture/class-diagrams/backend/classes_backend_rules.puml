@@ -1,0 +1,256 @@
+@startuml classes_backend_rules
+set namespaceSeparator none
+class ".Literal" as .Literal {
+}
+class ".Literal" as .Literal {
+}
+class ".Literal" as .Literal {
+}
+class ".Literal" as .Literal {
+}
+class ".Literal" as .Literal {
+}
+class ".Literal" as .Literal {
+}
+class "app.rules.classification.ClassificationError" as app.rules.classification.ClassificationError {
+  details : Optional[Dict[str, Any]]
+  message : str
+}
+class "app.rules.compiler.CompiledRule" as app.rules.compiler.CompiledRule {
+  classification : Optional[ClassificationConfig]
+  cross_rules : List[Any]
+  model : Type[BaseModel]
+  model_id : str
+  root_schema
+  rule_id : Optional[str]
+  validate(data: Any) -> Tuple[bool, List[Any], Optional[Any], Optional[str]]
+}
+class "app.rules.cross_rules.CrossRuleError" as app.rules.cross_rules.CrossRuleError {
+  details : Optional[Dict[str, Any]]
+  message : str
+  path : Optional[str]
+  template : str
+}
+class "app.rules.dsl_models.ArrayFieldSchema" as app.rules.dsl_models.ArrayFieldSchema {
+  items : str
+  max_items : Optional[int]
+  min_items : Optional[int]
+  type : Literal['array']
+}
+class "app.rules.dsl_models.AtLeastOnePresentRule" as app.rules.dsl_models.AtLeastOnePresentRule {
+  min_count : int
+  model_config
+  paths : List[str]
+  template : Literal['atLeastOnePresent']
+}
+class "app.rules.dsl_models.BaseFieldSchema" as app.rules.dsl_models.BaseFieldSchema {
+  model_config
+  title : Optional[str]
+  type
+}
+class "app.rules.dsl_models.BooleanFieldSchema" as app.rules.dsl_models.BooleanFieldSchema {
+  type : Literal['boolean']
+}
+class "app.rules.dsl_models.ClassificationConfig" as app.rules.dsl_models.ClassificationConfig {
+  ambiguous_match_resolution
+  declared_class_path : Optional[str]
+  default_class_id : Optional[str]
+  model_config
+  rules : List[ClassificationRule]
+  strategy
+  _migrate_legacy_validate_declared(data: Any) -> Any
+}
+class "app.rules.dsl_models.ClassificationRule" as app.rules.dsl_models.ClassificationRule {
+  class_id : str
+  condition_groups : List[str]
+  conditions : List[ClassificationCondition]
+  model_config
+  priority : int
+  title : Optional[str]
+  tn_ved_group_code : Optional[str]
+  _normalize_class_tn_ved(v: Any) -> Optional[str]
+}
+class "app.rules.dsl_models.ComparisonCond" as app.rules.dsl_models.ComparisonCond {
+  model_config
+  op
+  path : str
+  value : Optional[Union[str, float, int, bool, List[Union[str, float, int, bool]]]]
+}
+class "app.rules.dsl_models.ComparisonOp" as app.rules.dsl_models.ComparisonOp {
+}
+class "app.rules.dsl_models.IntegerConstraints" as app.rules.dsl_models.IntegerConstraints {
+  enum : Optional[List[int]]
+  max : Optional[int]
+  min : Optional[int]
+  multiple_of : Optional[int]
+}
+class "app.rules.dsl_models.IntegerFieldSchema" as app.rules.dsl_models.IntegerFieldSchema {
+  constraints : Optional[IntegerConstraints]
+  type : Literal['integer']
+}
+class "app.rules.dsl_models.NumberConstraints" as app.rules.dsl_models.NumberConstraints {
+  enum : Optional[List[float]]
+  max : Optional[float]
+  min : Optional[float]
+  multiple_of : Optional[float]
+}
+class "app.rules.dsl_models.NumberFieldSchema" as app.rules.dsl_models.NumberFieldSchema {
+  constraints : Optional[NumberConstraints]
+  type : Literal['number']
+  _drop_legacy_allow_interval_key(data: Any) -> Any
+}
+class "app.rules.dsl_models.ObjectFieldSchema" as app.rules.dsl_models.ObjectFieldSchema {
+  additional_properties : bool
+  properties : List[PropertyDef]
+  required : List[str]
+  type : Literal['object']
+}
+class "app.rules.dsl_models.PathClassificationCondition" as app.rules.dsl_models.PathClassificationCondition {
+  conjunction
+  group_id : Optional[str]
+  model_config
+  op
+  path : str
+  primary : bool
+  type : Literal['path']
+  value : Optional[Union[str, float, int, bool, List[Union[str, float, int, bool]]]]
+}
+class "app.rules.dsl_models.PropertyDef" as app.rules.dsl_models.PropertyDef {
+  model_config
+  name : str
+  schema_ : str
+}
+class "app.rules.dsl_models.RequiredIfRule" as app.rules.dsl_models.RequiredIfRule {
+  if_
+  model_config
+  template : Literal['requiredIf']
+  then : str
+}
+class "app.rules.dsl_models.RowFormulaCondition" as app.rules.dsl_models.RowFormulaCondition {
+  array_path : str
+  conjunction
+  formula : str
+  group_id : Optional[str]
+  model_config
+  name_field : str
+  op
+  primary : bool
+  tolerance_rel : float
+  type : Literal['rowFormula']
+  value : float
+  value_field : str
+  variables : Dict[str, str]
+  _normalize_variable_map(v: Any) -> Dict[str, str]
+  _validate_keys_and_formula() -> RowFormulaCondition
+}
+class "app.rules.dsl_models.RowIndicatorCondition" as app.rules.dsl_models.RowIndicatorCondition {
+  array_path : str
+  conjunction
+  group_id : Optional[str]
+  model_config
+  name_equals : str
+  name_field : str
+  op : Optional[ComparisonOpType]
+  primary : bool
+  type : Literal['rowIndicator']
+  value : Optional[Union[str, float, int, bool, List[Union[str, float, int, bool]]]]
+  value_field : str
+  value_max : Optional[float]
+  value_min : Optional[float]
+  _row_indicator_range_or_op() -> RowIndicatorCondition
+}
+class "app.rules.dsl_models.RowPairRatioCondition" as app.rules.dsl_models.RowPairRatioCondition {
+  array_path : str
+  conjunction
+  group_id : Optional[str]
+  left_name : str
+  model_config
+  name_field : str
+  primary : bool
+  ratio_left : float
+  ratio_right : float
+  right_name : str
+  tolerance_rel : float
+  type : Literal['rowPairRatio']
+  value_field : str
+  _names_distinct() -> RowPairRatioCondition
+  _normalize_pair_names(v: Any) -> str
+}
+class "app.rules.dsl_models.RuleDSL" as app.rules.dsl_models.RuleDSL {
+  classification : Optional[ClassificationConfig]
+  cross_rules : List[CrossRule]
+  meta : Optional[RuleMeta]
+  model_config
+  model_id : str
+  schema_
+}
+class "app.rules.dsl_models.RuleMeta" as app.rules.dsl_models.RuleMeta {
+  description : Optional[str]
+  expert_draft : Optional[Dict[str, Any]]
+  feature_extraction_active_config_id : Optional[str]
+  feature_extraction_configs : Optional[List[Dict[str, Any]]]
+  model_config
+  name : Optional[str]
+  numeric_characteristics_draft : Optional[Dict[str, Any]]
+  tn_ved_group_code : Optional[str]
+  version_label : Optional[str]
+  _normalize_tn_ved_group_code(v: Any) -> Optional[str]
+  _strip_legacy_feature_extraction_singletons(data: Any) -> Any
+}
+class "app.rules.dsl_models.StringConstraintsModel" as app.rules.dsl_models.StringConstraintsModel {
+  enum : Optional[List[str]]
+  max_length : Optional[int]
+  min_length : Optional[int]
+  pattern : Optional[str]
+}
+class "app.rules.dsl_models.StringFieldSchema" as app.rules.dsl_models.StringFieldSchema {
+  constraints : Optional[StringConstraintsModel]
+  type : Literal['string']
+}
+class "app.rules.dsl_models.SumEqualsRule" as app.rules.dsl_models.SumEqualsRule {
+  expected : float
+  model_config
+  path : str
+  template : Literal['sumEquals']
+  tolerance : float
+}
+class "app.rules.dsl_models.ThenRequired" as app.rules.dsl_models.ThenRequired {
+  required_paths : List[str]
+}
+class "app.rules.path_utils.PathStep" as app.rules.path_utils.PathStep {
+  kind : Literal['prop', 'wildcard']
+  name : Optional[str]
+  __init__(self, kind: Literal['prop', 'wildcard'], name: Optional[str]) -> None
+}
+class "app.rules.rule_overlap.RuleOverlapDetail" as app.rules.rule_overlap.RuleOverlapDetail {
+  adjustment_recommendations_ru : list[str]
+  corridor_risk_ru : Optional[str]
+  overlap_axis_summary_ru : Optional[str]
+  overlap_context_note_ru : Optional[str]
+  overlaps : bool
+  priority_resolution_ru : Optional[str]
+  range_intersections_ru : list[str]
+  reason_ru : str
+  simplified_analysis_note_ru : Optional[str]
+  __init__(self, overlaps: bool, reason_ru: str, corridor_risk_ru: Optional[str], overlap_context_note_ru: Optional[str], simplified_analysis_note_ru: Optional[str], priority_resolution_ru: Optional[str], range_intersections_ru: list[str], adjustment_recommendations_ru: list[str], overlap_axis_summary_ru: Optional[str]) -> None
+}
+app.rules.dsl_models.ArrayFieldSchema --|> app.rules.dsl_models.BaseFieldSchema
+app.rules.dsl_models.BooleanFieldSchema --|> app.rules.dsl_models.BaseFieldSchema
+app.rules.dsl_models.IntegerFieldSchema --|> app.rules.dsl_models.BaseFieldSchema
+app.rules.dsl_models.NumberFieldSchema --|> app.rules.dsl_models.BaseFieldSchema
+app.rules.dsl_models.ObjectFieldSchema --|> app.rules.dsl_models.BaseFieldSchema
+app.rules.dsl_models.StringFieldSchema --|> app.rules.dsl_models.BaseFieldSchema
+app.rules.dsl_models.BaseFieldSchema --> .Literal : type
+app.rules.dsl_models.ClassificationConfig --> .Literal : strategy
+app.rules.dsl_models.ClassificationConfig --> .Literal : ambiguous_match_resolution
+app.rules.dsl_models.ComparisonCond --> .Literal : op
+app.rules.dsl_models.PathClassificationCondition --> .Literal : op
+app.rules.dsl_models.PathClassificationCondition --> .Literal : conjunction
+app.rules.dsl_models.RowFormulaCondition --> .Literal : op
+app.rules.dsl_models.RowFormulaCondition --> .Literal : conjunction
+app.rules.dsl_models.RowIndicatorCondition --> .Literal : conjunction
+app.rules.dsl_models.RowPairRatioCondition --> .Literal : conjunction
+app.rules.dsl_models.RequiredIfRule --> app.rules.dsl_models.ComparisonCond : if_
+app.rules.compiler.CompiledRule --> app.rules.dsl_models.ObjectFieldSchema : root_schema
+app.rules.dsl_models.RuleDSL --> app.rules.dsl_models.ObjectFieldSchema : schema_
+@enduml

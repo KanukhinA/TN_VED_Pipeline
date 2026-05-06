@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from ..db.models import ExpertDecisionItem, Rule, RuleVersion
+from ..db.models import Rule, RuleVersion
 from ..db.session import get_db_session
 from ..rules.classification import (
     find_first_matching_classification_rule,
@@ -20,11 +20,82 @@ from ..rules.compiler import compile_rule
 from ..primary_catalog_settings import get_effective_primary_catalog_map
 from ..rules.dsl_models import ObjectFieldSchema, RuleDSL, normalize_tn_ved_eaeu_code_value
 from ..rules.officer_validation_errors_ru import humanize_officer_error_list, note_class_not_assigned_ru
+from shared.extraction_prompt import assemble_feature_extraction_prompt
 
 router = APIRouter(tags=["officer-pipeline"])
 
 PREPROCESSING_URL = os.getenv("PREPROCESSING_URL", "http://preprocessing:8004").rstrip("/")
 OFFICER_HTTP_TIMEOUT = float(os.getenv("OFFICER_PIPELINE_HTTP_TIMEOUT", "900"))
+
+
+def _officer_preflight_extraction_model(client: httpx.Client, model: str) -> None:
+    """
+    До тяжёлого инференса: проверка, что preprocessing доступен, LLM рантайм отвечает,
+    и выбранный тег модели есть среди установленных.
+    """
+    m = (model or "").strip()
+    if not m:
+        return
+    try:
+        r_ready = client.get(f"{PREPROCESSING_URL}/ready", timeout=15.0)
+        r_ready.raise_for_status()
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                f"Preprocessing /ready вернул HTTP {e.response.status_code}: "
+                f"{e.response.text[:800]}"
+            ),
+        ) from e
+    except httpx.RequestError as e:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Сервис preprocessing недоступен ({PREPROCESSING_URL}): {e}",
+        ) from e
+
+    ready_body = r_ready.json()
+    if ready_body.get("status") != "ok":
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "LLM рантайм не готов: preprocessing сообщает degraded. "
+                f"ollama={ready_body.get('ollama')!r}, "
+                f"base_url={ready_body.get('ollama_base_url')!r}. "
+                "Убедитесь, что Ollama или vLLM запущен и доступен из контейнера preprocessing."
+            ),
+        )
+
+    try:
+        r_av = client.get(f"{PREPROCESSING_URL}/api/v1/models/available", timeout=20.0)
+        r_av.raise_for_status()
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                f"Не удалось получить список моделей (HTTP {e.response.status_code}): "
+                f"{e.response.text[:800]}"
+            ),
+        ) from e
+    except httpx.RequestError as e:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Preprocessing недоступен при запросе списка моделей: {e}",
+        ) from e
+
+    av = r_av.json()
+    installed_raw = av.get("installed_models") or []
+    installed = {str(x).strip() for x in installed_raw if str(x).strip()}
+    if m not in installed:
+        sample = ", ".join(sorted(installed)[:12])
+        suffix = f" (показано до 12 из {len(installed)})" if len(installed) > 12 else ""
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                f"Модель {m!r} не найдена среди установленных в LLM рантайме. "
+                f"Пример установленных имён: {sample}{suffix}. "
+                "Задайте тег точно как в выводе `ollama list` / в админке моделей."
+            ),
+        )
 
 
 def _root_property_names(root: ObjectFieldSchema) -> set[str]:
@@ -291,18 +362,8 @@ def _pick_active_feature_config(dsl: RuleDSL) -> Optional[Dict[str, Any]]:
 
 
 def _assemble_llm_prompt(cfg: Dict[str, Any], description: str) -> str:
-    """Собирает итоговый prompt для извлечения признаков из описания товара.
-
-    В прод-валидации используем только пользовательский промпт конфигурации
-    + текст декларации. Авто-превью правил (extraction_rules_preview) не
-    подмешиваем, чтобы не загрязнять prompt и не искажать поведение модели.
-    """
-    parts: List[str] = []
-    pr = str(cfg.get("prompt") or "").strip()
-    if pr:
-        parts.append(pr)
-    parts.append("Текст для извлечения:\n" + description.strip())
-    return "\n\n".join(parts)
+    """Обёртка над shared.extraction_prompt — один источник с тестом промпта и api-gateway."""
+    return assemble_feature_extraction_prompt(str(cfg.get("prompt") or ""), description)
 
 
 def _catalog_classification_entries(dsl: RuleDSL) -> List[Dict[str, str]]:
@@ -361,28 +422,6 @@ def _extract_classification_expert_review(errors: List[Any]) -> Optional[Dict[st
                 ),
             }
     return None
-
-
-def _persist_expert_decision(
-    db: Session,
-    *,
-    rule_id: uuid.UUID,
-    declaration_id: str,
-    category: str,
-    summary_ru: str,
-    payload: Dict[str, Any],
-) -> None:
-    """Сохраняет задачу в очередь эксперта как pending."""
-    row = ExpertDecisionItem(
-        category=category,
-        rule_id=rule_id,
-        declaration_id=declaration_id.strip(),
-        status="pending",
-        summary_ru=summary_ru[:8000],
-        payload_json=payload,
-    )
-    db.add(row)
-    db.commit()
 
 
 class OfficerRunRequest(BaseModel):
@@ -552,6 +591,7 @@ def officer_run(
             extraction_debug: Optional[Dict[str, Any]] = None
             try:
                 with httpx.Client(timeout=OFFICER_HTTP_TIMEOUT) as client:
+                    _officer_preflight_extraction_model(client, model)
                     for idx, attempt_body in enumerate(generation_attempts):
                         gen = client.post(
                             f"{PREPROCESSING_URL}/api/v1/ollama/generate",
@@ -597,26 +637,17 @@ def officer_run(
                     frag_preview = str(pr_json.get("extracted_fragment_preview") or "")
 
                     summary_lines: list[str] = []
+                    extraction_warn = False
                     if attempt_results and all(bool(a.get("raw_response_is_empty")) for a in attempt_results):
-                        summary_lines.append(
-                            "Все попытки генерации вернули пустой текст от модели. "
-                            "Проверьте, что Ollama/vLLM доступен, имя модели совпадает с выбранным в настройках, "
-                            "и что лимит max_new_tokens достаточен."
-                        )
+                        extraction_warn = True
                     elif not raw_text.strip():
-                        summary_lines.append("Текст ответа модели для парсинга пуст — извлечь JSON невозможно.")
-                    if coercion_note:
-                        summary_lines.append(coercion_note)
+                        extraction_warn = True
                     if raw_text.strip() and parse_kind == "dict" and not parsed and frag_preview.strip():
-                        summary_lines.append(
-                            "Фрагмент JSON выделен из ответа, но после разбора получился пустой объект — "
-                            "ответ модели, вероятно, не соответствует ожидаемой структуре."
-                        )
+                        extraction_warn = True
                     elif raw_text.strip() and not frag_preview.strip():
-                        summary_lines.append(
-                            "В ответе модели не найден блок с «{» или «[» — парсер не смог выделить JSON. "
-                            "См. полный сырой ответ в attempt_results."
-                        )
+                        extraction_warn = True
+                    if extraction_warn:
+                        summary_lines.append("Отладка: модель не дала пригодных признаков")
                     extraction_debug = {
                         "summary_lines_ru": summary_lines,
                         "parse": {
@@ -689,26 +720,9 @@ def officer_run(
     ok, errors, validated_dict, assigned_class = compiled.validate(merged)
     classification_expert_review = _extract_classification_expert_review(errors)
     exactly_one_conflict = classification_expert_review
-    if classification_expert_review:
-        # Если классификация неоднозначна/пустая, создаём карточку для ручного решения эксперта.
-        cat = (
-            "classification_ambiguous"
-            if classification_expert_review.get("kind") == "ambiguous"
-            else "classification_none"
-        )
-        _persist_expert_decision(
-            db,
-            rule_id=rule.id,
-            declaration_id=payload.declaration_id,
-            category=cat,
-            summary_ru=str(classification_expert_review.get("error_ru") or "Классификация: требуется решение эксперта"),
-            payload={
-                "source": "officer_run",
-                "review": classification_expert_review,
-                "deterministic_errors": errors,
-                "catalog": {"rule_id": str(rule.id), "name": catalog_name, "model_id": rule.model_id},
-            },
-        )
+    # Запись в expert_decision_items здесь не создаём: officer-run вызывается при каждой проверке в UI
+    # и из оркестратора; очередь эксперта и полный payload (ТН ВЭД, цена, фрагмент описания) формируются
+    # в оркестраторе / по кнопкам инспектора, иначе в архив попадают дубли без полей для отображения.
 
     clf_cfg = compiled.classification
     matched_rule = None

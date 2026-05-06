@@ -924,7 +924,7 @@ export default function ExpertDatabasePage() {
             </button>
           ) : null}
           <span style={{ fontSize: 13, color: "#64748b" }}>Всего записей в базе: {totalItems}</span>
-          <span style={{ fontSize: 13, color: "#64748b" }}>Найдено на странице: {visibleItems.length}</span>
+          <span style={{ fontSize: 13, color: "#64748b" }}>Показано на странице: {visibleItems.length}</span>
         </div>
 
         {status ? (
@@ -1428,9 +1428,6 @@ export default function ExpertDatabasePage() {
               <h3 style={{ margin: 0, fontSize: 17, color: "#0f172a" }}>Пространство признаков (kNN)</h3>
               <ModalCloseButton onClick={() => setFeatureSpaceOpen(false)} />
             </div>
-            <p style={{ margin: "0 0 10px", fontSize: 13, color: "#475569" }}>
-              Синий маркер — текущая декларация. Цвета эталонных точек соответствуют присвоенным классам.
-            </p>
             <div style={{ display: "flex", flexWrap: "wrap", gap: 10, alignItems: "center", marginBottom: 10 }}>
               <span style={{ fontSize: 13, fontWeight: 600, color: "#334155" }}>Масштаб</span>
               <button type="button" className="btn-secondary" onClick={() => setFeatureSpaceZoom((z) => Math.max(0.6, z / 1.2))}>
@@ -1498,7 +1495,12 @@ export default function ExpertDatabasePage() {
                     );
                   })}
                   {featureSpaceHovered ? (
-                    <foreignObject x={Math.max(46, Math.min(520, featureSpaceHovered.x + 10))} y={Math.max(46, Math.min(360, featureSpaceHovered.y - 14))} width={300} height={120}>
+                    <foreignObject
+                      x={Math.max(36, Math.min(860 - 300 - 16, featureSpaceHovered.x + 26))}
+                      y={Math.max(36, Math.min(480 - 120 - 16, featureSpaceHovered.y + 22))}
+                      width={300}
+                      height={120}
+                    >
                       <div
                         style={{
                           background: "rgba(15,23,42,0.92)",

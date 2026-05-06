@@ -5,7 +5,8 @@ import re
 import statistics
 import uuid
 from datetime import datetime
-from typing import Any, Dict, Optional
+from itertools import combinations
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -14,12 +15,21 @@ from sqlalchemy.orm import Session
 from ..db.session import get_db_session
 from ..db.models import Rule, RuleReferenceEmbedding, RuleReferenceExample, RuleVersion
 from ..rules.dsl_models import (
+    ClassificationRule,
     RuleDSL,
     normalize_tn_ved_eaeu_code_value,
-    PathClassificationCondition,
-    RowIndicatorCondition,
 )
 from ..rules.compiler import compile_rule
+from ..rules.classification import _rule_matches
+from ..rules.rule_overlap import (
+    RuleOverlapDetail,
+    analyze_rules_overlap,
+    analyze_rules_overlap_group,
+    build_ambiguous_example_for_rule_group,
+    compact_numeric_constraints_for_rule,
+    overlap_connected_components,
+    rules_potentially_overlap,
+)
 from ..examples.fertilizer_rule_dsl import (
     FERTILIZER_RULE_DSL,
     FERTILIZER_DECLARATION_EXAMPLE,
@@ -155,6 +165,14 @@ class ValidateResponse(BaseModel):
     assigned_class: Optional[str] = None
 
 
+class RuleOverlapColumnItem(BaseModel):
+    """Одна колонка в сетке «пересекающиеся правила» (заголовок + компактные условия)."""
+
+    rule_index: int
+    label_ru: str = Field(description="Название или class_id для шапки колонки.")
+    constraints_compact_ru: str = Field(description="Числовые/табличные условия одной строкой.")
+
+
 class RuleConflictItem(BaseModel):
     left_rule_index: int
     right_rule_index: int
@@ -162,7 +180,53 @@ class RuleConflictItem(BaseModel):
     right_class_id: str
     left_title: Optional[str] = None
     right_title: Optional[str] = None
+    rule_indices: list[int] = Field(
+        default_factory=list,
+        description="1-based индексы всех правил в группе (пара или больше); для обратной совместимости есть left/right.",
+    )
+    rule_class_ids: list[str] = Field(default_factory=list)
+    rule_titles: list[Optional[str]] = Field(default_factory=list)
     reason_ru: str
+    ambiguous_example: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Синтетический JSON признаков, по возможности удовлетворяющий обоим правилам.",
+    )
+    ambiguous_example_note_ru: Optional[str] = Field(
+        default=None,
+        description="Пояснение, если пример частичный или не прошёл проверку условий.",
+    )
+    corridor_risk_ru: Optional[str] = Field(
+        default=None,
+        description="Риск спецификации: коридоры min–max на оси пересекаются, но одновременная проверка как в декларации невозможна.",
+    )
+    overlap_context_note_ru: Optional[str] = Field(
+        default=None,
+        description="Контекст: несколько условий, «или», группы.",
+    )
+    simplified_analysis_note_ru: Optional[str] = Field(
+        default=None,
+        description="Упрощённый анализ при «или» или группах условий.",
+    )
+    priority_resolution_ru: Optional[str] = Field(
+        default=None,
+        description="Кому отдан приоритет при одновременном выполнении и почему.",
+    )
+    range_intersections_ru: list[str] = Field(
+        default_factory=list,
+        description="Явное описание пересечения числовых диапазонов по полю декларации или ячейке таблицы.",
+    )
+    adjustment_recommendations_ru: list[str] = Field(
+        default_factory=list,
+        description="Практические подсказки, что подкрутить в правилах.",
+    )
+    overlap_axis_summary_ru: Optional[str] = Field(
+        default=None,
+        description="Кратко: где пересекаются диапазоны по числу.",
+    )
+    overlap_columns: list[RuleOverlapColumnItem] = Field(
+        default_factory=list,
+        description="Правила в виде столбцов: подпись и компактные условия.",
+    )
 
 
 class RuleConflictsResponse(BaseModel):
@@ -170,110 +234,8 @@ class RuleConflictsResponse(BaseModel):
     conflicts: list[RuleConflictItem] = Field(default_factory=list)
 
 
-def _is_primary(cond: Any) -> bool:
-    return bool(getattr(cond, "primary", True))
 
-
-def _numeric_interval_from_path(cond: PathClassificationCondition) -> Optional[tuple[float, float]]:
-    op = str(cond.op)
-    val = cond.value
-    try:
-        if op == "gt":
-            return float(val) + 1e-12, float("inf")
-        if op == "gte":
-            return float(val), float("inf")
-        if op == "lt":
-            return float("-inf"), float(val) - 1e-12
-        if op == "lte":
-            return float("-inf"), float(val)
-        if op == "equals":
-            x = float(val)
-            return x, x
-    except Exception:
-        return None
-    return None
-
-
-def _numeric_interval_from_row_indicator(cond: RowIndicatorCondition) -> Optional[tuple[float, float]]:
-    if cond.value_min is not None or cond.value_max is not None:
-        lo = float(cond.value_min) if cond.value_min is not None else float("-inf")
-        hi = float(cond.value_max) if cond.value_max is not None else float("inf")
-        return lo, hi
-    op = cond.op
-    try:
-        if op == "gt":
-            return float(cond.value) + 1e-12, float("inf")
-        if op == "gte":
-            return float(cond.value), float("inf")
-        if op == "lt":
-            return float("-inf"), float(cond.value) - 1e-12
-        if op == "lte":
-            return float("-inf"), float(cond.value)
-        if op == "equals":
-            x = float(cond.value)
-            return x, x
-    except Exception:
-        return None
-    return None
-
-
-def _intervals_disjoint(a: tuple[float, float], b: tuple[float, float]) -> bool:
-    return a[1] < b[0] or b[1] < a[0]
-
-
-def _path_conditions_contradict(a: PathClassificationCondition, b: PathClassificationCondition) -> bool:
-    if str(a.path).strip() != str(b.path).strip():
-        return False
-    ao = str(a.op)
-    bo = str(b.op)
-    av = a.value
-    bv = b.value
-    if ao == "equals" and bo == "equals":
-        return av != bv
-    if ao == "equals" and bo == "in" and isinstance(bv, list):
-        return av not in bv
-    if bo == "equals" and ao == "in" and isinstance(av, list):
-        return bv not in av
-    if ao == "in" and bo == "in" and isinstance(av, list) and isinstance(bv, list):
-        return len(set(av) & set(bv)) == 0
-    ai = _numeric_interval_from_path(a)
-    bi = _numeric_interval_from_path(b)
-    if ai is not None and bi is not None:
-        return _intervals_disjoint(ai, bi)
-    return False
-
-
-def _row_indicator_conditions_contradict(a: RowIndicatorCondition, b: RowIndicatorCondition) -> bool:
-    same_key = (
-        str(a.array_path).strip() == str(b.array_path).strip()
-        and str(a.name_field).strip() == str(b.name_field).strip()
-        and str(a.name_equals).strip().lower() == str(b.name_equals).strip().lower()
-        and str(a.value_field).strip() == str(b.value_field).strip()
-    )
-    if not same_key:
-        return False
-    ai = _numeric_interval_from_row_indicator(a)
-    bi = _numeric_interval_from_row_indicator(b)
-    if ai is not None and bi is not None:
-        return _intervals_disjoint(ai, bi)
-    return False
-
-
-def _rules_potentially_overlap(rule_a: Any, rule_b: Any) -> tuple[bool, str]:
-    conds_a = [c for c in (getattr(rule_a, "conditions", None) or []) if _is_primary(c) and getattr(c, "conjunction", "and") == "and"]
-    conds_b = [c for c in (getattr(rule_b, "conditions", None) or []) if _is_primary(c) and getattr(c, "conjunction", "and") == "and"]
-    if not conds_a or not conds_b:
-        return False, "Недостаточно обязательных условий для анализа пересечений."
-    for ca in conds_a:
-        for cb in conds_b:
-            if isinstance(ca, PathClassificationCondition) and isinstance(cb, PathClassificationCondition):
-                if _path_conditions_contradict(ca, cb):
-                    return False, f"Условия по пути «{ca.path}» взаимно исключают друг друга."
-            if isinstance(ca, RowIndicatorCondition) and isinstance(cb, RowIndicatorCondition):
-                if _row_indicator_conditions_contradict(ca, cb):
-                    return False, f"Диапазоны показателя «{ca.name_equals}» не пересекаются."
-    return True, "Обязательные условия не противоречат друг другу; возможна зона пересечения."
-
+_rules_potentially_overlap = rules_potentially_overlap
 
 class DSLSchemaResponse(BaseModel):
     schema_: Dict[str, Any] = Field(alias="schema")
@@ -684,9 +646,141 @@ def validate_rule(rule_id: uuid.UUID, req: ValidateRequest, db: Session = Depend
     return ValidateResponse(ok=ok, errors=errors, validated_data=validated_data, assigned_class=assigned_class)
 
 
+def _rule_overlap_columns_for_indices(
+    rules_list: Sequence[ClassificationRule],
+    idxs_zero_based: List[int],
+) -> List[RuleOverlapColumnItem]:
+    out: List[RuleOverlapColumnItem] = []
+    for i0 in idxs_zero_based:
+        r = rules_list[i0]
+        lbl = (r.title or "").strip() or str(r.class_id or "").strip() or f"Правило {i0 + 1}"
+        out.append(
+            RuleOverlapColumnItem(
+                rule_index=i0 + 1,
+                label_ru=lbl,
+                constraints_compact_ru=compact_numeric_constraints_for_rule(r),
+            )
+        )
+    return out
+
+
+def classification_conflict_items_for_rules(rules: Sequence[ClassificationRule]) -> list[RuleConflictItem]:
+    """
+    Список конфликтов для набора правил классификации (логика эндпоинта classification-conflicts).
+    """
+    rules_list = list(rules)
+    n = len(rules_list)
+    conflicts: list[RuleConflictItem] = []
+    pair_detail: dict[Tuple[int, int], RuleOverlapDetail] = {}
+    for i in range(n):
+        for j in range(i + 1, n):
+            left_title = (rules_list[i].title or "").strip() or str(rules_list[i].class_id or f"правило {i + 1}")
+            right_title = (rules_list[j].title or "").strip() or str(rules_list[j].class_id or f"правило {j + 1}")
+            pair_detail[(i, j)] = analyze_rules_overlap(
+                rules_list[i], rules_list[j], left_title=left_title, right_title=right_title
+            )
+
+    overlap_edges = [(i, j) for (i, j), d in pair_detail.items() if d.overlaps]
+    components = overlap_connected_components(overlap_edges, n)
+    pairs_subsumed: set[Tuple[int, int]] = set()
+
+    for comp in components:
+        idxs = sorted(comp)
+        if len(idxs) < 2:
+            continue
+        grp = [rules_list[i] for i in idxs]
+        titles = [(rules_list[i].title or "").strip() or str(rules_list[i].class_id or f"правило {i + 1}") for i in idxs]
+        ex: Optional[Dict[str, Any]] = None
+        ex_note: Optional[str] = None
+        try:
+            ex, ex_note = build_ambiguous_example_for_rule_group(grp)
+        except Exception:
+            ex, ex_note = None, "Не удалось сформировать пример признаков автоматически."
+        example_ok = ex is not None and all(_rule_matches(ex, rules_list[i]) for i in idxs)
+        if not example_ok:
+            continue
+        detail_g = analyze_rules_overlap_group(grp, titles)
+        if not detail_g.overlaps:
+            continue
+        one_based: List[int] = [i + 1 for i in idxs]
+        conflicts.append(
+            RuleConflictItem(
+                left_rule_index=one_based[0],
+                right_rule_index=one_based[-1],
+                left_class_id=str(rules_list[idxs[0]].class_id or ""),
+                right_class_id=str(rules_list[idxs[-1]].class_id or ""),
+                left_title=rules_list[idxs[0]].title,
+                right_title=rules_list[idxs[-1]].title,
+                rule_indices=one_based,
+                rule_class_ids=[str(rules_list[i].class_id or "") for i in idxs],
+                rule_titles=[rules_list[i].title for i in idxs],
+                reason_ru=detail_g.reason_ru,
+                ambiguous_example=ex,
+                ambiguous_example_note_ru=ex_note,
+                corridor_risk_ru=detail_g.corridor_risk_ru,
+                overlap_context_note_ru=detail_g.overlap_context_note_ru,
+                simplified_analysis_note_ru=detail_g.simplified_analysis_note_ru,
+                priority_resolution_ru=detail_g.priority_resolution_ru,
+                range_intersections_ru=detail_g.range_intersections_ru,
+                adjustment_recommendations_ru=detail_g.adjustment_recommendations_ru,
+                overlap_axis_summary_ru=detail_g.overlap_axis_summary_ru,
+                overlap_columns=_rule_overlap_columns_for_indices(rules_list, idxs),
+            )
+        )
+        for a, b in combinations(idxs, 2):
+            pairs_subsumed.add((a, b))
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            if (i, j) in pairs_subsumed:
+                continue
+            detail = pair_detail[(i, j)]
+            if not detail.overlaps and not detail.corridor_risk_ru:
+                continue
+            ex2: Optional[Dict[str, Any]] = None
+            ex_note2: Optional[str] = None
+            if detail.overlaps:
+                try:
+                    ex2, ex_note2 = build_ambiguous_example_for_rule_group([rules_list[i], rules_list[j]])
+                except Exception:
+                    ex2, ex_note2 = None, "Не удалось сформировать пример признаков автоматически."
+            conflicts.append(
+                RuleConflictItem(
+                    left_rule_index=i + 1,
+                    right_rule_index=j + 1,
+                    left_class_id=str(rules_list[i].class_id or ""),
+                    right_class_id=str(rules_list[j].class_id or ""),
+                    left_title=(rules_list[i].title or None),
+                    right_title=(rules_list[j].title or None),
+                    rule_indices=[i + 1, j + 1],
+                    rule_class_ids=[str(rules_list[i].class_id or ""), str(rules_list[j].class_id or "")],
+                    rule_titles=[rules_list[i].title, rules_list[j].title],
+                    reason_ru=detail.reason_ru,
+                    ambiguous_example=ex2,
+                    ambiguous_example_note_ru=ex_note2,
+                    corridor_risk_ru=detail.corridor_risk_ru,
+                    overlap_context_note_ru=detail.overlap_context_note_ru,
+                    simplified_analysis_note_ru=detail.simplified_analysis_note_ru,
+                    priority_resolution_ru=detail.priority_resolution_ru,
+                    range_intersections_ru=detail.range_intersections_ru,
+                    adjustment_recommendations_ru=detail.adjustment_recommendations_ru,
+                    overlap_axis_summary_ru=detail.overlap_axis_summary_ru,
+                    overlap_columns=_rule_overlap_columns_for_indices(rules_list, [i, j]),
+                )
+            )
+    return conflicts
+
+
 @router.get("/{rule_id}/classification-conflicts", response_model=RuleConflictsResponse)
 def classification_conflicts(rule_id: uuid.UUID, db: Session = Depends(get_db_session)) -> RuleConflictsResponse:
-    """Эвристическая проверка пересечений между правилами классификации одного справочника."""
+    """
+    Анализ пересечений правил классификации активной версии DSL.
+
+    Связные по «overlaps» правила, для которых один синтетический пример одновременно проходит все правила,
+    объединяются в одну запись (тройка и далее). Остальные случаи остаются попарными.
+
+    Запись также создаётся для пары с corridor_risk_ru без overlaps (пример не строится).
+    """
     rv: RuleVersion | None = (
         db.query(RuleVersion)
         .filter(RuleVersion.rule_id == rule_id, RuleVersion.is_active.is_(True))
@@ -702,23 +796,7 @@ def classification_conflicts(rule_id: uuid.UUID, db: Session = Depends(get_db_se
 
     clf = dsl.classification
     rules = list(clf.rules) if clf and clf.rules else []
-    conflicts: list[RuleConflictItem] = []
-    for i in range(len(rules)):
-        for j in range(i + 1, len(rules)):
-            overlap, reason = _rules_potentially_overlap(rules[i], rules[j])
-            if not overlap:
-                continue
-            conflicts.append(
-                RuleConflictItem(
-                    left_rule_index=i + 1,
-                    right_rule_index=j + 1,
-                    left_class_id=str(rules[i].class_id or ""),
-                    right_class_id=str(rules[j].class_id or ""),
-                    left_title=(rules[i].title or None),
-                    right_title=(rules[j].title or None),
-                    reason_ru=reason,
-                )
-            )
+    conflicts = classification_conflict_items_for_rules(rules)
     return RuleConflictsResponse(has_conflicts=len(conflicts) > 0, conflicts=conflicts)
 
 

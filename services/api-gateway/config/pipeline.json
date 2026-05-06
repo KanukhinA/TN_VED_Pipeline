@@ -1,3 +1,5 @@
 {
-  "semantic_similarity_threshold": 0.75
+  "semantic_similarity_threshold": 0.75,
+  "semantic_neighbor_similarity_floor_s0": 0.35,
+  "semantic_neighbor_weight_gamma": 2
 }

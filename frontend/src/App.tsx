@@ -1,9 +1,8 @@
 import React, { Suspense, lazy } from "react";
 import { Navigate, useNavigate, useLocation } from "react-router-dom";
-import CatalogUnifiedWizard from "./pages/CatalogUnifiedWizard";
-import OfficerValidationPage from "./pages/OfficerValidationPage";
 
-/** Ленивая загрузка: страница тянет xlsx и тяжёлые зависимости — не должна ломать /catalog при старте. */
+const CatalogUnifiedWizard = lazy(() => import("./pages/CatalogUnifiedWizard"));
+const OfficerValidationPage = lazy(() => import("./pages/OfficerValidationPage"));
 const FeatureExtractionSettingsPage = lazy(() => import("./pages/FeatureExtractionSettingsPage"));
 const ExpertDecisionsPage = lazy(() => import("./pages/ExpertDecisionsPage"));
 const ExpertDatabasePage = lazy(() => import("./pages/ExpertDatabasePage"));
@@ -116,7 +115,9 @@ function ExpertTabs({ basePath }: { basePath: "" | "/expert" }) {
         </button>
       </div>
       {expertPage === "catalog" ? (
-        <CatalogUnifiedWizard />
+        <Suspense fallback={<div style={{ padding: 16, color: "#64748b" }}>Загрузка мастера каталога…</div>}>
+          <CatalogUnifiedWizard />
+        </Suspense>
       ) : expertPage === "catalog-settings" || expertPage === "general-settings" ? (
         <Suspense fallback={<div style={{ padding: 16, color: "#64748b" }}>Загрузка настроек извлечения…</div>}>
           <FeatureExtractionSettingsPage />
@@ -140,7 +141,11 @@ export default function App() {
   const location = useLocation();
 
   if (uiMode === "officer") {
-    return <OfficerValidationPage />;
+    return (
+      <Suspense fallback={<div style={{ padding: 24, color: "#64748b" }}>Загрузка интерфейса инспектора…</div>}>
+        <OfficerValidationPage />
+      </Suspense>
+    );
   }
 
   if (uiMode === "expert") {
@@ -160,11 +165,14 @@ export default function App() {
   }
 
   const page = location.pathname.startsWith("/officer") ? "officer" : "expert";
-  const content = page === "expert" ? (
-    <ExpertTabs basePath="/expert" />
-  ) : (
-    <OfficerValidationPage />
-  );
+  const content =
+    page === "expert" ? (
+      <ExpertTabs basePath="/expert" />
+    ) : (
+      <Suspense fallback={<div style={{ padding: 24, color: "#64748b" }}>Загрузка интерфейса инспектора…</div>}>
+        <OfficerValidationPage />
+      </Suspense>
+    );
 
   if (location.pathname === "/") {
     return <Navigate to="/expert/catalog" replace />;

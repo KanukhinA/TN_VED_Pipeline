@@ -1976,9 +1976,9 @@ export default function ClassificationRulesPanel({ value, onChange, structureRow
                                 >
                                   <div style={{ fontWeight: 600, fontSize: 13, color: "#475569" }}>
                                     {d.structureKind === "scalar_number"
-                                      ? `${d.listKey} · одно число на корне`
+                                      ? `${d.listKey} · одно числовое поле верхнего уровня`
                                       : d.structureKind === "scalar_text"
-                                        ? `${d.listKey} · один текст на корне`
+                                        ? `${d.listKey} · значение текстового поля`
                                       : d.structureKind === "text_array"
                                         ? `${d.listKey} · массив из допустимых значений`
                                         : `${d.listKey} / ${d.componentColumnKey}`}

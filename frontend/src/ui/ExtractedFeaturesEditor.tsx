@@ -15,6 +15,131 @@ type EditableProps = {
   depth?: number;
 };
 
+type ArrayValueEditorProps = {
+  value: unknown[];
+  disabled?: boolean;
+  depth: number;
+  pad: number;
+  defaultNew: unknown;
+  allFiniteNumbers: boolean;
+  onChange: (next: unknown) => void;
+};
+
+/** Редактор массива: удаление элементов, замена списка чисел одним числом, снятие обёртки-массива для одного элемента. */
+function ArrayValueEditor({
+  value,
+  disabled,
+  depth,
+  pad,
+  defaultNew,
+  allFiniteNumbers,
+  onChange,
+}: ArrayValueEditorProps) {
+  const [scalarDraft, setScalarDraft] = React.useState(() =>
+    allFiniteNumbers && value.length ? String(value[0]) : "",
+  );
+
+  React.useEffect(() => {
+    if (allFiniteNumbers && value.length > 0) {
+      setScalarDraft(String(value[0]));
+    }
+  }, [allFiniteNumbers, value]);
+
+  React.useEffect(() => {
+    if (value.length === 1) {
+      onChange(value[0]);
+    }
+  }, [value, onChange]);
+
+  function applyScalarReplace() {
+    const raw = scalarDraft.trim().replace(",", ".");
+    if (raw === "") return;
+    const n = Number(raw);
+    if (!Number.isFinite(n)) return;
+    onChange(n);
+  }
+
+  return (
+    <div style={{ marginLeft: pad > 0 ? 8 : 0, borderLeft: depth > 0 ? "2px solid #e2e8f0" : undefined, paddingLeft: depth > 0 ? 10 : 0 }}>
+      {allFiniteNumbers && value.length > 1 ? (
+        <div
+          style={{
+            display: "flex",
+            flexWrap: "wrap",
+            alignItems: "center",
+            gap: 8,
+            marginBottom: 12,
+            padding: "8px 10px",
+            background: "#f0fdf4",
+            border: "1px solid #86efac",
+            borderRadius: 8,
+          }}
+        >
+          <span style={{ fontSize: "0.8125rem", color: "#14532d", fontWeight: 600 }}>Список чисел</span>
+          <span style={{ fontSize: "0.8125rem", color: "#166534" }}>заменить одним числом:</span>
+          <input
+            className="officer-input"
+            type="text"
+            inputMode="decimal"
+            disabled={disabled}
+            value={scalarDraft}
+            onChange={(e) => setScalarDraft(e.target.value)}
+            style={{ width: 100 }}
+            title="Итоговое значение вместо всего списка"
+          />
+          <button
+            type="button"
+            className="btn-secondary"
+            style={{ fontSize: "0.8125rem", padding: "4px 12px" }}
+            disabled={disabled}
+            onClick={() => applyScalarReplace()}
+          >
+            Заменить список на число
+          </button>
+        </div>
+      ) : null}
+      {value.map((item, i) => (
+        <div key={i} style={{ marginBottom: 10 }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, marginBottom: 4 }}>
+            <span style={{ fontSize: "0.75rem", color: "#64748b" }}>Элемент {i + 1}</span>
+            <button
+              type="button"
+              className="btn-secondary"
+              style={{ fontSize: "0.75rem", padding: "2px 8px", color: "#991b1b", borderColor: "#fecaca" }}
+              disabled={disabled}
+              onClick={() => {
+                const next = value.filter((_, j) => j !== i);
+                onChange(next);
+              }}
+            >
+              Удалить
+            </button>
+          </div>
+          <EditableValue
+            value={item}
+            disabled={disabled}
+            depth={depth + 1}
+            onChange={(nv) => {
+              const next = [...value];
+              next[i] = nv;
+              onChange(next);
+            }}
+          />
+        </div>
+      ))}
+      <button
+        type="button"
+        className="btn-secondary"
+        style={{ fontSize: "0.8125rem", padding: "4px 10px" }}
+        disabled={disabled}
+        onClick={() => onChange([...value, defaultNew])}
+      >
+        Добавить элемент
+      </button>
+    </div>
+  );
+}
+
 /**
  * Редактирование извлечённого JSON без сырого текста: скаляры, вложенные объекты и массивы.
  */
@@ -95,33 +220,18 @@ function EditableValue({ value, onChange, disabled, depth = 0 }: EditableProps) 
               : ""
         : {};
 
+    const allFiniteNumbers =
+      value.length > 0 && value.every((x) => typeof x === "number" && Number.isFinite(x));
     return (
-      <div style={{ marginLeft: pad > 0 ? 8 : 0, borderLeft: depth > 0 ? "2px solid #e2e8f0" : undefined, paddingLeft: depth > 0 ? 10 : 0 }}>
-        {value.map((item, i) => (
-          <div key={i} style={{ marginBottom: 10 }}>
-            <div style={{ fontSize: "0.75rem", color: "#64748b", marginBottom: 4 }}>Элемент {i + 1}</div>
-            <EditableValue
-              value={item}
-              disabled={disabled}
-              depth={depth + 1}
-              onChange={(nv) => {
-                const next = [...value];
-                next[i] = nv;
-                onChange(next);
-              }}
-            />
-          </div>
-        ))}
-        <button
-          type="button"
-          className="btn-secondary"
-          style={{ fontSize: "0.8125rem", padding: "4px 10px" }}
-          disabled={disabled}
-          onClick={() => onChange([...value, defaultNew])}
-        >
-          Добавить элемент
-        </button>
-      </div>
+      <ArrayValueEditor
+        value={value}
+        disabled={disabled}
+        depth={depth}
+        pad={pad}
+        defaultNew={defaultNew}
+        allFiniteNumbers={allFiniteNumbers}
+        onChange={onChange}
+      />
     );
   }
 

@@ -1,0 +1,42 @@
+@startuml packages_backend_rules
+set namespaceSeparator none
+package "app.rules" as app.rules {
+}
+package "app.rules.classification" as app.rules.classification {
+}
+package "app.rules.compiler" as app.rules.compiler {
+}
+package "app.rules.cross_rules" as app.rules.cross_rules {
+}
+package "app.rules.dsl_models" as app.rules.dsl_models {
+}
+package "app.rules.formula_safe_eval" as app.rules.formula_safe_eval {
+}
+package "app.rules.numeric_cell" as app.rules.numeric_cell {
+}
+package "app.rules.officer_validation_errors_ru" as app.rules.officer_validation_errors_ru {
+}
+package "app.rules.path_utils" as app.rules.path_utils {
+}
+package "app.rules.rule_overlap" as app.rules.rule_overlap {
+}
+package "app.rules.schema_normalize" as app.rules.schema_normalize {
+}
+app.rules.classification --> app.rules.cross_rules
+app.rules.classification --> app.rules.dsl_models
+app.rules.classification --> app.rules.formula_safe_eval
+app.rules.classification --> app.rules.numeric_cell
+app.rules.classification --> app.rules.path_utils
+app.rules.compiler --> app.rules.classification
+app.rules.compiler --> app.rules.cross_rules
+app.rules.compiler --> app.rules.dsl_models
+app.rules.compiler --> app.rules.schema_normalize
+app.rules.cross_rules --> app.rules.dsl_models
+app.rules.cross_rules --> app.rules.numeric_cell
+app.rules.cross_rules --> app.rules.path_utils
+app.rules.dsl_models --> app.rules.formula_safe_eval
+app.rules.rule_overlap --> app.rules.classification
+app.rules.rule_overlap --> app.rules.dsl_models
+app.rules.rule_overlap --> app.rules.path_utils
+app.rules.schema_normalize --> app.rules.dsl_models
+@enduml

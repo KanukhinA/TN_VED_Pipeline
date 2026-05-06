@@ -1,0 +1,7 @@
+@startuml packages_backend_pipeline
+set namespaceSeparator none
+package "app.pipeline" as app.pipeline {
+}
+package "app.pipeline.validator" as app.pipeline.validator {
+}
+@enduml
