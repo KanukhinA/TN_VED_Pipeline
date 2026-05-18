@@ -1,3 +1,8 @@
+"""Сервис предобработки: рантайм LLM (Ollama/vLLM), деплой моделей, парсинг JSON из ответов.
+
+`POST /api/v1/parse-model-json` использует `shared/json_recovery.py` (копируется в образ как `app.json_recovery`).
+"""
+
 from __future__ import annotations
 
 from typing import Any

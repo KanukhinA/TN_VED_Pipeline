@@ -1,3 +1,9 @@
+"""Движок классификации деклараций по DSL: условия по путям, строкам таблиц, first_match и semantic_check.
+
+Зависит от `dsl_models` (схема правил) и `numeric_cell` / `formula_safe_eval` для числовых сравнений.
+Публичные функции `evaluate_classification`, `find_first_matching_classification_rule` — точки входа для API и пайплайна.
+"""
+
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Tuple
@@ -413,11 +419,6 @@ def _narrow_first_match_by_refinements_when_multi_class(
         return matches
     refined = [r for r in matches if _rule_refinement_holds(data, r)]
     return refined if refined else matches
-
-
-def _rule_matches_by_groups(data: Any, conditions: List[ClassificationCondition]) -> bool:
-    """Проверяет правило в режиме групп: достаточно прохождения любой полной группы."""
-    return _DEFAULT_RULE_MATCHER.rule_matches_by_groups(data, conditions)
 
 
 def _rule_matches(data: Any, rule: ClassificationRule) -> bool:

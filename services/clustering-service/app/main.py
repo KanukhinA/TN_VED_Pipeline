@@ -1,3 +1,5 @@
+"""Кластеризация текстов few-shot (k-means на эмбеддингах) и фоновая очередь jobs в PostgreSQL."""
+
 from __future__ import annotations
 
 import json

@@ -1,3 +1,5 @@
+"""Use case'ы чтения активной версии правила и валидации DSL на примере данных."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass

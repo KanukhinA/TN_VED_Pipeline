@@ -1,3 +1,5 @@
+"""Разовое восстановление очереди подтверждения имён классов для legacy-записей."""
+
 from __future__ import annotations
 
 import uuid

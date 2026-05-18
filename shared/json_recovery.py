@@ -1,6 +1,9 @@
 """
 Устойчивое извлечение и парсинг JSON из ответов LLM.
-Логика согласована с LLM_QuantityExtractor_Evaluator (utils.py): extract_json_from_response + parse_json_safe.
+
+Исторически согласовано с extract_json_from_response / parse_json_safe из внешнего
+проекта LLM_QuantityExtractor_Evaluator; в репозитории — единый источник для preprocessing,
+api-gateway, orchestrator и фронтенда.
 """
 
 from __future__ import annotations

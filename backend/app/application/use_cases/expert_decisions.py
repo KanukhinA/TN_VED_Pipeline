@@ -1,3 +1,5 @@
+"""Создание задач expert-decisions и доменные правила (LLM naming, auto_classification_review)."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass

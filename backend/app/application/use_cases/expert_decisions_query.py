@@ -1,3 +1,5 @@
+"""Use case'ы чтения и обновления очереди expert-decisions (список с пагинацией, patch статуса)."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass

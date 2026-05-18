@@ -1,3 +1,5 @@
+"""Кэш компиляции DSL и валидация активных версий правил перед классификацией."""
+
 from __future__ import annotations
 
 import uuid

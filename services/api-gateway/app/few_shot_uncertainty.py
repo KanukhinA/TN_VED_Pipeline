@@ -158,20 +158,6 @@ def calculate_content_uncertainty(
     return 1.0 - avg_jaccard
 
 
-def total_uncertainty(
-    responses: List[str],
-    *,
-    alpha: float = 0.33,
-    beta: float = 0.33,
-    gamma: float = 0.34,
-) -> float:
-    gen_d = calculate_generation_disagreement(responses)
-    r_fail, struct_d = calculate_format_uncertainty(responses)
-    format_u = (r_fail + struct_d) / 2.0
-    content_u = calculate_content_uncertainty(responses)
-    return alpha * gen_d + beta * format_u + gamma * content_u
-
-
 def best_json_fragment_from_responses(responses: List[str]) -> str:
     """Первый успешно распарсенный JSON-фрагмент для подсказки few-shot."""
     for response in responses:
@@ -219,75 +205,6 @@ def _percentile(values: Sequence[float], percentile: float) -> float:
         return arr[lo]
     frac = rank - lo
     return arr[lo] * (1.0 - frac) + arr[hi] * frac
-
-
-def select_candidates_by_diversity_clusters(
-    texts: Sequence[str],
-    *,
-    n_clusters: int,
-    max_candidates: int,
-) -> Tuple[List[str], dict[str, int]]:
-    """
-    Лёгкий аналог этапа кластеризации из few_shot_extractor:
-    - строим токен-множества;
-    - выбираем seed-кластеры по farthest-point;
-    - назначаем каждый текст ближайшему seed;
-    - берём по одному представителю из кластера.
-    Возвращает кандидатов + карту text -> cluster_id.
-    """
-    clean = [str(t).strip() for t in texts if str(t).strip()]
-    if not clean:
-        return [], {}
-
-    token_sets = [_tokenize_text_for_similarity(t) for t in clean]
-    n = len(clean)
-    n_clusters_eff = max(1, min(int(n_clusters), n))
-
-    seed_indices: List[int] = [0]
-    while len(seed_indices) < n_clusters_eff:
-        best_idx = None
-        best_score = -1.0
-        for idx in range(n):
-            if idx in seed_indices:
-                continue
-            nearest_seed_dist = min(
-                _jaccard_distance(token_sets[idx], token_sets[seed]) for seed in seed_indices
-            )
-            if nearest_seed_dist > best_score:
-                best_score = nearest_seed_dist
-                best_idx = idx
-        if best_idx is None:
-            break
-        seed_indices.append(best_idx)
-
-    assignments: dict[int, list[int]] = {cluster_id: [] for cluster_id in range(len(seed_indices))}
-    for idx in range(n):
-        best_cluster = 0
-        best_dist = 10.0
-        for cluster_id, seed_idx in enumerate(seed_indices):
-            dist = _jaccard_distance(token_sets[idx], token_sets[seed_idx])
-            if dist < best_dist:
-                best_dist = dist
-                best_cluster = cluster_id
-        assignments[best_cluster].append(idx)
-
-    selected_indices: List[int] = []
-    for cluster_id in sorted(assignments.keys()):
-        members = assignments[cluster_id]
-        if not members:
-            continue
-        seed_idx = seed_indices[cluster_id]
-        representative = min(
-            members,
-            key=lambda idx: _jaccard_distance(token_sets[idx], token_sets[seed_idx]),
-        )
-        selected_indices.append(representative)
-
-    selected_indices.sort()
-    selected_indices = selected_indices[: max(1, min(int(max_candidates), n))]
-    selected = [clean[idx] for idx in selected_indices]
-    cluster_by_text = {clean[idx]: cluster_id for cluster_id, members in assignments.items() for idx in members}
-    return selected, cluster_by_text
 
 
 def detect_outliers_jaccard_knn(

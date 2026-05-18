@@ -1,3 +1,5 @@
+"""Чтение и запись настроек runtime моделей извлечения признаков (key-value в БД)."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass

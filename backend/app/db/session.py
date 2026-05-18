@@ -1,3 +1,5 @@
+"""Подключение к PostgreSQL, создание схемы и dependency `get_db_session` для FastAPI."""
+
 from __future__ import annotations
 
 import os

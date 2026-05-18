@@ -1,3 +1,5 @@
+"""Настройки извлечения признаков, primary catalog и журнал прогонов few-shot assist."""
+
 from __future__ import annotations
 
 import json

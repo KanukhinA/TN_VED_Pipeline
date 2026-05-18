@@ -1,5 +1,5 @@
 /**
- * Автогенерация: `python scripts/build_tn_ved_tree.py`
+ * Автогенерация: `python scripts/build_tn_ved_tree_from_xlsx.py`
  * Положите полный `data/ТН ВЭД.xlsx` — иначе в UI только демо-фрагмент.
  * Не правьте вручную — правки внесите в Excel и перезапустите скрипт.
  */

@@ -1,3 +1,5 @@
+"""Генерация человекочитаемых имён классов по каталогу и ТН ВЭД через LLM."""
+
 from __future__ import annotations
 
 import os

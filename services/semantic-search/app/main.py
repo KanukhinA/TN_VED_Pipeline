@@ -1,3 +1,5 @@
+"""Семантический поиск по эталонам: эмбеддинги E5, kNN, пороги поддержки класса, 2D-проекция для UI."""
+
 from __future__ import annotations
 
 import hashlib

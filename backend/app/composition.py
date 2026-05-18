@@ -1,3 +1,9 @@
+"""Composition root: фабрики use case с SQLAlchemy-репозиториями на сессию запроса.
+
+Связывает HTTP-слой (`api.routes_*`) с application-слоем без Service Locator:
+кадая функция принимает `Session` из FastAPI Depends и возвращает готовый use case.
+"""
+
 from __future__ import annotations
 
 import os

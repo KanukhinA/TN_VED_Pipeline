@@ -1,3 +1,5 @@
+"""Заглушка проверки заявленной стоимости декларации (детерминированный score для пайплайна)."""
+
 from __future__ import annotations
 
 import hashlib

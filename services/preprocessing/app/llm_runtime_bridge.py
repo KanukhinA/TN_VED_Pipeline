@@ -1,5 +1,7 @@
 """Ветвление HTTP к Ollama API vs vLLM OpenAI API для preprocessing."""
 
+"""Мост к Ollama/vLLM: pull моделей, пауза, список установленных, health для preprocessing."""
+
 from __future__ import annotations
 
 import json

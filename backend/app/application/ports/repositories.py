@@ -32,6 +32,7 @@ class ExpertDecisionRepositoryPort(Protocol):
         page: int,
         page_size: int,
     ) -> tuple[list[ExpertDecisionItem], int]:
+        """Страница записей и общее число строк без учёта limit/offset."""
         ...
 
 

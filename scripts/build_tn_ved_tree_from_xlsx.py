@@ -3,8 +3,8 @@
 Строит TN_VED_CHILDREN для фронтенда из Excel (ТН ВЭД.xlsx).
 
 Использование:
-  python scripts/build_tn_ved_tree.py
-  python scripts/build_tn_ved_tree.py --input "data/мой_файл.xlsx" --sheet "Лист1"
+  python scripts/build_tn_ved_tree_from_xlsx.py
+  python scripts/build_tn_ved_tree_from_xlsx.py --input "data/мой_файл.xlsx" --sheet "Лист1"
 
 Требуется: pandas, openpyxl (уже в requirements.txt корня репозитория).
 """
@@ -480,7 +480,7 @@ def ts_emit(children: dict[str, list[dict[str, str]]], row_count: int) -> str:
     parent_count = len(children)
     lines = [
         "/**",
-        " * Автогенерация: `python scripts/build_tn_ved_tree.py`",
+        " * Автогенерация: `python scripts/build_tn_ved_tree_from_xlsx.py`",
         " * Положите полный `data/ТН ВЭД.xlsx` — иначе в UI только демо-фрагмент.",
         " * Не правьте вручную — правки внесите в Excel и перезапустите скрипт.",
         " */",

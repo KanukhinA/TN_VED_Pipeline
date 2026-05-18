@@ -1,3 +1,5 @@
+"""HTTP API очереди экспертных решений: создание, фильтрация, patch, синхронизация эталонов."""
+
 from __future__ import annotations
 
 import uuid
@@ -255,67 +257,6 @@ def _sync_reference_example_from_officer_decision(db: Session, row: ExpertDecisi
         if features_json:
             ref.features_json = features_json
     _upsert_reference_embedding(db, ref)
-
-
-def _is_auto_classification_failed(payload: Dict[str, Any]) -> bool:
-    """Признак, что до решения инспектора класс не был получен автоматически."""
-    status = str(payload.get("auto_classification_status") or "").strip().lower()
-    if status == "failed":
-        return True
-    if bool(payload.get("semantic_rule_contradiction")):
-        return True
-    if bool(payload.get("semantic_candidate_no_class")):
-        return True
-    return str(payload.get("auto_class_before_decision") or "").strip() == ""
-
-
-def _ensure_auto_classification_review_for_approved_officer_decision(
-    db: Session,
-    *,
-    officer_row: ExpertDecisionItem,
-) -> None:
-    """
-    Если инспектор принял декларацию, но автоклассификация не сработала,
-    создаём pending-задачу эксперту.
-    """
-    payload = officer_row.payload_json if isinstance(officer_row.payload_json, dict) else {}
-    if str(payload.get("final_decision") or "").strip().lower() != "approved":
-        return
-    if not _is_auto_classification_failed(payload):
-        return
-
-    existing = (
-        db.query(ExpertDecisionItem)
-        .filter(
-            ExpertDecisionItem.category == "auto_classification_review",
-            ExpertDecisionItem.declaration_id == officer_row.declaration_id,
-            ExpertDecisionItem.status == "pending",
-        )
-        .order_by(ExpertDecisionItem.created_at.desc())
-        .first()
-    )
-    if existing is not None:
-        return
-
-    reason_ru = str(payload.get("auto_classification_failure_reason_ru") or "").strip()
-    if not reason_ru:
-        reason_ru = "Инспектор принял декларацию, но автоклассификация не назначила класс."
-
-    review_payload = dict(payload)
-    review_payload["linked_officer_final_decision_id"] = str(officer_row.id)
-    review_payload["auto_classification_status"] = "failed"
-    review_payload["auto_classification_failure_reason_ru"] = reason_ru
-
-    db.add(
-        ExpertDecisionItem(
-            category="auto_classification_review",
-            rule_id=officer_row.rule_id,
-            declaration_id=officer_row.declaration_id,
-            status="pending",
-            summary_ru=f"Требуется экспертная валидация автоклассификации ({officer_row.declaration_id})",
-            payload_json=review_payload,
-        )
-    )
 
 
 def _reference_example_to_out(row: RuleReferenceExample) -> ExpertDecisionItemOut:

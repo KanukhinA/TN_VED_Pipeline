@@ -1,7 +1,7 @@
 /**
  * Иерархия ТН ВЭД ЕАЭС для каскадного выбора в UI.
  * Данные `TN_VED_CHILDREN` собираются из `tnVedChildren.generated.ts`
- * (команда: `python scripts/build_tn_ved_tree.py` и файл `data/ТН ВЭД.xlsx`).
+ * (команда: `python scripts/build_tn_ved_tree_from_xlsx.py` и файл `data/ТН ВЭД.xlsx`).
  */
 
 import { TN_VED_CHILDREN_BUILD_INFO, TN_VED_CHILDREN_GENERATED } from "./tnVedChildren.generated";
@@ -28,7 +28,7 @@ for (const [parent, items] of Object.entries(TN_VED_CHILDREN)) {
 
 /**
  * true, если в сборке слишком мало строк для полного классификатора ЕАЭС (в репозитории — демо).
- * После `python scripts/build_tn_ved_tree.py` с полным `data/ТН ВЭД.xlsx` станет false.
+ * После `python scripts/build_tn_ved_tree_from_xlsx.py` с полным `data/ТН ВЭД.xlsx` станет false.
  */
 export function isTnVedChildrenDatasetIncomplete(): boolean {
   const minRows = 3000;

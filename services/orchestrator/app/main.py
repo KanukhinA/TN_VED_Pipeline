@@ -1,3 +1,5 @@
+"""Оркестратор сквозной проверки декларации: LLM-чистка, semantic-search, кластеризация, NDJSON-стрим."""
+
 from __future__ import annotations
 
 import json

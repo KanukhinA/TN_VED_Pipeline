@@ -1,3 +1,5 @@
+"""HTTP API справочника правил: CRUD, версии DSL, эталоны, конфликты классификации, семантический порог."""
+
 from __future__ import annotations
 
 import os

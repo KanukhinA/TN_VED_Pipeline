@@ -1,3 +1,8 @@
+"""Pydantic-модели DSL справочника: схема полей декларации, межполевые правила, блок classification.
+
+Валидаторы нормализуют коды ТН ВЭД ЕАЭС и мигрируют устаревшие фрагменты JSON при загрузке версий правил.
+"""
+
 from __future__ import annotations
 
 import re
@@ -152,12 +157,6 @@ class SumEqualsRule(BaseModel):
     tolerance: float = 0.0001
 
     model_config = ConfigDict(extra="forbid")
-
-
-class ComparisonOp(str):
-    """Технический тип-обёртка для операторов сравнения."""
-
-    pass
 
 
 ComparisonOpType = Literal[

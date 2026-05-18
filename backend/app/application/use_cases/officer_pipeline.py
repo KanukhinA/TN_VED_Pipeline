@@ -1,3 +1,5 @@
+"""Тонкая обёртка officer-пайплайна: делегирует реализацию из routes_officer_pipeline."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass

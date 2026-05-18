@@ -1,3 +1,5 @@
+"""HTTP-клиент к сервису semantic-search (эмбеддинги и поиск по эталонам)."""
+
 from __future__ import annotations
 
 from typing import Any, Dict, List

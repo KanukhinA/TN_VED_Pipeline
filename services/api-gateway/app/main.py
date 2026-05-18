@@ -1,3 +1,5 @@
+"""API Gateway: единая точка входа UI, прокси к backend/orchestrator/preprocessing, few-shot и настройки пайплайна."""
+
 from __future__ import annotations
 
 import json

@@ -1,3 +1,9 @@
+"""Точка входа rules-engine: сборка FastAPI, роутеры API, healthcheck.
+
+Владеет PostgreSQL (модели и миграции через `db.session`), проксируется api-gateway
+как `RULES_ENGINE_URL`. Не вызывает LLM напрямую — только справочники, валидация DSL и очередь экспертизы.
+"""
+
 from __future__ import annotations
 
 from fastapi import FastAPI
