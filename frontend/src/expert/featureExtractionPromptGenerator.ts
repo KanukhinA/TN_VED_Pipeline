@@ -33,7 +33,7 @@ export type PromptGeneratorOverrides = {
 
 /**
  * Собирает промпт для LLM на основе загруженного DSL справочника.
- * metaInstructionText должен быть загружен с сервера; встроенного fallback нет.
+ * `metaInstructionText` должен быть загружен с сервера; встроенного резервного варианта нет.
  */
 export function buildFeatureExtractionPromptGeneratorRequest(
   dsl: any,
@@ -85,7 +85,7 @@ export function buildFeatureExtractionPromptGeneratorRequest(
     const k = c.characteristicKey.trim();
     if (!k) continue;
     if (c.layout === "scalar") {
-      allowedBlocks.push(`Числовое поле на корне документа (одно значение, не массив): ключ «${k}».`);
+      allowedBlocks.push(`Числовое поле верхнего уровня документа (одно значение, не массив): ключ «${k}».`);
       allowedBlocks.push("");
       continue;
     }
@@ -114,7 +114,7 @@ export function buildFeatureExtractionPromptGeneratorRequest(
     if (!k) continue;
     const ex = t.exampleValues;
     if (ex?.length) {
-      allowedBlocks.push(`Примеры допустимых значений поля «${k}» (одно текстовое значение на корне):`);
+      allowedBlocks.push(`Примеры допустимых значений поля «${k}» (одно текстовое значение верхнего уровня):`);
       allowedBlocks.push(ex.join("\n"));
       allowedBlocks.push("");
     }

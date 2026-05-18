@@ -13,6 +13,7 @@ from pydantic import BaseModel
 import psycopg2
 
 from app.pipeline_config import (
+    load_semantic_cleaning_settings,
     load_semantic_neighbor_similarity_floor_s0,
     load_semantic_neighbor_weight_gamma,
     load_semantic_similarity_threshold,
@@ -30,6 +31,8 @@ app = FastAPI(title="Pipeline Orchestrator", version="0.1.0")
 
 
 class ValidationRequest(BaseModel):
+    """Запрос сквозной валидации декларации в оркестратор."""
+
     declaration_id: str
     description: str
     tnved_code: str | None = None
@@ -204,6 +207,104 @@ async def _ensure_semantic_search_alive(client: httpx.AsyncClient) -> None:
         ) from exc
 
 
+async def _clean_description_for_semantic_search(
+    client: httpx.AsyncClient,
+    description: str,
+    preferred_model: str | None = None,
+) -> dict[str, Any]:
+    """LLM-чистка текста перед векторизацией; при сбое/пустом ответе остаётся исходный текст."""
+    from app.semantic_cleaning import (
+        OLLAMA_SEMANTIC_CLEANING_JSON_FORMAT,
+        extract_semantic_cleaned_text,
+        finalize_semantic_cleaning_prompt,
+        render_semantic_cleaning_prompt,
+    )
+
+    source = str(description or "").strip()
+    if not source:
+        return {
+            "text": "",
+            "description_before_cleaning": "",
+            "used_fallback": True,
+            "skipped": True,
+            "reason": "empty_input",
+        }
+    cfg = load_semantic_cleaning_settings()
+    model = str(cfg.get("model") or "").strip()
+    if not model:
+        model = str(preferred_model or "").strip()
+    prompt = str(cfg.get("prompt") or "").strip()
+    if not model or not prompt:
+        return {
+            "text": source,
+            "description_before_cleaning": source,
+            "used_fallback": True,
+            "skipped": True,
+            "reason": "config_missing",
+        }
+    constrained = bool(cfg.get("constrained_decoding", True))
+    base_prompt = render_semantic_cleaning_prompt(prompt, source)
+    full_prompt = finalize_semantic_cleaning_prompt(base_prompt, constrained_decoding=constrained)
+    body = {
+        "model": model,
+        "prompt": full_prompt,
+        "num_ctx": int(cfg.get("num_ctx") or 8192),
+        "max_new_tokens": int(cfg.get("max_new_tokens") or 1024),
+        "repetition_penalty": float(cfg.get("repetition_penalty") or 1.0),
+        "temperature": float(cfg.get("temperature") or 0.0),
+        "top_p": float(cfg.get("top_p") or 1.0),
+        "enable_thinking": bool(cfg.get("enable_thinking") or False),
+        "constrained_decoding": bool(cfg.get("constrained_decoding", True)),
+        "do_sample": bool(cfg.get("do_sample") or False),
+    }
+    if constrained:
+        body["format"] = OLLAMA_SEMANTIC_CLEANING_JSON_FORMAT
+    try:
+        resp = await client.post(
+            f"{PREPROCESSING_URL}/api/v1/ollama/generate",
+            json=body,
+            timeout=120.0,
+        )
+        resp.raise_for_status()
+        data = resp.json() if resp.content else {}
+        raw = str(data.get("raw_response") or "").strip()
+        if not raw:
+            return {
+                "text": source,
+                "description_before_cleaning": source,
+                "used_fallback": True,
+                "skipped": False,
+                "reason": "empty_llm_response",
+                "model": model,
+            }
+        cleaned = extract_semantic_cleaned_text(raw, constrained_decoding=constrained)
+        if not cleaned:
+            return {
+                "text": source,
+                "description_before_cleaning": source,
+                "used_fallback": True,
+                "skipped": False,
+                "reason": "empty_llm_response",
+                "model": model,
+            }
+        return {
+            "text": cleaned,
+            "description_before_cleaning": source,
+            "used_fallback": False,
+            "skipped": False,
+            "model": model,
+        }
+    except Exception as exc:
+        return {
+            "text": source,
+            "description_before_cleaning": source,
+            "used_fallback": True,
+            "skipped": False,
+            "reason": f"llm_error: {exc}",
+            "model": model,
+        }
+
+
 async def _run_validate_pipeline(
     payload: ValidationRequest,
     on_phase: Callable[[str, str, str], Awaitable[None]] | None = None,
@@ -220,6 +321,8 @@ async def _run_validate_pipeline(
 
     flow: dict[str, Any] = {"declaration_id": payload.declaration_id, "steps": []}
     class_id: str | None = None
+    # Для дообучения / альтернативной кластеризации: исходный текст графы 31, текст после LLM-чистки и эмбеддинг запроса (query:).
+    clustering_semantic_bundle: dict[str, Any] = {}
 
     async with httpx.AsyncClient(timeout=900.0) as client:
         try:
@@ -269,9 +372,9 @@ async def _run_validate_pipeline(
                         "explanation_ru": expl,
                     },
                 )
-                # Запись expert_decision_items здесь не создаём: officer-run вызывается при каждой
-                # проверке в UI; архив и полный payload (ТН ВЭД, цена) — по кнопкам инспектора
-                # (см. backend officer-run и OfficerValidationPage).
+                # Запись в `expert_decision_items` здесь не создаём: `officer-run` вызывается при каждой
+                # проверке в интерфейсе; архив и полный набор данных (ТН ВЭД, цена) — по кнопкам инспектора
+                # (см. `backend` `officer-run` и `OfficerValidationPage`).
             elif not class_id:
                 cat = officer_json.get("catalog")
                 rule_id_from_catalog: str | None = None
@@ -285,6 +388,56 @@ async def _run_validate_pipeline(
 
                 reference_examples = await _fetch_reference_examples_for_rule(client, rule_id_from_catalog)
 
+                await phase(
+                    "semantic-cleaning",
+                    "Очистка описания перед векторизацией",
+                    "LLM удаляет шум, оставляя только наименование, теххарактеристики и состав.",
+                )
+                feature_extraction_model = str((officer_json.get("feature_extraction") or {}).get("model") or "").strip()
+                cleaning = await _clean_description_for_semantic_search(
+                    client,
+                    payload.description,
+                    preferred_model=feature_extraction_model,
+                )
+                semantic_query_text = str(cleaning.get("text") or payload.description or "").strip()
+                before_clean = str(
+                    cleaning.get("description_before_cleaning") or payload.description or ""
+                ).strip()
+                clustering_semantic_bundle["description_before_semantic_cleaning"] = before_clean
+                clustering_semantic_bundle["description_for_semantic_embedding"] = semantic_query_text
+                if semantic_query_text:
+                    try:
+                        emb_r = await client.post(
+                            f"{SEMANTIC_SEARCH_URL}/api/v1/embed",
+                            json={"texts": [semantic_query_text], "use_query_prefix": True},
+                            timeout=90.0,
+                        )
+                        emb_r.raise_for_status()
+                        emb_j = emb_r.json()
+                        vecs = emb_j.get("vectors")
+                        if isinstance(vecs, list) and vecs and isinstance(vecs[0], list):
+                            clustering_semantic_bundle["semantic_embedding_model"] = emb_j.get("embedding_model")
+                            clustering_semantic_bundle["semantic_query_embedding"] = vecs[0]
+                    except Exception as emb_exc:
+                        clustering_semantic_bundle["semantic_embedding_error"] = str(emb_exc)
+
+                await push_step(
+                    "semantic-description-cleaning",
+                    {
+                        "model": cleaning.get("model"),
+                        "used_fallback": bool(cleaning.get("used_fallback")),
+                        "skipped": bool(cleaning.get("skipped")),
+                        "reason": cleaning.get("reason"),
+                        "description_before_cleaning": before_clean,
+                        "description_after_cleaning": semantic_query_text,
+                        "semantic_embedding_model": clustering_semantic_bundle.get("semantic_embedding_model"),
+                        "semantic_query_embedding": clustering_semantic_bundle.get("semantic_query_embedding"),
+                        "semantic_embedding_error": clustering_semantic_bundle.get("semantic_embedding_error"),
+                        "source_text_excerpt": (payload.description or "")[:500],
+                        "cleaned_text_excerpt": semantic_query_text[:500],
+                    },
+                )
+
                 await phase("semantic-search", "Семантический fallback", "Ищем ближайший эталон по эмбеддингам.")
                 try:
                     knn_k = int(payload.semantic_k) if payload.semantic_k is not None else 3
@@ -296,7 +449,7 @@ async def _run_validate_pipeline(
                     ss = await client.post(
                         f"{SEMANTIC_SEARCH_URL}/api/v1/search",
                         json={
-                            "description": payload.description,
+                            "description": semantic_query_text,
                             "tnved_code": payload.tnved_code,
                             "similarity_threshold": threshold,
                             "knn_k": knn_k,
@@ -326,6 +479,7 @@ async def _run_validate_pipeline(
                     "semantic-search",
                     {
                         **ss_data,
+                        "description_for_vectorization_excerpt": semantic_query_text[:500],
                         "similarity_threshold": threshold,
                         "threshold_resolution": threshold_meta,
                         "reference_examples_submitted": len(reference_examples),
@@ -376,7 +530,9 @@ async def _run_validate_pipeline(
                     else:
                         class_id = cand
 
-                if below_or_equal or not matched:
+                # LLM-именование: низкая схожесть, нет устойчивого kNN-матча или класс не назначен
+                # (в т.ч. семантический кандидат отклонён проверкой правил справочника).
+                if below_or_equal or not matched or not class_id:
                     await phase("llm-naming", "LLM-именование класса", "Семантика не дала класс — генерируем новое имя класса.")
                     labels_payload: list[dict[str, str]] = []
                     if isinstance(catalog_classes, list):
@@ -435,14 +591,15 @@ async def _run_validate_pipeline(
             await push_step("price-validator", price_json)
 
             await phase("enqueue-clustering", "Фоновая кластеризация", "Ставим задачу кластеризации в очередь.")
-            job_id = enqueue_cluster_job(
-                {
-                    "declaration_id": payload.declaration_id,
-                    "description": payload.description,
-                    "tnved_code": payload.tnved_code,
-                    "final_class": class_id,
-                }
-            )
+            job_payload: dict[str, Any] = {
+                "declaration_id": payload.declaration_id,
+                "description": payload.description,
+                "tnved_code": payload.tnved_code,
+                "final_class": class_id,
+            }
+            if clustering_semantic_bundle:
+                job_payload["semantic_cleaning_for_training"] = dict(clustering_semantic_bundle)
+            job_id = enqueue_cluster_job(job_payload)
             await push_step("enqueue-clustering-job", {"job_id": job_id})
         except httpx.HTTPStatusError as exc:
             sc = exc.response.status_code
@@ -465,6 +622,8 @@ async def _run_validate_pipeline(
     flow["status"] = "completed"
     flow["summary_ru"] = flow["steps"][0]["result"].get("summary_ru") if flow["steps"] else None
     flow["final_class"] = class_id
+    if clustering_semantic_bundle:
+        flow["semantic_cleaning_for_training"] = dict(clustering_semantic_bundle)
     return flow
 
 

@@ -1,35 +1,43 @@
 # Pipeline
 
-Репозиторий системы автоматической проверки и классификации деклараций.
+**Автоматическая проверка и классификация таможенных деклараций** — извлечение признаков из описания товара, сопоставление со справочником правил, семантический поиск по эталонам, проверка стоимости и экспертный контур для спорных случаев.
 
-## Зачем нужна эта система
+> Рабочий прототип (MVP) для отладки архитектуры, бизнес-логики и интерфейсов ролей **инспектор** и **эксперт**. Часть внешних интеграций и фоновых сценариев реализована в упрощённом виде.
 
-Система снижает долю ручной проверки деклараций и помогает инспектору быстрее принимать решение по спорным позициям.  
-Она собирает в один процесс извлечение признаков из описания товара, сопоставление с правилами, смысловой поиск похожих примеров и проверку стоимости.
+---
 
-## Что делает система
+## Содержание
 
-- Принимает данные декларации и запускает проверку по цепочке сервисов.
-- Пытается определить корректный класс товара по правилам и похожим примерам.
-- Выявляет противоречия в описании и числовых характеристиках.
-- Передаёт спорные случаи в экспертный контур для уточнения правил.
-- Возвращает итог: проверка пройдена или требуется дополнительная проверка.
+- [Возможности](#возможности)
+- [Архитектура](#архитектура)
+- [Стек](#стек)
+- [Быстрый старт](#быстрый-старт)
+- [Сервисы и порты](#сервисы-и-порты)
+- [Конфигурация](#конфигурация)
+- [Разработка](#разработка)
+- [Документация](#документация)
+- [Лицензия и статус](#лицензия-и-статус)
 
-## Статус проекта
+---
 
-Это рабочий прототип (MVP) для отладки архитектуры, бизнес-логики и интерфейсов ролей «эксперт» и «инспектор».  
-Часть интеграций с внешними источниками и отдельные фоновые сценарии пока реализованы в упрощённом виде.
+## Возможности
 
-## Технологии
+| Область | Что делает система |
+|--------|---------------------|
+| **Проверка ДТ** | Принимает данные декларации и прогоняет их по цепочке микросервисов |
+| **Классификация** | Определяет класс товара по DSL-правилам справочника; при неоднозначности — по приоритету |
+| **Семантика** | kNN по эмбеддингам эталонов: \(P(c) = V_{\mathrm{best}}(c) \cdot V_w(c) / (\varepsilon + \sum w_j)\) |
+| **Контроль описания** | Выявляет противоречия в тексте и числовых характеристиках |
+| **Экспертиза** | Передаёт спорные случаи в очередь эксперта; обновление правил и таксономии |
+| **Стоимость** | Шаг сверки цены в общем пайплайне (в прототипе — упрощённая заглушка) |
 
-- **Сервисы и API:** Python, FastAPI, Uvicorn.
-- **Хранение данных:** PostgreSQL.
-- **ML и смысловой поиск:** `sentence-transformers`, `scikit-learn`.
-- **Работа с LLM:** Ollama (и поддержка vLLM в конфигурации).
-- **Интерфейсы:** React + TypeScript + Vite, nginx.
-- **Инфраструктура запуска:** Docker Compose.
+Подробные правила классификации в справочнике — в [`docs/README-klassifikaciya-spravochnika.md`](docs/README-klassifikaciya-spravochnika.md).
 
-Ниже — общая схема модулей и потоков обработки.
+---
+
+## Архитектура
+
+Два веб-интерфейса (эксперт и инспектор) обращаются к **API Gateway**, который координирует **оркестратор** проверки декларации. Оркестратор вызывает предобработку (LLM), движок правил, семантический поиск, именование классов и проверку цены. Состояние правил и настроек хранится в **PostgreSQL**.
 
 ```mermaid
 flowchart TD
@@ -133,230 +141,111 @@ flowchart TD
     PriceMatch -- НЕТ --> PriceMismatch
 ```
 
-## Состав системы в Docker Compose
+### Сервисы в Docker Compose
 
-Ниже перечислены сервисы из корневого файла [`docker-compose.yml`](docker-compose.yml) в том же порядке. Имена контейнеров удобно сверять командой `docker compose ps`.
+| Сервис | Контейнер | Роль |
+|--------|-----------|------|
+| `postgres` | `pipeline_postgres` | Правила, настройки, очередь кластеризации |
+| `ollama` | `pipeline_ollama` | Локальные LLM для предобработки и именования |
+| `backend` | `pipeline_rules_engine` | CRUD справочника, классификация по DSL |
+| `semantic-search` | `pipeline_semantic_search` | kNN по эмбеддингам (`sentence-transformers`) |
+| `llm-naming` | `pipeline_llm_naming` | Предложение имени класса (Ollama / vLLM) |
+| `preprocessing` | `pipeline_preprocessing` | Извлечение признаков из текста ДТ |
+| `price-validator` | `pipeline_price_validator` | Шаг проверки стоимости |
+| `clustering-service` | `pipeline_clustering_service` | Кластеризация эталонов (k-means) |
+| `orchestrator` | `pipeline_orchestrator` | Сценарий проверки декларации |
+| `api-gateway` | `pipeline_api_gateway` | Единая точка входа для UI |
+| `frontend-expert` | `pipeline_frontend_expert` | UI эксперта (nginx + React) |
+| `frontend-officer` | `pipeline_frontend_officer` | UI инспектора (nginx + React) |
 
-| Сервис | Контейнер | Назначение |
-|---|---|---|
-| `postgres` | `pipeline_postgres` | PostgreSQL 16: правила, настройки приложения, очередь заданий для кластеризации. |
-| `ollama` | `pipeline_ollama` | Запуск и хранение языковых моделей; к нему обращаются предобработка и сервис имён классов. |
-| `backend` | `pipeline_rules_engine` | Правила, классификация, настройки извлечения признаков, сценарии работы инспектора. |
-| `semantic-search` | `pipeline_semantic_search` | Поиск похожих записей по смыслу: векторы через `sentence-transformers`, сравнение с эталонами в памяти процесса. |
-| `llm-naming` | `pipeline_llm_naming` | Подбор названия класса через Ollama или vLLM (`LLM_BACKEND` в compose); текст промпта подключается томом из репозитория. |
-| `preprocessing` | `pipeline_preprocessing` | Извлечение признаков из текста, управление моделями; для операций с контейнером Ollama смонтирован сокет Docker на хосте. |
-| `price-validator` | `pipeline_price_validator` | Шаг проверки стоимости в общей цепочке. Сейчас использует условную оценку без обращения во внешние системы (ответ помечается как заглушка). |
-| `clustering-service` | `pipeline_clustering_service` | Отбор кандидатов в группы (k-means по векторам) работает через HTTP; фоновая обработка очереди и часть отдельных сценариев пока упрощены. |
-| `orchestrator` | `pipeline_orchestrator` | Собирает шаги проверки декларации в единый сценарий. Часть числовых параметров задаётся в [`services/api-gateway/config/pipeline.json`](services/api-gateway/config/pipeline.json), этот же файл подключён и в шлюз. |
-| `api-gateway` | `pipeline_api_gateway` | Точка входа для веб-интерфейсов: проверка запросов, контроль готовности, маршрутизация к остальным сервисам и вспомогательные сценарии (в том числе few-shot). Настройки генератора текста — в `prompt_generator.json`. |
-| `frontend-expert` | `pipeline_frontend_expert` | Статика интерфейса эксперта (режим сборки `expert`), nginx. |
-| `frontend-officer` | `pipeline_frontend_officer` | Статика интерфейса инспектора (режим `officer`), nginx. |
+Конфигурация пайплайна: [`services/api-gateway/config/pipeline.json`](services/api-gateway/config/pipeline.json) (тот же файл смонтирован в оркестратор).
 
-**Данные и файлы на машине:** том `pgdata` хранит базу, `ollama_data` — загруженные модели. В контейнеры подключаются `config/llm_models.json`, `services/api-gateway/config/pipeline.json` (также в оркестратор) и `prompt_generator.json` для шлюза. Отдельной векторной базы в составе нет: сервис смыслового поиска считает векторы самостоятельно.
+**Тома:** `pgdata` — база; `ollama_data` — модели. Порт Postgres **5432** проброшен на хост для локальной разработки backend без Docker.
 
-**Использование GPU для кластеризации:** при необходимости можно подключить файл [`docker-compose.clustering-gpu.yml`](docker-compose.clustering-gpu.yml) поверх основного. В файле есть пример команды; на хосте должны быть установлены драйверы NVIDIA и Container Toolkit.
+**GPU:** для кластеризации можно наложить [`docker-compose.clustering-gpu.yml`](docker-compose.clustering-gpu.yml) (нужны NVIDIA Container Toolkit). У `ollama` в compose по умолчанию `gpus: all` — на CPU-only хосте строку следует убрать.
 
-## Настройки моделей для извлечения признаков
+---
 
-Единый файл [`config/llm_models.json`](config/llm_models.json) задаёт список моделей и параметры их запуска. Его читают и бэкенд (для экрана настроек и правил), и сервис предобработки — чтобы обе части работали согласованно в Ollama или vLLM.
+## Стек
 
-| Поле | Значение |
-|---|---|
-| **Файл** | [`config/llm_models.json`](config/llm_models.json) |
-| **Формат** | Объект с ключом `models`: имя модели (как для `ollama pull`) и параметры вроде `num_ctx`, `max_new_tokens`, `temperature`, `repetition_penalty`, `max_length`, `enable_thinking` и т.д. |
-| **Свой путь к файлу** | В контейнере бэкенда — переменная `FEATURE_EXTRACTION_MODEL_DEFAULTS_PATH`; в предобработке — `MODEL_RUNTIME_SETTINGS_PATH`. Если не задавать, используется `/app/config/llm_models.json`. |
+| Слой | Технологии |
+|------|------------|
+| **API** | Python 3, FastAPI, Uvicorn, Pydantic v2 |
+| **Данные** | PostgreSQL 16, SQLAlchemy 2 (backend), psycopg2 |
+| **ML / NLP** | Ollama / vLLM (`shared/llm_runtime`), sentence-transformers, scikit-learn |
+| **Frontend** | React, TypeScript, Vite → статика за nginx |
+| **Инфра** | Docker Compose |
 
-**Как добавить новую модель:** внесите запись в `models`, при необходимости выполните `ollama pull …`, затем пересоберите или перезапустите сервисы. Файл уже подключён в `backend` и `preprocessing` из каталога проекта.
+---
 
-**Откуда настройки появляются в интерфейсе:** запрос `GET /api/feature-extraction/model-settings` обращается к бэкенду. Пока в базе нет сохранённого набора, сервис возвращает содержимое JSON. После первого сохранения через интерфейс или API список хранится в PostgreSQL (таблица настроек приложения), и дальше меняется тем же API. Чтобы предобработка и правила не расходились, поддерживайте в актуальном состоянии тот же файл `llm_models.json`, на который ссылается `MODEL_RUNTIME_SETTINGS_PATH`.
+## Быстрый старт
 
-## Контекстная диаграмма
+### Требования
 
-Ниже — предметная схема окружения системы, а не пошаговое соответствие контейнерам из `docker-compose`.
+- [Docker Engine](https://docs.docker.com/engine/install/) и Docker Compose v2
+- ~8+ ГБ RAM (PostgreSQL + Ollama + эмбеддинги)
+- Для GPU: NVIDIA-драйвер и [Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html)
 
-```plantuml
-@startuml
-!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Container.puml
+### 1. Клонирование и переменные
 
-title System Context: Automated Classification System
-
-Person(customsOfficer, "Таможенник", "Проверяет декларации на границе")
-Person_Ext(declarant, "Декларант", "Подает ДТ")
-Person_Ext(expert, "Эксперт", "Настраивает правила классификации")
-
-System(SystemAA, "Система классификации", "Автоматическая валидация ДТ")
-System_Ext(SystemF, "Валидация цен", "Внешний сервис ФТС")
-System_Ext(SystemC, "ФТС/ФНС", "Контролирующие органы")
-SystemDb_Ext(SystemE, "Исторические ДТ", "Архив для аналитики")
-
-Rel(declarant, customsOfficer, "Декларация")
-Rel(customsOfficer, SystemAA, "Отправляет декларацию")
-Rel(SystemAA, customsOfficer, "Статус валидации")
-Rel(expert, SystemAA, "Настраивает правила")
-Rel(SystemAA, expert, "Запрос на ручную валидацию")
-Rel(SystemAA, SystemF, "Проверка цены")
-Rel(SystemF, SystemC, "Отчёт по валидации")
-Rel(SystemAA, SystemC, "Передача результатов")
-Rel(SystemAA, SystemE, "Сохранение истории")
-Rel(SystemC, declarant, "Проверка/штрафы", "пост-контроль")
-@enduml
-```
-
-## Локальный запуск для проверки
-
-### 1. Сборка и старт
-
-```powershell
-docker compose build
-docker compose up -d
-docker compose ps
-```
-
-### 2. Ollama и модель
-
-```powershell
-docker compose exec ollama ollama pull llama3.1:8b
-```
-
-В `docker-compose.yml` у сервиса `ollama` указано `gpus: all`. Если на машине нет подходящей видеокарты или не установлен NVIDIA Container Toolkit, удалите эту строку и перезапустите набор сервисов.
-
-Если контейнер с Ollama не запущен:
-
-```powershell
-docker compose up -d ollama
-```
-
-### 3. Открытые порты на хосте
-
-- `8081` — интерфейс эксперта (`frontend-expert`, nginx)
-- `8082` — интерфейс инспектора (`frontend-officer`, nginx)
-- `8000` — шлюз API (`api-gateway`)
-- `8003` — оркестратор
-- `8004` — предобработка и модели
-- `8005` — бэкенд правил (`backend`)
-- `8001` — семантический поиск
-- `8002` — именование классов (`llm-naming`)
-- `8006` — проверка цены
-- `8007` — кластеризация
-- `11434` — Ollama
-
-### 4. Проверка готовности
-
-```powershell
-Invoke-RestMethod -Uri "http://localhost:8000/ready" | ConvertTo-Json -Depth 6
-Invoke-RestMethod -Uri "http://localhost:8000/health"
-Invoke-RestMethod -Uri "http://localhost:8003/health"
-Invoke-RestMethod -Uri "http://localhost:8007/ready"
-```
-
-### 5. Проверка полной цепочки
-
-```powershell
-$body = @{
-  declaration_id = "DT-TEST-001"
-  description    = "Карбамид гранулированный 46% азота"
-  tnved_code     = "3102101000"
-} | ConvertTo-Json
-
-Invoke-RestMethod -Uri "http://localhost:8000/api/validate" `
-  -Method Post -ContentType "application/json" -Body $body | ConvertTo-Json -Depth 8
-```
-
-Проверка состояния фонового задания:
-
-```powershell
-Invoke-RestMethod -Uri "http://localhost:8000/api/jobs/1" | ConvertTo-Json -Depth 8
-```
-
-### 6. Остановка
-
-```powershell
-docker compose down
-```
-
-С удалением тома базы (полный сброс данных):
-
-```powershell
-docker compose down -v
-```
-
-## Развёртывание на сервере
-
-### Требования к серверу
-
-- Установлены Docker Engine и `docker compose`
-- Достаточно оперативной памяти и места на диске для PostgreSQL и моделей Ollama
-
-### Порядок развёртывания (по шагам)
-
-#### 1) Подготовьте окружение
-
-- Убедитесь, что Docker запущен.
-- Проверьте, что команды `docker --version` и `docker compose version` выполняются без ошибок.
-
-#### 2) Получите код проекта
-
-```powershell
+```bash
 git clone <URL_репозитория>
 cd Pipeline
 ```
 
-Если проект уже на сервере, просто перейдите в каталог с `docker-compose.yml`.
-
-#### 3) Создайте файл переменных `.env`
-
-Рядом с `docker-compose.yml` создайте файл `.env` (в репозиторий его добавлять не нужно):
+Создайте `.env` рядом с `docker-compose.yml` (в git не коммитится):
 
 ```env
 POSTGRES_PASSWORD=сложный_секрет
 OLLAMA_MODEL=llama3.1:8b
-# OLLAMA_BASE_URL=http://другой-хост:11434
 # LLM_BACKEND=ollama
-# SEMANTIC_SEARCH_EMBEDDING_MODEL=intfloat/multilingual-e5-base
-# CLUSTERING_DEVICE=auto
+# VITE_API_BASE=http://<хост>:8000/api   # при доступе не с localhost
 ```
 
-`LLM_BACKEND`, `OLLAMA_*` и `VLLM_*` используются сервисами `preprocessing` и `llm-naming`.  
-Если интерфейс открывается не с localhost, при сборке образов задайте `VITE_API_BASE` как адрес шлюза с `/api` в конце (это аргумент сборки в `docker-compose.yml`).
+### 2. Сборка и запуск
 
-#### 4) Соберите образы
-
-```powershell
+```bash
 docker compose build
-```
-
-#### 5) Запустите сервисы
-
-```powershell
 docker compose up -d
 docker compose ps
 ```
 
-#### 6) Подготовьте модель в Ollama
+Полная пересборка без кэша (после крупных изменений):
 
-```powershell
+```bash
+docker compose build --no-cache
+docker compose up -d --force-recreate
+```
+
+### 3. Модель Ollama
+
+```bash
 docker compose exec ollama ollama pull llama3.1:8b
 docker compose exec ollama ollama list
 ```
 
-Если контейнер `ollama` не стартует из-за GPU, удалите `gpus: all` в `docker-compose.yml` и запустите его снова:
+Если `ollama` не стартует из‑за GPU:
 
-```powershell
+```bash
+# уберите gpus: all в docker-compose.yml, затем:
 docker compose up -d ollama
 ```
 
-#### 7) Проверьте готовность системы
+### 4. Интерфейсы
+
+| URL | Назначение |
+|-----|------------|
+| http://localhost:8081 | Эксперт — правила, модели, очередь решений |
+| http://localhost:8082 | Инспектор — прогон декларации |
+| http://localhost:8000 | API Gateway (`/api`, `/ready`, `/health`) |
+
+### 5. Проверка
 
 ```powershell
+# Windows PowerShell
 Invoke-RestMethod -Uri "http://localhost:8000/ready" | ConvertTo-Json -Depth 6
 Invoke-RestMethod -Uri "http://localhost:8000/health"
-Invoke-RestMethod -Uri "http://localhost:8003/health"
-Invoke-RestMethod -Uri "http://localhost:8007/ready"
-```
 
-#### 8) Выполните контрольный запрос
-
-```powershell
 $body = @{
   declaration_id = "DT-TEST-001"
   description    = "Карбамид гранулированный 46% азота"
@@ -367,115 +256,135 @@ Invoke-RestMethod -Uri "http://localhost:8000/api/validate" `
   -Method Post -ContentType "application/json" -Body $body | ConvertTo-Json -Depth 8
 ```
 
-Если ответ получен без ошибок, базовое развёртывание выполнено.
-
-#### 9) Остановка и полный сброс (при необходимости)
-
-```powershell
-docker compose down
+```bash
+# Linux / macOS
+curl -s http://localhost:8000/ready | jq .
+curl -s -X POST http://localhost:8000/api/validate \
+  -H 'Content-Type: application/json' \
+  -d '{"declaration_id":"DT-TEST-001","description":"Карбамид гранулированный 46% азота","tnved_code":"3102101000"}' | jq .
 ```
 
-Полный сброс с удалением тома базы:
+### Остановка
 
-```powershell
-docker compose down -v
+```bash
+docker compose down          # контейнеры остановлены, тома сохранены
+docker compose down -v       # + удаление pgdata и ollama_data
 ```
 
-### Обновление
+### Обновление на сервере
 
-```powershell
+```bash
 git pull
 docker compose build
 docker compose up -d
+docker compose ps
+curl -s http://localhost:8000/ready
 ```
 
-### Минимальные проверки после обновления
+---
 
-- `docker compose ps`
-- запрос к `http://<хост>:8000/ready`
-- `docker compose exec ollama ollama list`
+## Сервисы и порты
 
-## Контейнерная диаграмма
+| Порт | Сервис |
+|------|--------|
+| 8081 | `frontend-expert` |
+| 8082 | `frontend-officer` |
+| 8000 | `api-gateway` |
+| 8003 | `orchestrator` |
+| 8004 | `preprocessing` |
+| 8005 | `backend` (движок правил) |
+| 8001 | `semantic-search` |
+| 8002 | `llm-naming` |
+| 8006 | `price-validator` |
+| 8007 | `clustering-service` |
+| 5432 | `postgres` |
+| 11434 | `ollama` |
 
-@startuml
-!include <C4/C4_Container>
+---
 
-left to right direction
-skinparam nodesep 10
-skinparam ranksep 60
-skinparam padding 10
-skinparam defaultFontSize 16
+## Конфигурация
 
-title Система валидации ДТ (Контейнерная диаграмма)
+### Модели извлечения признаков
 
-Boundary(SystemBoundary, "") {
-    
-    Container(ExpertUI, "Интерфейс эксперта", "Nginx + React + TypeScript (Vite build)", "Управление правилами и моделями")
-    Container(OfficerUI, "Интерфейс инспектора", "Nginx + React + TypeScript (Vite build)", "Прогон ДТ и мониторинг")
+Файл [`config/llm_models.json`](config/llm_models.json) — список моделей и параметры генерации. Его читают backend и `preprocessing` (путь в контейнере: `FEATURE_EXTRACTION_MODEL_DEFAULTS_PATH` / `MODEL_RUNTIME_SETTINGS_PATH`).
 
-    Container(ApiGateway, "Шлюз API", "FastAPI + Uvicorn", "Агрегация API, ретраи, проксирование")
-    Container(Orchestrator, "Оркестратор", "FastAPI + Uvicorn", "Координация пайплайна валидации")
-    Container(PreprocessingSvc, "Сервис предобработки", "FastAPI + Uvicorn + Ollama HTTP", "Извлечение признаков и управление LLM")
-    Container(RulesEngine, "Движок правил (backend)", "FastAPI + SQLAlchemy + PostgreSQL", "CRUD правил и классификация")
-    Container(SemanticSearch, "Семантический поиск", "FastAPI + PostgreSQL (pgvector)", "Векторный поиск похожих товаров")
-    Container(LlmGenerator, "Генерация классов", "FastAPI + Ollama HTTP", "Генерация названия класса")
-    Container(PriceValidator, "Проверка стоимости", "FastAPI + Uvicorn", "Сверка цены с внешним сервисом")
+После первого сохранения через UI настройки дублируются в PostgreSQL; файл в репозитории остаётся эталоном для новых стендов.
 
-    Container(ClusteringService, "Сервис кластеризации", "FastAPI + sentence-transformers + scikit-learn", "Фоновая обработка задач кластеризации")
-    Container(Ollama, "Ollama", "ollama/ollama", "Локальный LLM runtime")
+### Семантический fallback
 
-    ContainerDb(Postgres, "PostgreSQL", "PostgreSQL 16 (+ pgvector)", "Правила, задачи кластеризации, результаты, векторы")
-}
+Пороги τ₁, τ₂, пол \(s_0\), γ и промпт чистки текста — в UI эксперта (настройки семантики) и через API backend. Формула поддержки класса реализована в [`services/semantic-search/app/main.py`](services/semantic-search/app/main.py).
 
-System_Ext(PriceService, "Сервис цен ФТС", "API", "Рыночные цены")
-System_Ext(FtsSystem, "Шлюз ФТС/ФНС", "HTTPS/XML", "Контролирующие органы")
+### Справочник ТН ВЭД
 
-' === Relations ===
-Rel(OfficerUI, ApiGateway, "HTTPS /api")
-Rel(ExpertUI, ApiGateway, "HTTPS /api")
-Rel(ExpertUI, ApiGateway, "Few-shot: запуск кластеризации", "REST")
-Rel(ApiGateway, Orchestrator, "Валидация ДТ", "REST")
+Дерево кодов для UI: `frontend/src/catalog/tnVedChildren.generated.ts`.
 
-Rel(Orchestrator, PreprocessingSvc, "Текст ДТ")
-Rel(PreprocessingSvc, Orchestrator, "Признаки")
-Rel(Orchestrator, RulesEngine, "Поиск правила")
-Rel(Orchestrator, SemanticSearch, "Поиск похожих")
-Rel(Orchestrator, LlmGenerator, "Генерация имени")
-Rel(Orchestrator, PriceValidator, "Проверка цены")
+```bash
+# положите data/ТН ВЭД.xlsx, затем из корня репозитория:
+python scripts/build_tn_ved_tree_from_xlsx.py --help
+```
 
-Rel(RulesEngine, Postgres, "CRUD правил", "SQL")
-Rel(SemanticSearch, Postgres, "pgvector поиск", "SQL")
-Rel(PreprocessingSvc, Ollama, "Pull/Generate model", "HTTP")
-Rel(LlmGenerator, Ollama, "Generate class name", "HTTP")
+### Переменные окружения (выборочно)
 
-Rel(Orchestrator, Postgres, "Создание задач кластеризации", "SQL")
-Rel(Postgres, ClusteringService, "Выбор задач (SKIP LOCKED)", "SQL")
-Rel(ClusteringService, Postgres, "Запись результата и снятие блокировки", "SQL")
+| Переменная | Где | Смысл |
+|------------|-----|--------|
+| `DATABASE_URL` | backend | PostgreSQL (`postgresql+psycopg2://…`) |
+| `LLM_BACKEND` | preprocessing, llm-naming | `ollama` (по умолчанию) или `vllm` |
+| `OLLAMA_BASE_URL` | preprocessing, llm-naming | URL Ollama |
+| `SEMANTIC_SEARCH_EMBEDDING_MODEL` | semantic-search | Модель эмбеддингов |
+| `SEMANTIC_SEARCH_FORCE_STUB` | semantic-search | `1` — заглушка без модели |
+| `VITE_API_BASE` | сборка frontend | Базовый URL API для браузера |
 
-Rel(OfficerUI, ApiGateway, "Подписка на статус", "WebSocket/SSE")
-Rel(ApiGateway, Postgres, "LISTEN статусов задач", "SQL")
-Rel(ApiGateway, ClusteringService, "Few-shot assist / clustering", "REST")
+---
 
-Rel(PriceValidator, PriceService, "Запрос цены", "HTTPS (Timeout -> Cache)")
-Rel(ApiGateway, FtsSystem, "Отчетность / Результаты", "HTTPS/XML")
+## Разработка
 
-' === Styling ===
-UpdateElementStyle(ExpertUI, $fontColor="#00838f", $bgColor="#e0f7fa", $borderColor="#00838f")
-UpdateElementStyle(OfficerUI, $fontColor="#0277bd", $bgColor="#e1f5fe", $borderColor="#0277bd")
-UpdateElementStyle(ApiGateway, $fontColor="#0d47a1", $bgColor="#e3f2fd", $borderColor="#0d47a1")
-UpdateElementStyle(Orchestrator, $fontColor="#1b5e20", $bgColor="#c8e6c9", $borderColor="#1b5e20")
-UpdateElementStyle(PreprocessingSvc, $fontColor="#1b5e20", $bgColor="#f1f8e9", $borderColor="#1b5e20")
-UpdateElementStyle(RulesEngine, $fontColor="#1b5e20", $bgColor="#f1f8e9", $borderColor="#1b5e20")
-UpdateElementStyle(ClusteringService, $fontColor="#e65100", $bgColor="#ffe0b2", $borderColor="#e65100")
-UpdateElementStyle(Postgres, $fontColor="#2e7d32", $bgColor="#e8f5e9", $borderColor="#2e7d32")
-UpdateElementStyle(Ollama, $fontColor="#6a1b9a", $bgColor="#f3e5f5", $borderColor="#6a1b9a")
+### Backend локально
 
-Legend right
-  <#1b5e20>■</color> Core Services (Sync)
-  <#e65100>■</color> Async Worker (ML)
-  <#2e7d32>■</color> PostgreSQL (правила/задачи)
-  <#6a1b9a>■</color> LLM Runtime (Ollama)
-  <#0277bd>■</color> UI
-endLegend
+```bash
+docker compose up -d postgres   # или весь compose
+cd backend
+pip install -r requirements.docker.txt
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+```
 
-@enduml
+`DATABASE_URL` по умолчанию — в [`backend/app/db/session.py`](backend/app/db/session.py).
+
+### Frontend локально
+
+```bash
+cd frontend
+npm install
+npm run dev        # разработка
+npm test           # vitest
+npm run build      # production-бандл
+```
+
+Режим UI задаётся `VITE_UI_MODE=expert|officer` (в Docker — build-args в compose).
+
+### Тесты
+
+```bash
+cd backend && pytest
+cd frontend && npm test
+cd services/orchestrator && pytest
+```
+
+---
+
+## Документация
+
+| Документ | Описание |
+|----------|----------|
+| [`docs/README-klassifikaciya-spravochnika.md`](docs/README-klassifikaciya-spravochnika.md) | Правила классификации в справочнике (DSL, условия, приоритеты) |
+| [`docs/architecture/backend-oop-transition.md`](docs/architecture/backend-oop-transition.md) | Переход backend на слои application / infrastructure |
+| [`docs/architecture/class-diagrams/`](docs/architecture/class-diagrams/) | PlantUML-диаграммы классов (для разработчиков) |
+| [`backend/README.md`](backend/README.md) | API движка правил |
+| [`docker-compose.yml`](docker-compose.yml) | Источник правды по сервисам и томам |
+
+---
+
+## Лицензия и статус
+
+Проект дипломной / исследовательской разработки. Лицензия в репозитории не указана — уточняйте у авторов перед использованием вне учебного контура.
+
+**Статус:** активный MVP; API и схемы данных могут меняться без semver-гарантий.

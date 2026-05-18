@@ -13,6 +13,8 @@ from ..rules.dsl_models import RuleDSL
 
 @dataclass(frozen=True)
 class CompiledRuleCacheKey:
+    """Ключ кеша compiled-правила: rule + конкретная активная версия."""
+
     rule_id: uuid.UUID
     rule_version_id: uuid.UUID
     version: int
@@ -42,21 +44,39 @@ class CompiledRuleCache:
 _DEFAULT_CACHE = CompiledRuleCache()
 
 
+class RuleValidationService:
+    """ООП-сервис валидации данных по активной версии правила."""
+
+    def __init__(self, cache: Optional[CompiledRuleCache] = None) -> None:
+        self._cache = cache or CompiledRuleCache()
+
+    def validate_with_rule(
+        self,
+        rule_id: uuid.UUID,
+        data: Any,
+        db: Session,
+    ) -> Tuple[bool, list[Any], Optional[dict[str, Any]], Optional[str]]:
+        rv: RuleVersion | None = (
+            db.query(RuleVersion)
+            .filter(RuleVersion.rule_id == rule_id, RuleVersion.is_active.is_(True))
+            .order_by(RuleVersion.version.desc())
+            .first()
+        )
+        if rv is None:
+            return (False, [{"message": "Active rule version not found"}], None, None)
+        compiled = self._cache.get_or_compile(rv)
+        ok, errors, validated_data, assigned_class = compiled.validate(data)
+        return (ok, errors, validated_data, assigned_class)
+
+
+_DEFAULT_VALIDATION_SERVICE = RuleValidationService(_DEFAULT_CACHE)
+
+
 def validate_with_rule(
     rule_id: uuid.UUID, data: Any, db: Session, *, cache: CompiledRuleCache = _DEFAULT_CACHE
 ) -> Tuple[bool, list[Any], Optional[dict[str, Any]], Optional[str]]:
     """Валидирует данные по активной версии правила с использованием кеша компиляции."""
-    rv: RuleVersion | None = (
-        db.query(RuleVersion)
-        .filter(RuleVersion.rule_id == rule_id, RuleVersion.is_active.is_(True))
-        .order_by(RuleVersion.version.desc())
-        .first()
-    )
-    if rv is None:
-        # Единый формат ошибки, чтобы вызывающий код не ловил исключения в штатном потоке.
-        return (False, [{"message": "Active rule version not found"}], None, None)
-
-    compiled = cache.get_or_compile(rv)
-    ok, errors, validated_data, assigned_class = compiled.validate(data)
-    return (ok, errors, validated_data, assigned_class)
+    if cache is _DEFAULT_CACHE:
+        return _DEFAULT_VALIDATION_SERVICE.validate_with_rule(rule_id, data, db)
+    return RuleValidationService(cache).validate_with_rule(rule_id, data, db)
 

@@ -3,9 +3,18 @@ import {
   getRule,
   listExpertDecisions,
   patchExpertDecision,
+  repairExpertLlmNamingQueue,
   type ExpertDecisionItem,
 } from "../api/client";
 import { TN_VED_SECTION_DEFS } from "../catalog/tnVedSectionTree";
+import {
+  isNamingDecisionCategory,
+  isNamingModelItem,
+  isNamingPostControlItem,
+  llmSuggestedClassFromPayload,
+  namingRowPriority,
+  shouldShowInOfficerWorkQueue,
+} from "../expert/expertDecisionQueueLanes";
 
 /**
  * Соответствие category → источник в системе (для сопровождения и UI):
@@ -66,24 +75,7 @@ function labelStatus(status: string): string {
   return STATUS_LABEL[status] ?? status;
 }
 
-const NAMING_DECISION_CATEGORIES = ["class_name_confirmation", "auto_classification_review", "classification_unresolved"] as const;
-
-const NAMING_MODEL_CATEGORIES = ["class_name_confirmation"] as const;
-const NAMING_POST_CONTROL_CATEGORIES = ["auto_classification_review", "classification_unresolved"] as const;
-
 const WORK_QUEUE_RULE_CATEGORIES = ["classification_ambiguous", "classification_none"] as const;
-
-function isNamingDecisionCategory(category: string): boolean {
-  return (NAMING_DECISION_CATEGORIES as readonly string[]).includes(category);
-}
-
-function isNamingModelCategory(category: string): boolean {
-  return (NAMING_MODEL_CATEGORIES as readonly string[]).includes(category);
-}
-
-function isNamingPostControlCategory(category: string): boolean {
-  return (NAMING_POST_CONTROL_CATEGORIES as readonly string[]).includes(category);
-}
 
 function isWorkQueueRuleCategory(category: string): boolean {
   return (WORK_QUEUE_RULE_CATEGORIES as readonly string[]).includes(category);
@@ -94,12 +86,12 @@ function isStandardExpertCategory(category: string): boolean {
 }
 
 /** Для счётчика в селекторе «Тип проблемы»: какой фильтр соответствует категории записи. */
-function toolbarIssueTypeFromCategory(category: string): UiIssueType {
-  if (isNamingModelCategory(category)) return "model_class";
-  if (isNamingPostControlCategory(category)) return "post_customs_control";
-  if (isWorkQueueRuleCategory(category)) return "classification";
-  if (category === "inspector_feature_correction") return "inspector_correction";
-  if (category === "officer_final_decision") return "officer_decision";
+function toolbarIssueTypeFromItem(item: ExpertDecisionItem, allItems: ExpertDecisionItem[]): UiIssueType {
+  if (isNamingModelItem(item, allItems)) return "model_class";
+  if (isNamingPostControlItem(item, allItems)) return "post_customs_control";
+  if (isWorkQueueRuleCategory(item.category)) return "classification";
+  if (item.category === "inspector_feature_correction") return "inspector_correction";
+  if (item.category === "officer_final_decision") return "officer_decision";
   return "all";
 }
 
@@ -382,6 +374,13 @@ function dedupeNamingDecisionRows(rows: NamingDecisionRow[]): NamingDecisionRow[
       byDeclaration.set(key, row);
       continue;
     }
+    const prevPri = namingRowPriority(prev.item);
+    const curPri = namingRowPriority(row.item);
+    if (curPri > prevPri) {
+      byDeclaration.set(key, row);
+      continue;
+    }
+    if (curPri < prevPri) continue;
     const prevPending = prev.item.status === "pending";
     const curPending = row.item.status === "pending";
     if (curPending && !prevPending) {
@@ -866,6 +865,11 @@ export default function ExpertDecisionsPage() {
   const load = useCallback(async () => {
     setStatus(null);
     try {
+      try {
+        await repairExpertLlmNamingQueue();
+      } catch {
+        /* очередь всё равно загружаем; repair — best-effort для старых записей */
+      }
       const list = await listExpertDecisions({
         page: 1,
         page_size: 100,
@@ -883,7 +887,7 @@ export default function ExpertDecisionsPage() {
 
   const displayItems = useMemo(() => {
     if (issueTypeFilter === "all") return items;
-    return items.filter((it) => toolbarIssueTypeFromCategory(it.category) === issueTypeFilter);
+    return items.filter((it) => toolbarIssueTypeFromItem(it, items) === issueTypeFilter);
   }, [items, issueTypeFilter]);
 
   const namingRowsAll = useMemo(() => {
@@ -895,18 +899,18 @@ export default function ExpertDecisionsPage() {
     if (!namingModalOpen || namingModalLane == null) {
       return namingRowsAll;
     }
-    const allow =
-      namingModalLane === "model"
-        ? new Set<string>(NAMING_MODEL_CATEGORIES as unknown as string[])
-        : new Set<string>(NAMING_POST_CONTROL_CATEGORIES as unknown as string[]);
-    const raw = displayItems.filter((it) => allow.has(it.category)).map(namingRowFromDecision);
+    const raw = displayItems
+      .filter((it) =>
+        namingModalLane === "model" ? isNamingModelItem(it, displayItems) : isNamingPostControlItem(it, displayItems),
+      )
+      .map(namingRowFromDecision);
     return dedupeNamingDecisionRows(raw);
   }, [displayItems, namingModalOpen, namingModalLane, namingRowsAll]);
 
   const modelLaneUniqueCount = useMemo(() => {
     const ids = new Set<string>();
     for (const it of displayItems) {
-      if (!isNamingModelCategory(it.category)) continue;
+      if (!isNamingModelItem(it, displayItems)) continue;
       if (!itemMatchesTnvedSection(it, selectedSection)) continue;
       const id = String(it.declaration_id ?? "").trim().toLowerCase();
       if (id) ids.add(id);
@@ -917,7 +921,7 @@ export default function ExpertDecisionsPage() {
   const postLaneUniqueCount = useMemo(() => {
     const ids = new Set<string>();
     for (const it of displayItems) {
-      if (!isNamingPostControlCategory(it.category)) continue;
+      if (!isNamingPostControlItem(it, displayItems)) continue;
       if (!itemMatchesTnvedSection(it, selectedSection)) continue;
       const id = String(it.declaration_id ?? "").trim().toLowerCase();
       if (id) ids.add(id);
@@ -928,7 +932,7 @@ export default function ExpertDecisionsPage() {
   const namingUniqueDeclCountBySectionModel = useMemo(() => {
     const m = new Map<string, Set<string>>();
     for (const it of displayItems) {
-      if (!isNamingModelCategory(it.category)) continue;
+      if (!isNamingModelItem(it, displayItems)) continue;
       const id = String(it.declaration_id ?? "").trim().toLowerCase();
       if (!id) continue;
       const sec = sectionInfoFromDecision(it).sectionKey;
@@ -941,7 +945,7 @@ export default function ExpertDecisionsPage() {
   const namingUniqueDeclCountBySectionPost = useMemo(() => {
     const m = new Map<string, Set<string>>();
     for (const it of displayItems) {
-      if (!isNamingPostControlCategory(it.category)) continue;
+      if (!isNamingPostControlItem(it, displayItems)) continue;
       const id = String(it.declaration_id ?? "").trim().toLowerCase();
       if (!id) continue;
       const sec = sectionInfoFromDecision(it).sectionKey;
@@ -955,7 +959,7 @@ export default function ExpertDecisionsPage() {
     if (namingModalLane === "model") {
       const ids = new Set<string>();
       for (const it of displayItems) {
-        if (!isNamingModelCategory(it.category)) continue;
+        if (!isNamingModelItem(it, displayItems)) continue;
         const id = String(it.declaration_id ?? "").trim().toLowerCase();
         if (id) ids.add(id);
       }
@@ -964,7 +968,7 @@ export default function ExpertDecisionsPage() {
     if (namingModalLane === "post") {
       const ids = new Set<string>();
       for (const it of displayItems) {
-        if (!isNamingPostControlCategory(it.category)) continue;
+        if (!isNamingPostControlItem(it, displayItems)) continue;
         const id = String(it.declaration_id ?? "").trim().toLowerCase();
         if (id) ids.add(id);
       }
@@ -994,8 +998,14 @@ export default function ExpertDecisionsPage() {
     return merged;
   }, [displayItems, namingModalLane, namingUniqueDeclCountBySectionModel, namingUniqueDeclCountBySectionPost]);
 
-  const hasModelLaneItems = useMemo(() => displayItems.some((it) => isNamingModelCategory(it.category)), [displayItems]);
-  const hasPostLaneItems = useMemo(() => displayItems.some((it) => isNamingPostControlCategory(it.category)), [displayItems]);
+  const hasModelLaneItems = useMemo(
+    () => displayItems.some((it) => isNamingModelItem(it, displayItems)),
+    [displayItems],
+  );
+  const hasPostLaneItems = useMemo(
+    () => displayItems.some((it) => isNamingPostControlItem(it, displayItems)),
+    [displayItems],
+  );
 
   const sectionCounts = useMemo(() => {
     const m = new Map<string, { label: string; count: number }>();
@@ -1018,7 +1028,7 @@ export default function ExpertDecisionsPage() {
       officer_decision: 0,
     };
     for (const it of items) {
-      const t = toolbarIssueTypeFromCategory(it.category);
+      const t = toolbarIssueTypeFromItem(it, items);
       if (t !== "all") base[t] += 1;
     }
     return base;
@@ -1037,9 +1047,10 @@ export default function ExpertDecisionsPage() {
   );
   const officerLaneCount = useMemo(
     () =>
-      displayItems.filter((it) => it.category === "officer_final_decision" && itemMatchesTnvedSection(it, selectedSection))
-        .length,
-    [displayItems, selectedSection],
+      displayItems.filter(
+        (it) => shouldShowInOfficerWorkQueue(it, items) && itemMatchesTnvedSection(it, selectedSection),
+      ).length,
+    [displayItems, items, selectedSection],
   );
   const featuresLaneCount = useMemo(
     () =>
@@ -1059,13 +1070,13 @@ export default function ExpertDecisionsPage() {
 
   const workQueueModalSections = useMemo(() => {
     if (!workQueueView) return [];
-    const pred = (cat: string) => {
-      if (workQueueView.kind === "orphan") return cat === workQueueView.category;
-      if (workQueueView.lane === "rules") return isWorkQueueRuleCategory(cat);
-      if (workQueueView.lane === "officer") return cat === "officer_final_decision";
-      return cat === "inspector_feature_correction";
-    };
-    const rows = displayItems.filter((it) => pred(it.category) && itemMatchesTnvedSection(it, selectedSection));
+    const rows = displayItems.filter((it) => {
+      if (!itemMatchesTnvedSection(it, selectedSection)) return false;
+      if (workQueueView.kind === "orphan") return it.category === workQueueView.category;
+      if (workQueueView.lane === "rules") return isWorkQueueRuleCategory(it.category);
+      if (workQueueView.lane === "officer") return shouldShowInOfficerWorkQueue(it, items);
+      return it.category === "inspector_feature_correction";
+    });
     return groupItemsIntoWorkSections(rows);
   }, [displayItems, workQueueView, selectedSection]);
 
@@ -1237,7 +1248,7 @@ export default function ExpertDecisionsPage() {
     <div style={shell}>
       <header style={{ textAlign: "center", marginBottom: 22 }}>
         <h1 style={{ margin: "0 0 10px", fontSize: 24, fontWeight: 700, color: "#0f172a", letterSpacing: "-0.02em" }}>
-          Очередь на проверку эксперта
+          Очередь на проверку экспертом
         </h1>
         <p
           style={{
@@ -1250,8 +1261,8 @@ export default function ExpertDecisionsPage() {
             marginRight: "auto",
           }}
         >
-          Заявки по проверке декларации, по правилам справочника и по предложению модели. Решения принимаются в таблицах
-          во всплывающих окнах.
+          Сюда попадают спорные декларации, которые необходимо проверить эксперту. Например, декларации отправленные в
+          экспертизу инспектором или декларации, для которых LLM сгенерировала имя.
         </p>
       </header>
 
@@ -1392,8 +1403,7 @@ export default function ExpertDecisionsPage() {
                       Проверка класса после таможенного контроля
                     </h3>
                     <p style={{ margin: "0 0 12px", fontSize: 14, color: "#475569", lineHeight: 1.45 }}>
-                      Заявки с проверки декларации: автоклассификация не сработала, класс задан вручную или инспектор направил
-                      груз на вашу проверку.
+                      Заявки с проверки декларации: автоклассификация не сработала, класс задан вручную или инспектор направил декларацию на проверку экспертом.
                     </p>
                     <button
                       type="button"
@@ -1637,8 +1647,38 @@ export default function ExpertDecisionsPage() {
                                   <td style={{ padding: "8px 10px", borderBottom: "1px solid #f1f5f9", verticalAlign: "top" }}>
                                     {row.pendingItems.length > 0 ? (
                                       <div style={{ display: "grid", gap: 6 }}>
+                                        {row.suggestedClassName !== "—" ? (
+                                          <div
+                                            style={{
+                                              fontSize: 12,
+                                              color: namingModalLane === "model" ? "#1d4ed8" : "#475569",
+                                              lineHeight: 1.4,
+                                              padding: "6px 8px",
+                                              borderRadius: 8,
+                                              background: namingModalLane === "model" ? "#eff6ff" : "#f8fafc",
+                                              border: `1px solid ${namingModalLane === "model" ? "#bfdbfe" : "#e2e8f0"}`,
+                                            }}
+                                          >
+                                            {namingModalLane === "model" ? (
+                                              <>
+                                                <strong style={{ fontWeight: 600 }}>Предложение модели:</strong>{" "}
+                                                {row.suggestedClassName}
+                                              </>
+                                            ) : (
+                                              <>
+                                                <span style={{ color: "#64748b" }}>Модель также предложила класс:</span>{" "}
+                                                <strong style={{ fontWeight: 600, color: "#0f172a" }}>{row.suggestedClassName}</strong>
+                                                <span style={{ display: "block", marginTop: 4, color: "#94a3b8" }}>
+                                                  Подтверждение имени — в блоке «Утверждение класса по предложению модели».
+                                                </span>
+                                              </>
+                                            )}
+                                          </div>
+                                        ) : null}
                                         <span style={{ fontSize: 12, color: "#64748b" }}>
-                                          Имя класса (выберите из списка или введите вручную)
+                                          {namingModalLane === "model"
+                                            ? "Подтвердите или исправьте имя класса"
+                                            : "Имя класса (выберите из списка или введите вручную)"}
                                         </span>
                                         <div style={{ position: "relative", display: "grid", gridTemplateColumns: "1fr auto", gap: 6 }}>
                                           <input

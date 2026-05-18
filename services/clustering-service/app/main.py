@@ -12,7 +12,6 @@ from pydantic import BaseModel, Field
 import numpy as np
 import psycopg2
 import torch
-from sentence_transformers import SentenceTransformer
 from sklearn.cluster import MiniBatchKMeans
 
 app = FastAPI(title="Clustering Service", version="0.1.0")
@@ -27,7 +26,7 @@ _stop_event = threading.Event()
 _worker_thread: threading.Thread | None = None
 _last_job: dict[str, Any] | None = None
 _encoder_lock = threading.Lock()
-_encoder: SentenceTransformer | None = None
+_encoder: Any | None = None
 _embedding_device_resolved: str | None = None
 
 E5_MODEL_NAME = os.getenv("CLUSTERING_EMBEDDING_MODEL", "intfloat/multilingual-e5-base")
@@ -51,12 +50,16 @@ def _resolve_embedding_device() -> str:
 
 
 class ClusterSelectRequest(BaseModel):
+    """Запрос выбора репрезентативных кандидатов кластеризацией."""
+
     texts: list[str] = Field(default_factory=list)
     n_clusters: int = 100
     max_candidates: int = 100
 
 
 class ClusterSelectResponse(BaseModel):
+    """Результат отбора кандидатов и принадлежности текстов к кластерам."""
+
     status: str
     embedding_model: str
     n_input: int
@@ -66,12 +69,15 @@ class ClusterSelectResponse(BaseModel):
     cluster_by_text: dict[str, int]
 
 
-def _get_encoder() -> SentenceTransformer:
+def _get_encoder() -> Any:
+    """Ленивая загрузка SentenceTransformer: воркер очереди jobs не тянет transformers при старте."""
     global _encoder, _embedding_device_resolved
     if _encoder is not None:
         return _encoder
     with _encoder_lock:
         if _encoder is None:
+            from sentence_transformers import SentenceTransformer
+
             device = _resolve_embedding_device()
             _embedding_device_resolved = device
             logger.info(
@@ -234,6 +240,7 @@ def worker_loop() -> None:
                 "cluster_id": f"CLUSTER-{job['id']}",
                 "items_processed": 1,
                 "declaration_id": payload.get("declaration_id"),
+                "semantic_cleaning_for_training": payload.get("semantic_cleaning_for_training"),
             }
             finish_job(job["id"], result)
             _last_job = {"id": job["id"], "status": "done", "result": result}

@@ -1,7 +1,7 @@
 /**
  * Устойчивое извлечение и парсинг JSON из ячеек датасета / ответов LLM.
  * Согласовано с shared/json_recovery.py (extract_json_from_response + parse_json_safe).
- * JSON5 — гибкий разбор (одинарные кавычки, ключи), аналог fallback ast.literal_eval в Python.
+ * JSON5 — гибкий разбор (одинарные кавычки, ключи), аналог резервного разбора через `ast.literal_eval` в Python.
  */
 import JSON5 from "json5";
 

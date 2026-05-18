@@ -42,6 +42,8 @@ class PropertyDef(BaseModel):
 
 
 class NumberConstraints(BaseModel):
+    """Ограничения для числового поля: границы, кратность, перечисление."""
+
     min: Optional[float] = None
     max: Optional[float] = None
     multiple_of: Optional[float] = None
@@ -50,6 +52,8 @@ class NumberConstraints(BaseModel):
 
 
 class IntegerConstraints(BaseModel):
+    """Ограничения для целочисленного поля."""
+
     min: Optional[int] = None
     max: Optional[int] = None
     multiple_of: Optional[int] = None
@@ -57,6 +61,8 @@ class IntegerConstraints(BaseModel):
 
 
 class StringConstraintsModel(BaseModel):
+    """Ограничения для строкового поля."""
+
     min_length: Optional[int] = None
     max_length: Optional[int] = None
     pattern: Optional[str] = None
@@ -64,6 +70,8 @@ class StringConstraintsModel(BaseModel):
 
 
 class BaseFieldSchema(BaseModel):
+    """Базовый тип поля схемы DSL."""
+
     type: FieldType
     title: Optional[str] = None
 
@@ -71,6 +79,8 @@ class BaseFieldSchema(BaseModel):
 
 
 class ObjectFieldSchema(BaseFieldSchema):
+    """Схема JSON-объекта с набором свойств."""
+
     type: Literal["object"] = "object"
     properties: List[PropertyDef] = Field(default_factory=list)
     required: List[str] = Field(default_factory=list)
@@ -78,6 +88,8 @@ class ObjectFieldSchema(BaseFieldSchema):
 
 
 class ArrayFieldSchema(BaseFieldSchema):
+    """Схема массива однотипных элементов."""
+
     type: Literal["array"] = "array"
     items: "FieldSchema"
     min_items: Optional[int] = None
@@ -85,6 +97,8 @@ class ArrayFieldSchema(BaseFieldSchema):
 
 
 class StringFieldSchema(BaseFieldSchema):
+    """Схема строкового поля."""
+
     type: Literal["string"] = "string"
     constraints: Optional[StringConstraintsModel] = None
 
@@ -104,11 +118,15 @@ class NumberFieldSchema(BaseFieldSchema):
 
 
 class IntegerFieldSchema(BaseFieldSchema):
+    """Схема целочисленного поля."""
+
     type: Literal["integer"] = "integer"
     constraints: Optional[IntegerConstraints] = None
 
 
 class BooleanFieldSchema(BaseFieldSchema):
+    """Схема булевого поля."""
+
     type: Literal["boolean"] = "boolean"
 
 
@@ -126,6 +144,8 @@ FieldSchema = Annotated[
 
 
 class SumEqualsRule(BaseModel):
+    """Межполевое правило: сумма значений по пути должна равняться expected с допуском."""
+
     template: Literal["sumEquals"] = "sumEquals"
     path: str = Field(min_length=1)
     expected: float
@@ -135,6 +155,8 @@ class SumEqualsRule(BaseModel):
 
 
 class ComparisonOp(str):
+    """Технический тип-обёртка для операторов сравнения."""
+
     pass
 
 
@@ -151,6 +173,9 @@ ComparisonOpType = Literal[
     "regex",
     "notRegex",
 ]
+
+CANONICAL_DESCRIPTION_PATH = "description_text"
+DESCRIPTION_PATH_ALIASES = frozenset({"description", "description_text"})
 
 
 class ComparisonCond(BaseModel):
@@ -176,6 +201,8 @@ class ThenRequired(BaseModel):
 
 
 class AtLeastOnePresentRule(BaseModel):
+    """Межполевое правило: из набора путей должно присутствовать не меньше min_count."""
+
     template: Literal["atLeastOnePresent"] = "atLeastOnePresent"
     paths: List[str] = Field(min_length=1)
     min_count: int = 1
@@ -191,7 +218,6 @@ CrossRule = Annotated[
 
 ClassificationStrategy = Literal["first_match", "exactly_one"]
 
-AmbiguousMatchResolution = Literal["reject", "by_priority", "comma_join"]
 ConditionConjunction = Literal["and", "or"]
 
 RowFormulaOp = Literal["equals", "gt", "gte", "lt", "lte"]
@@ -199,12 +225,28 @@ _ROW_FORMULA_VAR_KEY_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
 
 
 class PathClassificationCondition(BaseModel):
-    """Скалярное условие по пути в нормализованном JSON."""
+    """Условие по пути в нормализованном JSON, включая канонический путь полного описания."""
 
     type: Literal["path"] = "path"
-    path: str = Field(min_length=1)
+    path: str = Field(
+        min_length=1,
+        description=(
+            "Путь в JSON (например `массовая доля[*].вещество`). "
+            "Для полного описания декларации используйте канонический путь `description_text`."
+        ),
+    )
     op: ComparisonOpType
     value: Optional[Union[str, float, int, bool, List[Union[str, float, int, bool]]]] = None
+    tolerance_rel: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Для числовых сравнений (equals, gt, gte, lt, lte): относительный допуск к порогу. "
+            "0 — строгое сравнение; для equals — как у формулы (масштаб max(|факт|,|порог|,ε)); "
+            "для неравенств — полоса у границы порога размером tolerance_rel·max(|порог|,ε)."
+        ),
+    )
     group_id: Optional[str] = None
     conjunction: ConditionConjunction = "and"
     primary: bool = Field(
@@ -214,18 +256,41 @@ class PathClassificationCondition(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    @field_validator("path", mode="before")
+    @classmethod
+    def _normalize_description_path_alias(cls, v: Any) -> str:
+        path = str(v or "").strip()
+        if path in DESCRIPTION_PATH_ALIASES:
+            return CANONICAL_DESCRIPTION_PATH
+        return path
+
+    @model_validator(mode="after")
+    def _validate_value_for_operator(self) -> PathClassificationCondition:
+        if self.op in ("exists", "notExists"):
+            return self
+        if self.value is None or self.value == "":
+            raise ValueError("path: для выбранного оператора задайте непустое значение value")
+        if self.op in ("regex", "notRegex"):
+            if not isinstance(self.value, str) or not self.value.strip():
+                raise ValueError("path: regex/notRegex требует непустую строку в value")
+            try:
+                re.compile(self.value)
+            except re.error as exc:
+                raise ValueError(f"path: некорректный regex: {exc}") from exc
+        return self
+
 
 class RowIndicatorCondition(BaseModel):
     """
     Условие по строке списка: есть элемент массива, где name_field == name_equals.
 
-    Если заданы value_min и value_max: число сравнивается с целевым значением (value_min + value_max) / 2
-    с относительным допуском 0.001 (как у rowPairRatio).
+    Если заданы value_min и value_max: проверяется попадание в диапазон [value_min, value_max].
 
     Если задана только value_min: требуется значение >= value_min.
     Только value_max: значение <= value_max.
 
     Иначе — классическое сравнение op/value.
+    Можно комбинировать в одной группе с path/regex и другими типами условий.
     """
 
     type: Literal["rowIndicator"] = "rowIndicator"
@@ -237,6 +302,15 @@ class RowIndicatorCondition(BaseModel):
     value: Optional[Union[str, float, int, bool, List[Union[str, float, int, bool]]]] = None
     value_min: Optional[float] = None
     value_max: Optional[float] = None
+    tolerance_rel: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Относительный допуск: для диапазона value_min/value_max — расширение коридора у каждой заданной границы; "
+            "для op с числом — как у path.tolerance_rel."
+        ),
+    )
     group_id: Optional[str] = None
     conjunction: ConditionConjunction = "and"
     primary: bool = Field(
@@ -366,12 +440,12 @@ ClassificationCondition = Annotated[
 
 
 class ClassificationRule(BaseModel):
-    """Правило присвоения класса: по умолчанию все conditions связаны по И; с primary=False — только уточнение."""
+    """Правило присвоения класса: по умолчанию все conditions связаны по И; primary=False — уточнение (второй шаг при конкурирующих классах по основным)."""
 
     class_id: str = Field(min_length=1)
     title: Optional[str] = None
     priority: int = 0
-    """Код ТН ВЭД ЕАЭС (2–10 цифр: глава … полная позиция), привязка класса к номенклатуре."""
+    # Код ТН ВЭД ЕАЭС (2–10 цифр: глава … полная позиция), привязка класса к номенклатуре.
     tn_ved_group_code: Optional[str] = None
     condition_groups: List[str] = Field(default_factory=list)
     conditions: List[ClassificationCondition] = Field(default_factory=list)
@@ -389,18 +463,8 @@ class ClassificationConfig(BaseModel):
 
     strategy: ClassificationStrategy
     rules: List[ClassificationRule] = Field(default_factory=list)
-    """Устаревшее поле из старых правил; игнорируется движком."""
+    # Устаревшее поле из старых правил; игнорируется движком.
     declared_class_path: Optional[str] = None
-    """Если для first_match ни одно правило не сработало, назначить этот класс (иначе ошибка)."""
-    default_class_id: Optional[str] = None
-    """
-    Для strategy exactly_one при нескольких подошедших правилах:
-    by_priority: один class_id с наилучшим приоритетом (меньше число), при равенстве — порядок в списке;
-    comma_join: строка из уникальных class_id через запятую (порядок правил в конфиге);
-    reject: устарело — обрабатывается как comma_join (ошибка не возвращается).
-    При нуле совпадений: default_class_id, иначе итоговый класс не назначен (ok, без ошибки валидации).
-    """
-    ambiguous_match_resolution: AmbiguousMatchResolution = "comma_join"
 
     model_config = ConfigDict(extra="forbid")
 
@@ -412,6 +476,10 @@ class ClassificationConfig(BaseModel):
         out = dict(data)
         if out.get("strategy") == "validate_declared":
             out["strategy"] = "first_match"
+        # Устаревшее поле; не используется движком (раньше — «класс по умолчанию»).
+        out.pop("default_class_id", None)
+        # Устаревшее поле; движок всегда выбирает одно правило по (priority, порядок в списке).
+        out.pop("ambiguous_match_resolution", None)
         return out
 
 
@@ -471,7 +539,7 @@ class RuleDSL(BaseModel):
     model_config = ConfigDict(extra="forbid", protected_namespaces=(), populate_by_name=True)
 
 
-# Разрешаем рекурсивные forward-references
+# Разрешаем рекурсивные прямые ссылки между моделями.
 PropertyDef.model_rebuild()
 RuleDSL.model_rebuild()
 RequiredIfRule.model_rebuild()

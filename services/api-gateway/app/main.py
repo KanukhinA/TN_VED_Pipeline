@@ -228,22 +228,13 @@ async def _probe_and_record_model_runtime_state() -> None:
 
 
 def effective_extraction_runtime(runtime: dict[str, Any] | None) -> dict[str, Any]:
-    """Согласованность с фронтом: constrained decoding только через use_guidance; при нём structured_output=True."""
-    r = dict(runtime or {})
-    legacy = bool(r.pop("use_outlines", False)) or bool(r.pop("pydantic_outlines", False))
-    ug = bool(r.get("use_guidance", False)) or legacy
-    so = bool(r.get("structured_output", True))
-    if ug:
-        so = True
-    out = {
-        **r,
-        "structured_output": so,
-        "use_guidance": ug,
-    }
-    return out
+    """Нормализует runtime: constrained decoding = JSON Schema на стороне Ollama/vLLM (format / response_format)."""
+    return {"constrained_decoding": bool((runtime or {}).get("constrained_decoding", False))}
 
 
 class ValidationRequest(BaseModel):
+    """Запрос проверки декларации через API gateway."""
+
     declaration_id: str
     description: str
     tnved_code: str | None = None
@@ -255,6 +246,8 @@ class ValidationRequest(BaseModel):
 
 
 class FeatureExtractionTestRequest(BaseModel):
+    """Запрос тестового прогона извлечения признаков."""
+
     model: str = ""
     prompt: str = ""
     sample_text: str = ""
@@ -498,6 +491,24 @@ async def _require_model_running_for_prompt_test(model_name: str) -> None:
         raise
     except Exception:
         return
+
+
+async def _resolve_semantic_cleaning_model() -> str:
+    """
+    Возвращает модель для теста чистки:
+    1) явная из конфига;
+    2) первая из уже запущенных моделей (running_models).
+    """
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await request_with_retry(client, "GET", f"{PREPROCESSING_URL}/api/v1/models/running")
+            if resp.status_code != 200:
+                return ""
+            data = resp.json()
+            running = [str(x).strip() for x in (data.get("running_models") or []) if str(x).strip()]
+            return running[0] if running else ""
+    except Exception:
+        return ""
 
 
 @app.post("/api/feature-extraction/test")
@@ -1132,13 +1143,32 @@ async def generate_extraction_system_prompt(payload: GenerateExtractionPromptReq
 
 
 class PipelineConfigBody(BaseModel):
+    """Частичное обновление порогов и параметров pipeline."""
+
     semantic_similarity_threshold: Optional[float] = None
     semantic_neighbor_similarity_floor_s0: Optional[float] = None
     semantic_neighbor_weight_gamma: Optional[float] = None
     semantic_support_threshold_tau2: Optional[float] = None
+    semantic_cleaning_prompt: Optional[str] = None
+    semantic_cleaning_num_ctx: Optional[int] = None
+    semantic_cleaning_max_new_tokens: Optional[int] = None
+    semantic_cleaning_repetition_penalty: Optional[float] = None
+    semantic_cleaning_temperature: Optional[float] = None
+    semantic_cleaning_top_p: Optional[float] = None
+    semantic_cleaning_enable_thinking: Optional[bool] = None
+    semantic_cleaning_constrained_decoding: Optional[bool] = None
+    semantic_cleaning_do_sample: Optional[bool] = None
+
+
+class SemanticCleaningTestBody(BaseModel):
+    """Тест LLM-чистки описания для семантической векторизации."""
+
+    text: str = ""
 
 
 class PromptTemplateBody(BaseModel):
+    """Тело обновления шаблона feature-extraction prompt generator."""
+
     template: str = ""
 
 
@@ -1217,6 +1247,102 @@ def put_pipeline_configuration(body: PipelineConfigBody) -> dict[str, Any]:
     return {"status": "ok", "effective": merged}
 
 
+@app.post("/api/admin/semantic-cleaning/test")
+async def test_semantic_cleaning(body: SemanticCleaningTestBody) -> dict[str, Any]:
+    from app.semantic_cleaning import (
+        OLLAMA_SEMANTIC_CLEANING_JSON_FORMAT,
+        extract_semantic_cleaned_text,
+        finalize_semantic_cleaning_prompt,
+        render_semantic_cleaning_prompt,
+    )
+
+    src = str(body.text or "").strip()
+    if not src:
+        raise HTTPException(status_code=400, detail="Введите текст для теста чистки.")
+    cfg = effective_pipeline_params(None)
+    model = await _resolve_semantic_cleaning_model()
+    prompt = str(cfg.get("semantic_cleaning_prompt") or "").strip()
+    constrained = bool(cfg.get("semantic_cleaning_constrained_decoding", True))
+    if not model:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Не удалось выбрать модель для чистки. "
+                "Запустите хотя бы одну модель в разделе администрирования моделей."
+            ),
+        )
+    if not prompt:
+        raise HTTPException(status_code=400, detail="Промпт чистки пуст.")
+
+    await _require_model_running_for_prompt_test(model)
+    base_prompt = render_semantic_cleaning_prompt(prompt, src)
+    full_prompt = finalize_semantic_cleaning_prompt(base_prompt, constrained_decoding=constrained)
+    payload = {
+        "model": model,
+        "prompt": full_prompt,
+        "num_ctx": int(cfg.get("semantic_cleaning_num_ctx") or 8192),
+        "max_new_tokens": int(cfg.get("semantic_cleaning_max_new_tokens") or 1024),
+        "repetition_penalty": float(cfg.get("semantic_cleaning_repetition_penalty") or 1.0),
+        "temperature": float(cfg.get("semantic_cleaning_temperature") or 0.0),
+        "top_p": float(cfg.get("semantic_cleaning_top_p") or 1.0),
+        "enable_thinking": bool(cfg.get("semantic_cleaning_enable_thinking") or False),
+        "constrained_decoding": constrained,
+        "do_sample": bool(cfg.get("semantic_cleaning_do_sample") or False),
+    }
+    if constrained:
+        payload["format"] = OLLAMA_SEMANTIC_CLEANING_JSON_FORMAT
+    try:
+        async with httpx.AsyncClient(timeout=LLM_HTTP_TIMEOUT) as client:
+            resp = await request_with_retry(
+                client,
+                "POST",
+                f"{PREPROCESSING_URL}/api/v1/ollama/generate",
+                json=payload,
+                timeout=LLM_HTTP_TIMEOUT,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(status_code=502, detail=f"preprocessing/ollama: {exc.response.text[:800]}") from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"preprocessing: {exc}") from exc
+    raw_response = str(data.get("raw_response") or "")
+    cleaned = extract_semantic_cleaned_text(raw_response, constrained_decoding=constrained)
+    debug = {
+        "request": {
+            "model": payload.get("model"),
+            "num_ctx": payload.get("num_ctx"),
+            "max_new_tokens": payload.get("max_new_tokens"),
+            "repetition_penalty": payload.get("repetition_penalty"),
+            "temperature": payload.get("temperature"),
+            "top_p": payload.get("top_p"),
+            "enable_thinking": payload.get("enable_thinking"),
+            "constrained_decoding": payload.get("constrained_decoding"),
+            "do_sample": payload.get("do_sample"),
+            "prompt_chars": len(str(payload.get("prompt") or "")),
+            "prompt_excerpt": str(payload.get("prompt") or "")[:4000],
+        },
+        "response": {
+            "raw_response_chars": len(raw_response),
+            "raw_response_excerpt": raw_response[:4000],
+            "used_fallback": cleaned == "",
+            "fallback_reason": "empty_llm_response" if cleaned == "" else None,
+            "runtime_generation": data.get("runtime_generation"),
+            "ollama_thinking_excerpt": data.get("ollama_thinking_excerpt"),
+            "done": data.get("done"),
+            "eval_count": data.get("eval_count"),
+            "total_duration_ns": data.get("total_duration_ns"),
+        },
+    }
+    return {
+        "status": "ok",
+        "cleaned_text": cleaned,
+        "used_fallback": cleaned == "",
+        "model": model,
+        "debug": debug,
+    }
+
+
 @app.get("/api/admin/feature-extraction-prompt-generator-meta")
 def get_feature_extraction_prompt_generator_meta() -> dict[str, Any]:
     return {
@@ -1235,6 +1361,8 @@ def put_feature_extraction_prompt_generator_meta(body: PromptTemplateBody) -> di
 
 
 class ExpertClassNameDecisionBody(BaseModel):
+    """Запись решения эксперта по сгенерированному имени класса."""
+
     declaration_id: str = ""
     rule_id: str | None = None
     suggested_class_name: str = ""

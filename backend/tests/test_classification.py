@@ -89,12 +89,59 @@ def test_row_indicator_primary_false_skipped_for_match():
                     ),
                 ],
             ),
-            ClassificationRule(class_id="other", priority=10, conditions=[]),
         ],
     )
     data = {"показатели": [_row("азот", 20.0)]}
     ok, cls, err = evaluate_classification(data, cfg)
     assert ok and cls == "only_azot" and not err
+
+
+def test_first_match_two_classes_primary_then_refinement_decides():
+    """При двух правилах разных классов с одинаковыми основными победитель определяется уточняющими."""
+    primary = RowIndicatorCondition(
+        type="rowIndicator",
+        array_path="показатели",
+        name_field="наименование",
+        name_equals="азот",
+        value_field="значение",
+        op="gte",
+        value=10.0,
+        primary=True,
+    )
+    phos = RowIndicatorCondition(
+        type="rowIndicator",
+        array_path="показатели",
+        name_field="наименование",
+        name_equals="фосфор",
+        value_field="значение",
+        op="gte",
+        value=5.0,
+        primary=False,
+    )
+    kal = RowIndicatorCondition(
+        type="rowIndicator",
+        array_path="показатели",
+        name_field="наименование",
+        name_equals="калий",
+        value_field="значение",
+        op="gte",
+        value=5.0,
+        primary=False,
+    )
+    cfg = ClassificationConfig(
+        strategy="first_match",
+        rules=[
+            ClassificationRule(class_id="class_a", priority=0, conditions=[primary, phos]),
+            ClassificationRule(class_id="class_b", priority=0, conditions=[primary, kal]),
+        ],
+    )
+    data_ok_a = {"показатели": [_row("азот", 15.0), _row("фосфор", 6.0)]}
+    ok, cls, err = evaluate_classification(data_ok_a, cfg)
+    assert ok and cls == "class_a" and not err
+
+    data_ok_b = {"показатели": [_row("азот", 15.0), _row("калий", 7.0)]}
+    ok2, cls2, err2 = evaluate_classification(data_ok_b, cfg)
+    assert ok2 and cls2 == "class_b" and not err2
 
 
 def test_first_match_row_indicator_name_and_threshold():
@@ -168,6 +215,176 @@ def test_row_indicator_value_min_max_one_row():
         cfg,
     )
     assert ok_two and cls_two == "other"
+
+
+def test_row_indicator_two_number_cell_must_fully_fit_rule_range():
+    """Два числа в ячейке: отрезок измерения целиком внутри [value_min, value_max] правила."""
+    cfg = ClassificationConfig(
+        strategy="first_match",
+        rules=[
+            ClassificationRule(
+                class_id="band",
+                priority=0,
+                conditions=[
+                    RowIndicatorCondition(
+                        type="rowIndicator",
+                        array_path="показатели",
+                        name_field="наименование",
+                        name_equals="азот",
+                        value_field="значение",
+                        value_min=10.0,
+                        value_max=20.0,
+                    )
+                ],
+            ),
+            ClassificationRule(class_id="other", priority=10, conditions=[]),
+        ],
+    )
+    row_interval = {"наименование": "азот", "значение": [12.0, 18.0]}
+    ok, cls, _ = evaluate_classification({"показатели": [row_interval]}, cfg)
+    assert ok and cls == "band"
+
+    ok_rev, cls_rev, _ = evaluate_classification(
+        {"показатели": [{"наименование": "азот", "значение": [18.0, 12.0]}]},
+        cfg,
+    )
+    assert ok_rev and cls_rev == "band"
+
+    ok_edge, cls_edge, _ = evaluate_classification(
+        {"показатели": [{"наименование": "азот", "значение": [10.0, 20.0]}]},
+        cfg,
+    )
+    assert ok_edge and cls_edge == "band"
+
+    ok_avg_old, cls_avg_old, _ = evaluate_classification(
+        {"показатели": [{"наименование": "азот", "значение": [10.0, 20.0]}]},
+        ClassificationConfig(
+            strategy="first_match",
+            rules=[
+                ClassificationRule(
+                    class_id="mid",
+                    priority=0,
+                    conditions=[
+                        RowIndicatorCondition(
+                            type="rowIndicator",
+                            array_path="показатели",
+                            name_field="наименование",
+                            name_equals="азот",
+                            value_field="значение",
+                            value_min=14.0,
+                            value_max=16.0,
+                        )
+                    ],
+                ),
+                ClassificationRule(class_id="other", priority=10, conditions=[]),
+            ],
+        ),
+    )
+    # Среднее 15 попадало бы в [14,16], но 10 и 20 выходят за коридор — не «band».
+    assert ok_avg_old and cls_avg_old == "other"
+
+
+def test_path_numeric_tolerance_rel_gte_and_equals():
+    """path: tolerance_rel расширяет числовые пороги (gte / equals)."""
+    cfg_gte = ClassificationConfig(
+        strategy="first_match",
+        rules=[
+            ClassificationRule(
+                class_id="ok",
+                priority=0,
+                conditions=[
+                    PathClassificationCondition(
+                        type="path",
+                        path="масса",
+                        op="gte",
+                        value=100.0,
+                        tolerance_rel=0.01,
+                    )
+                ],
+            ),
+            ClassificationRule(class_id="other", priority=10, conditions=[]),
+        ],
+    )
+    ok, cls, _ = evaluate_classification({"масса": 99.0}, cfg_gte)
+    assert ok and cls == "ok"
+    ok2, cls2, _ = evaluate_classification({"масса": 98.99}, cfg_gte)
+    assert ok2 and cls2 == "other"
+
+    cfg_eq = ClassificationConfig(
+        strategy="first_match",
+        rules=[
+            ClassificationRule(
+                class_id="ok",
+                priority=0,
+                conditions=[
+                    PathClassificationCondition(
+                        type="path",
+                        path="x",
+                        op="equals",
+                        value=100.0,
+                        tolerance_rel=0.01,
+                    )
+                ],
+            ),
+            ClassificationRule(class_id="other", priority=10, conditions=[]),
+        ],
+    )
+    ok3, cls3, _ = evaluate_classification({"x": 100.5}, cfg_eq)
+    assert ok3 and cls3 == "ok"
+
+
+def test_row_indicator_range_and_op_use_tolerance_rel():
+    """rowIndicator: tolerance_rel расширяет value_min/value_max и числовые op."""
+    cfg_range = ClassificationConfig(
+        strategy="first_match",
+        rules=[
+            ClassificationRule(
+                class_id="band",
+                priority=0,
+                conditions=[
+                    RowIndicatorCondition(
+                        type="rowIndicator",
+                        array_path="показатели",
+                        name_field="наименование",
+                        name_equals="азот",
+                        value_field="значение",
+                        value_min=10.0,
+                        value_max=20.0,
+                        tolerance_rel=0.01,
+                    )
+                ],
+            ),
+            ClassificationRule(class_id="other", priority=10, conditions=[]),
+        ],
+    )
+    # 9.9 >= 10 - 0.1 и 20.1 <= 20 + 0.2
+    ok, cls, _ = evaluate_classification({"показатели": [_row("азот", 9.9)]}, cfg_range)
+    assert ok and cls == "band"
+
+    cfg_op = ClassificationConfig(
+        strategy="first_match",
+        rules=[
+            ClassificationRule(
+                class_id="hi",
+                priority=0,
+                conditions=[
+                    RowIndicatorCondition(
+                        type="rowIndicator",
+                        array_path="показатели",
+                        name_field="наименование",
+                        name_equals="азот",
+                        value_field="значение",
+                        op="gte",
+                        value=100.0,
+                        tolerance_rel=0.01,
+                    )
+                ],
+            ),
+            ClassificationRule(class_id="other", priority=10, conditions=[]),
+        ],
+    )
+    ok2, cls2, _ = evaluate_classification({"показатели": [_row("азот", 99.0)]}, cfg_op)
+    assert ok2 and cls2 == "hi"
 
 
 def test_row_indicator_accepts_open_ended_numeric_cell_ranges():
@@ -244,6 +461,51 @@ def test_rule_conditions_support_or_conjunction():
     assert ok_other and cls_other == "other" and not err_other
 
 
+def test_rule_conditions_support_or_inside_single_group():
+    """Внутри одной group_id связка and/or такая же, как у плоского списка (второе условие с conjunction or)."""
+    cfg = ClassificationConfig(
+        strategy="first_match",
+        rules=[
+            ClassificationRule(
+                class_id="n_or_mgo_grouped",
+                priority=0,
+                condition_groups=["g1"],
+                conditions=[
+                    RowIndicatorCondition(
+                        type="rowIndicator",
+                        array_path="показатели",
+                        name_field="наименование",
+                        name_equals="n",
+                        value_field="значение",
+                        value_min=8.0,
+                        group_id="g1",
+                    ),
+                    RowIndicatorCondition(
+                        type="rowIndicator",
+                        array_path="показатели",
+                        name_field="наименование",
+                        name_equals="mgo",
+                        value_field="значение",
+                        value_min=15.0,
+                        value_max=16.0,
+                        group_id="g1",
+                        conjunction="or",
+                    ),
+                ],
+            ),
+            ClassificationRule(class_id="other", priority=10, conditions=[]),
+        ],
+    )
+    ok_n, cls_n, err_n = evaluate_classification({"показатели": [_row("n", 8.5)]}, cfg)
+    assert ok_n and cls_n == "n_or_mgo_grouped" and not err_n
+
+    ok_mgo, cls_mgo, err_mgo = evaluate_classification({"показатели": [_row("mgo", 15.5)]}, cfg)
+    assert ok_mgo and cls_mgo == "n_or_mgo_grouped" and not err_mgo
+
+    ok_other, cls_other, err_other = evaluate_classification({"показатели": [_row("n", 7.0), _row("mgo", 14.0)]}, cfg)
+    assert ok_other and cls_other == "other" and not err_other
+
+
 def test_rule_conditions_support_and_inside_group_or_between_groups():
     cfg = ClassificationConfig(
         strategy="first_match",
@@ -297,7 +559,7 @@ def test_rule_conditions_support_and_inside_group_or_between_groups():
     assert ok_other and cls_other == "other" and not err_other
 
 
-def test_exactly_one_multiple_comma_join_and_zero_no_error():
+def test_exactly_one_multiple_matches_by_priority_and_zero_no_error():
     row_azot_high = RowIndicatorCondition(
         type="rowIndicator",
         array_path="показатели",
@@ -323,24 +585,13 @@ def test_exactly_one_multiple_comma_join_and_zero_no_error():
             ClassificationRule(class_id="y", priority=1, conditions=[row_azot_low]),
         ],
     )
-    # Два правила пересекаются: азот 15 удовлетворяет и ≥10, и ≤20 — список class_id через запятую
+    # Два правила пересекаются: азот 15 удовлетворяет и ≥10, и ≤20 — выбирается класс с меньшим priority
     ok, cls, err = evaluate_classification({"показатели": [_row("азот", 15.0)]}, cfg)
-    assert ok and cls == "x,y" and not err
+    assert ok and cls == "x" and not err
 
     # Нет строки «азот»; ни одно правило не выполняется — без ошибки, класс не назначен
     ok2, cls2, err2 = evaluate_classification({"показатели": [_row("калий", 1.0)]}, cfg)
     assert ok2 and cls2 is None and not err2
-
-    cfg_with_default = ClassificationConfig(
-        strategy="exactly_one",
-        default_class_id="fallback",
-        rules=[
-            ClassificationRule(class_id="x", priority=0, conditions=[row_azot_high]),
-            ClassificationRule(class_id="y", priority=1, conditions=[row_azot_low]),
-        ],
-    )
-    ok3, cls3, err3 = evaluate_classification({"показатели": [_row("калий", 1.0)]}, cfg_with_default)
-    assert ok3 and cls3 == "fallback" and not err3
 
 
 def test_exactly_one_ambiguous_by_priority():
@@ -364,7 +615,6 @@ def test_exactly_one_ambiguous_by_priority():
     )
     cfg = ClassificationConfig(
         strategy="exactly_one",
-        ambiguous_match_resolution="by_priority",
         rules=[
             ClassificationRule(class_id="late", priority=5, conditions=[row_azot_high]),
             ClassificationRule(class_id="early", priority=0, conditions=[row_azot_low]),
@@ -374,7 +624,7 @@ def test_exactly_one_ambiguous_by_priority():
     assert ok and cls == "early" and not err
 
 
-def test_exactly_one_ambiguous_comma_join():
+def test_exactly_one_multiple_matches_respects_rule_order_on_equal_priority():
     row_azot_high = RowIndicatorCondition(
         type="rowIndicator",
         array_path="показатели",
@@ -395,14 +645,13 @@ def test_exactly_one_ambiguous_comma_join():
     )
     cfg = ClassificationConfig(
         strategy="exactly_one",
-        ambiguous_match_resolution="comma_join",
         rules=[
             ClassificationRule(class_id="x", priority=0, conditions=[row_azot_high]),
-            ClassificationRule(class_id="y", priority=1, conditions=[row_azot_low]),
+            ClassificationRule(class_id="y", priority=0, conditions=[row_azot_low]),
         ],
     )
     ok, cls, err = evaluate_classification({"показатели": [_row("азот", 15.0)]}, cfg)
-    assert ok and cls == "x,y" and not err
+    assert ok and cls == "x" and not err
 
 
 def test_exactly_one_succeeds_when_single_match():
@@ -766,7 +1015,7 @@ def test_path_regex_matches():
     ok, cls, _ = evaluate_classification({"код": "ABC-123"}, cfg)
     assert ok and cls == "hit"
     ok2, cls2, _ = evaluate_classification({"код": "abc-123"}, cfg)
-    assert ok2 and cls2 == "other"
+    assert ok2 and cls2 == "hit"
 
 
 def test_path_not_regex_on_wildcard_array_all_elements_must_fail():
@@ -792,3 +1041,64 @@ def test_path_not_regex_on_wildcard_array_all_elements_must_fail():
     assert ok and cls == "ok_row"
     ok2, cls2, _ = evaluate_classification({"теги": ["a", "42"]}, cfg)
     assert ok2 and cls2 == "other"
+
+
+def test_path_regex_on_canonical_description_text_path():
+    cfg = ClassificationConfig(
+        strategy="first_match",
+        rules=[
+            ClassificationRule(
+                class_id="tu_match",
+                priority=0,
+                conditions=[
+                    PathClassificationCondition(
+                        type="path",
+                        path="description_text",
+                        op="regex",
+                        value=r"(?i)^ту\s+\d+",
+                    )
+                ],
+            ),
+            ClassificationRule(class_id="other", priority=10, conditions=[]),
+        ],
+    )
+    ok, cls, err = evaluate_classification({"description_text": "ТУ 2184-037-32496445-02"}, cfg)
+    assert ok and cls == "tu_match" and not err
+
+
+def test_mixed_group_row_and_description_regex_supported():
+    cfg = ClassificationConfig(
+        strategy="first_match",
+        rules=[
+            ClassificationRule(
+                class_id="mixed",
+                priority=0,
+                condition_groups=["group_1"],
+                conditions=[
+                    RowIndicatorCondition(
+                        type="rowIndicator",
+                        array_path="массовая доля",
+                        name_field="вещество",
+                        name_equals="k2o",
+                        value_field="массовая доля",
+                        value_min=50.0,
+                        group_id="group_1",
+                    ),
+                    PathClassificationCondition(
+                        type="path",
+                        path="description_text",
+                        op="regex",
+                        value=r"(?i)кали",
+                        group_id="group_1",
+                    ),
+                ],
+            ),
+            ClassificationRule(class_id="other", priority=10, conditions=[]),
+        ],
+    )
+    data = {
+        "description_text": "Минеральное удобрение с калием",
+        "массовая доля": [{"вещество": "k2o", "массовая доля": 52.0}],
+    }
+    ok, cls, err = evaluate_classification(data, cfg)
+    assert ok and cls == "mixed" and not err

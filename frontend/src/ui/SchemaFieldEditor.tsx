@@ -136,7 +136,7 @@ export default function SchemaFieldEditor(props: { value: FieldSchema; onChange:
                         const nextProperties = [...value.properties];
                         nextProperties[idx] = { ...nextProperties[idx], name: nextName };
 
-                        // пересобираем required: если переименовали, сохраним требование по старому имени как best-effort
+                        // Пересобираем required: при переименовании стараемся сохранить признак обязательности.
                         const nextRequired = value.required
                           .map((r) => (r === p.name ? nextName : r))
                           .filter(Boolean);

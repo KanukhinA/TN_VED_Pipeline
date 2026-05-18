@@ -16,6 +16,8 @@ type PathCond = {
   path: string;
   op: string;
   value?: unknown;
+  /** Для числовых сравнений: относительный допуск к порогу (0 — строго). */
+  tolerance_rel?: number;
   group_id?: string;
   conjunction?: "and" | "or";
   /** false: необязательное уточнение; по умолчанию основное условие */
@@ -33,6 +35,8 @@ type RowCond = {
   /** Числовой диапазон в одной строке массива поля (границы включаются); предпочтительный формат для UI */
   value_min?: number;
   value_max?: number;
+  /** Для числа или диапазона: относительный допуск к границам / порогу (0 — строго). */
+  tolerance_rel?: number;
   group_id?: string;
   conjunction?: "and" | "or";
   /** false: необязательное уточнение; по умолчанию основное условие */
@@ -96,10 +100,6 @@ const TEXT_PATH_OPS_LABEL: { value: string; label: string }[] = [
   { value: "notContains", label: "не содержит" },
   { value: "startsWith", label: "начинается с" },
   { value: "endsWith", label: "заканчивается на" },
-  { value: "iEquals", label: "равно (регистр не важен)" },
-  { value: "iContains", label: "содержит (регистр не важен)" },
-  { value: "iStartsWith", label: "начинается с (регистр не важен)" },
-  { value: "iEndsWith", label: "заканчивается на (регистр не важен)" },
   { value: "regex", label: "соответствует regex" },
   { value: "notRegex", label: "не соответствует regex" },
   { value: "exists", label: "значение указано" },
@@ -116,10 +116,6 @@ const PATH_STRING_OPS = new Set([
   "notContains",
   "startsWith",
   "endsWith",
-  "iEquals",
-  "iContains",
-  "iStartsWith",
-  "iEndsWith",
 ]);
 
 const DEFAULT_MISC_CLASS_PRIORITY = 1000;
@@ -130,9 +126,9 @@ type UiCheckKind =
   | "sectionPresent"
   | "rowPairRatio"
   | "rowFormula"
-  /** Одно число на корне JSON: условие path с gte/lte/equals */
+  /** Одно число на верхнем уровне JSON: path-условие с gte/lte/equals. */
   | "scalarNumber"
-  /** Одно текстовое значение на корне JSON: path-условия строки. */
+  /** Одно текстовое значение на верхнем уровне JSON: строковые path-условия. */
   | "scalarText";
 
 const FORMULA_VAR_ID_RE = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
@@ -145,7 +141,7 @@ const ROW_FORMULA_OPS_LABEL: { value: RowFormulaCond["op"]; label: string }[] = 
   { value: "lte", label: "не больше" },
 ];
 
-/** Сравнение одного числа на корне (скалярное поле структуры). */
+/** Сравнение одного числа на верхнем уровне (скалярное поле структуры). */
 const SCALAR_PATH_OPS_LABEL: { value: string; label: string }[] = [
   { value: "equals", label: "равно" },
   { value: "gt", label: "больше" },
@@ -155,7 +151,9 @@ const SCALAR_PATH_OPS_LABEL: { value: string; label: string }[] = [
 ];
 
 const ROW_INDICATOR_MIN_MAX_HINT =
-  "Если заданы и минимум, и максимум — сравнение с их средним арифметическим (относительный допуск 0,1%, как у «отношения двух показателей»). Только минимум — значение не ниже него; только максимум — не выше.";
+  "Если заданы минимум и максимум, число должно попадать в диапазон включительно: min <= значение <= max. Только минимум — значение не ниже него; только максимум — не выше. Относительный допуск расширяет допустимый коридор у каждой заданной границы (доля от |граница|).";
+
+const FULL_DESCRIPTION_PATH = "description_text";
 
 /** Все правила с непустым class_id имеют выбранный код ТН ВЭД ЕАЭС */
 export function classificationHasTnVedForAllRules(ui: UiClassification): boolean {
@@ -176,6 +174,12 @@ function parseOptionalFiniteNumber(v: unknown): number | undefined {
   if (v === null || v === undefined || v === "") return undefined;
   const n = typeof v === "number" ? v : Number(v);
   return Number.isFinite(n) ? n : undefined;
+}
+
+/** Относительный допуск для path / rowIndicator (число или диапазон); по умолчанию 0 — строгое сравнение. */
+function condToleranceRelFromDsl(raw: any): number {
+  const tol = parseOptionalFiniteNumber(raw.tolerance_rel);
+  return tol !== undefined && tol >= 0 ? tol : 0;
 }
 
 function condPrimaryFromDsl(raw: any): { primary?: false } {
@@ -246,11 +250,19 @@ function parseCondition(raw: any): UiCondition | null {
   if (raw.type === "path") {
     const parsedOp = String(raw.op ?? "equals");
     const recovered = recoverUiTextOpFromRegexDsl(parsedOp, raw.value);
+    const legacyOpMap: Record<string, string> = {
+      iEquals: "equals",
+      iContains: "contains",
+      iStartsWith: "startsWith",
+      iEndsWith: "endsWith",
+    };
+    const normalizedOp = legacyOpMap[recovered?.op ?? parsedOp] ?? (recovered?.op ?? parsedOp);
     return {
       type: "path",
       path: String(raw.path ?? ""),
-      op: recovered?.op ?? parsedOp,
+      op: normalizedOp,
       value: recovered?.value ?? raw.value,
+      tolerance_rel: condToleranceRelFromDsl(raw),
       ...condGroupIdFromDsl(raw),
       ...condConjunctionFromDsl(raw),
       ...condPrimaryFromDsl(raw),
@@ -274,6 +286,7 @@ function parseCondition(raw: any): UiCondition | null {
         value: undefined,
         value_min: vmin,
         value_max: vmax,
+        tolerance_rel: condToleranceRelFromDsl(raw),
         ...condGroupIdFromDsl(raw),
         ...condConjunctionFromDsl(raw),
         ...condPrimaryFromDsl(raw),
@@ -292,6 +305,7 @@ function parseCondition(raw: any): UiCondition | null {
         value: undefined,
         value_min: value,
         value_max: undefined,
+        tolerance_rel: condToleranceRelFromDsl(raw),
         ...condGroupIdFromDsl(raw),
         ...condConjunctionFromDsl(raw),
         ...condPrimaryFromDsl(raw),
@@ -308,6 +322,7 @@ function parseCondition(raw: any): UiCondition | null {
         value: undefined,
         value_min: undefined,
         value_max: value,
+        tolerance_rel: condToleranceRelFromDsl(raw),
         ...condGroupIdFromDsl(raw),
         ...condConjunctionFromDsl(raw),
         ...condPrimaryFromDsl(raw),
@@ -324,6 +339,7 @@ function parseCondition(raw: any): UiCondition | null {
         value: undefined,
         value_min: value,
         value_max: value,
+        tolerance_rel: condToleranceRelFromDsl(raw),
         ...condGroupIdFromDsl(raw),
         ...condConjunctionFromDsl(raw),
         ...condPrimaryFromDsl(raw),
@@ -337,6 +353,7 @@ function parseCondition(raw: any): UiCondition | null {
       name_equals,
       op,
       value,
+      tolerance_rel: condToleranceRelFromDsl(raw),
       ...condGroupIdFromDsl(raw),
       ...condConjunctionFromDsl(raw),
       ...condPrimaryFromDsl(raw),
@@ -482,6 +499,14 @@ export function classificationToDslPayload(ui: UiClassification): Record<string,
           }
           const o: Record<string, unknown> = { type: "path", path, op: opForDsl };
           if (valueForDsl !== undefined && valueForDsl !== "") o.value = valueForDsl;
+          const pathNumericOps = new Set(["equals", "gt", "gte", "lt", "lte"]);
+          if (pathNumericOps.has(String(opForDsl))) {
+            const tol =
+              typeof c.tolerance_rel === "number" && Number.isFinite(c.tolerance_rel) && c.tolerance_rel >= 0
+                ? c.tolerance_rel
+                : 0;
+            if (tol > 0) o.tolerance_rel = tol;
+          }
           if (c.group_id) o.group_id = c.group_id;
           if (c.conjunction === "or") o.conjunction = "or";
           if (c.primary === false) o.primary = false;
@@ -548,6 +573,11 @@ export function classificationToDslPayload(ui: UiClassification): Record<string,
           const o: Record<string, unknown> = { ...base };
           if (hasMin) o.value_min = c.value_min;
           if (hasMax) o.value_max = c.value_max;
+          const rowTol =
+            typeof c.tolerance_rel === "number" && Number.isFinite(c.tolerance_rel) && c.tolerance_rel > 0
+              ? c.tolerance_rel
+              : 0;
+          if (rowTol > 0) o.tolerance_rel = rowTol;
           if (c.group_id) o.group_id = c.group_id;
           if (c.conjunction === "or") o.conjunction = "or";
           if (c.primary === false) o.primary = false;
@@ -555,6 +585,11 @@ export function classificationToDslPayload(ui: UiClassification): Record<string,
         }
         const o: Record<string, unknown> = { ...base, op: c.op };
         if (c.value !== undefined && c.value !== "") o.value = c.value;
+        const rowOpTol =
+          typeof c.tolerance_rel === "number" && Number.isFinite(c.tolerance_rel) && c.tolerance_rel > 0
+            ? c.tolerance_rel
+            : 0;
+        if (rowOpTol > 0) o.tolerance_rel = rowOpTol;
         if (c.group_id) o.group_id = c.group_id;
         if (c.conjunction === "or") o.conjunction = "or";
         if (c.primary === false) o.primary = false;
@@ -578,7 +613,6 @@ export function classificationToDslPayload(ui: UiClassification): Record<string,
   return {
     strategy: "exactly_one",
     rules,
-    ambiguous_match_resolution: "comma_join",
   };
 }
 
@@ -603,10 +637,20 @@ function normPath(p: string): string {
 }
 
 function textPathForDescriptor(d: StructureRowFieldDescriptor): string {
+  if (d.listKey === FULL_DESCRIPTION_PATH) return FULL_DESCRIPTION_PATH;
   return d.structureKind === "scalar_text" ? d.listKey : d.wildcardComponentPath;
 }
 
+function descriptorLabel(d: StructureRowFieldDescriptor): string {
+  if (d.listKey === FULL_DESCRIPTION_PATH) return "Полное описание декларации";
+  if (d.structureKind === "scalar_number") return `${d.listKey} · числовое поле документа`;
+  if (d.structureKind === "scalar_text") return `${d.listKey} · текстовое поле документа`;
+  if (d.structureKind === "text_array") return `${d.listKey} · массив из допустимых значений`;
+  return `${d.listKey} / ${d.componentColumnKey}`;
+}
+
 function availableKindsForDescriptor(d: StructureRowFieldDescriptor): UiCheckKind[] {
+  if (d.listKey === FULL_DESCRIPTION_PATH) return ["scalarText"];
   if (d.structureKind === "scalar_number") return ["sectionPresent", "scalarNumber"];
   if (d.structureKind === "scalar_text") return ["sectionPresent", "scalarText"];
   if (d.structureKind === "text_array") return ["sectionPresent", "labelValue"];
@@ -616,6 +660,7 @@ function availableKindsForDescriptor(d: StructureRowFieldDescriptor): UiCheckKin
 }
 
 function defaultKindForDescriptor(d: StructureRowFieldDescriptor): UiCheckKind {
+  if (d.listKey === FULL_DESCRIPTION_PATH) return "scalarText";
   if (d.structureKind === "scalar_number") return "scalarNumber";
   if (d.structureKind === "scalar_text") return "scalarText";
   if (d.structureKind === "text_array") return "labelValue";
@@ -669,10 +714,10 @@ function recoverUiTextOpFromRegexDsl(op: string, value: unknown): { op: string; 
   if (!isEscapedLiteralBody(core)) return null;
   const literal = unescapeRegexLiteral(core);
 
-  if (ci && hasStart && hasEnd) return { op: "iEquals", value: literal };
-  if (ci && hasStart) return { op: "iStartsWith", value: literal };
-  if (ci && hasEnd) return { op: "iEndsWith", value: literal };
-  if (ci) return { op: "iContains", value: literal };
+  if (ci && hasStart && hasEnd) return { op: "equals", value: literal };
+  if (ci && hasStart) return { op: "startsWith", value: literal };
+  if (ci && hasEnd) return { op: "endsWith", value: literal };
+  if (ci) return { op: "contains", value: literal };
   if (hasStart && hasEnd) return { op: "equals", value: literal };
   if (hasStart) return { op: "startsWith", value: literal };
   if (hasEnd) return { op: "endsWith", value: literal };
@@ -692,14 +737,6 @@ function buildRegexFromUiTextOp(op: string, rawValue: string): { op: "regex" | "
       return { op: "regex", value: `^${lit}` };
     case "endsWith":
       return { op: "regex", value: `${lit}$` };
-    case "iEquals":
-      return { op: "regex", value: `(?i)^${lit}$` };
-    case "iContains":
-      return { op: "regex", value: `(?i)${lit}` };
-    case "iStartsWith":
-      return { op: "regex", value: `(?i)^${lit}` };
-    case "iEndsWith":
-      return { op: "regex", value: `(?i)${lit}$` };
     default:
       return null;
   }
@@ -772,6 +809,8 @@ function getConditionUiModel(
     if (sidx >= 0) return { kind: "scalarNumber", descriptorIndex: sidx };
   }
   if (cond.type === "path" && PATH_STRING_OPS.has(cond.op)) {
+    const descriptionIdx = descList.findIndex((d) => d.listKey.toLowerCase() === FULL_DESCRIPTION_PATH);
+    if (p === FULL_DESCRIPTION_PATH && descriptionIdx >= 0) return { kind: "scalarText", descriptorIndex: descriptionIdx };
     const scalarTextIdx = descList.findIndex((d) => d.structureKind === "scalar_text" && d.listKey.toLowerCase() === p);
     if (scalarTextIdx >= 0) return { kind: "scalarText", descriptorIndex: scalarTextIdx };
     const idx = descList.findIndex((d) => d.wildcardComponentPath.toLowerCase() === p);
@@ -861,6 +900,7 @@ function buildConditionForKind(kind: UiCheckKind, d: StructureRowFieldDescriptor
       value: undefined,
       value_min: prevRow?.value_min,
       value_max: prevRow?.value_max,
+      tolerance_rel: prevRow?.tolerance_rel ?? 0,
       ...keepGroupIdFromPrev(prev),
       ...keepPrimaryFromPrev(prev),
     };
@@ -882,19 +922,21 @@ function buildConditionForKind(kind: UiCheckKind, d: StructureRowFieldDescriptor
       path: d.listKey,
       op: prevP ? prevP.op : "gte",
       value: Number.isFinite(numVal) ? numVal : 0,
+      tolerance_rel: prevP?.tolerance_rel ?? 0,
       ...keepGroupIdFromPrev(prev),
       ...keepPrimaryFromPrev(prev),
     };
   }
   if (kind === "scalarText") {
+    const targetPath = d.listKey === FULL_DESCRIPTION_PATH ? FULL_DESCRIPTION_PATH : d.listKey;
     const keep =
       prev?.type === "path" &&
-      normPath(prev.path) === d.listKey.toLowerCase() &&
+      normPath(prev.path) === targetPath.toLowerCase() &&
       (PATH_STRING_OPS.has(prev.op) || prev.op === "exists" || prev.op === "notExists");
     const prevP = keep && prev?.type === "path" ? prev : undefined;
     return {
       type: "path",
-      path: d.listKey,
+      path: targetPath,
       op: prevP ? prevP.op : "equals",
       value: prevP ? prevP.value : undefined,
       ...keepGroupIdFromPrev(prev),
@@ -915,11 +957,11 @@ function buildConditionForKind(kind: UiCheckKind, d: StructureRowFieldDescriptor
   }
   const keep =
     prev?.type === "path" &&
-    prev.path.trim().toLowerCase() === d.listKey.toLowerCase() &&
+    prev.path.trim().toLowerCase() === (d.listKey === FULL_DESCRIPTION_PATH ? FULL_DESCRIPTION_PATH : d.listKey.toLowerCase()) &&
     (prev.op === "exists" || prev.op === "notExists");
   return {
     type: "path",
-    path: d.listKey,
+    path: d.listKey === FULL_DESCRIPTION_PATH ? FULL_DESCRIPTION_PATH : d.listKey,
     op: keep && prev ? prev.op : "exists",
     value: undefined,
     ...keepGroupIdFromPrev(prev),
@@ -931,6 +973,7 @@ type ConditionRowCallbacks = {
   replaceCond: (ruleIndex: number, condIndex: number, nextCond: UiCondition) => void;
   updateCond: (ruleIndex: number, condIndex: number, patch: Partial<UiCondition>) => void;
   removeCond: (ruleIndex: number, condIndex: number) => void;
+  changeSourceDescriptor: (ruleIndex: number, condIndex: number, descriptorIndex: number, currentKind: UiCheckKind) => void;
 };
 
 /** Одна строка условия (поле-массив задаётся заголовком секции, не дублируем в строке). */
@@ -941,10 +984,11 @@ function StructuredConditionRow(props: {
   d: StructureRowFieldDescriptor;
   kind: UiCheckKind;
   descList: StructureRowFieldDescriptor[];
+  descriptorIndex: number;
   cb: ConditionRowCallbacks;
   showPrimaryToggle?: boolean;
 }) {
-  const { ri, ci, cond, d, kind, descList, cb, showPrimaryToggle = true } = props;
+  const { ri, ci, cond, d, kind, descList, descriptorIndex, cb, showPrimaryToggle = true } = props;
   const availableKinds = availableKindsForDescriptor(d);
 
   return (
@@ -958,6 +1002,27 @@ function StructuredConditionRow(props: {
       }}
     >
       <div style={{ display: "flex", flexDirection: "column", gap: 10, maxWidth: 760, alignItems: "stretch" }}>
+        <label style={{ fontSize: 13, color: "#64748b", width: "100%", minWidth: 0 }}>
+          Источник данных
+          <select
+            value={String(descriptorIndex)}
+            onChange={(e) => cb.changeSourceDescriptor(ri, ci, Number(e.target.value), kind)}
+            style={{
+              display: "block",
+              width: "100%",
+              marginTop: 4,
+              padding: 8,
+              borderRadius: 8,
+              border: "1px solid #cbd5e1",
+            }}
+          >
+            {descList.map((desc, idx) => (
+              <option key={`${desc.listKey}-${desc.componentColumnKey}-${idx}`} value={idx}>
+                {descriptorLabel(desc)}
+              </option>
+            ))}
+          </select>
+        </label>
         <label style={{ fontSize: 13, color: "#64748b", width: "100%", minWidth: 0 }}>
           Что проверяем
           <select
@@ -978,7 +1043,7 @@ function StructuredConditionRow(props: {
             {availableKinds.includes("sectionPresent") ? (
               <option
                 value="sectionPresent"
-                title="Проверяем, есть ли на корне документа поле с выбранным ключом."
+                title="Проверяем, есть ли в документе выбранное поле."
               >
                 Наличие поля в документе
               </option>
@@ -986,7 +1051,7 @@ function StructuredConditionRow(props: {
             {availableKinds.includes("scalarNumber") ? (
               <option
                 value="scalarNumber"
-                title="Одно число на корне JSON: сравнение с порогом (≥, ≤, = и т.д.)."
+                title="Сравнение значения числового поля с порогом (≥, ≤, = и т.д.)."
               >
                 Числовое сравнение
               </option>
@@ -994,9 +1059,9 @@ function StructuredConditionRow(props: {
             {availableKinds.includes("scalarText") ? (
               <option
                 value="scalarText"
-                title="Одно текстовое значение на корне JSON: проверка равенства, подстроки, regex и т.д."
+                title="Проверка текста в поле: равенство, подстрока, регулярное выражение и т.д."
               >
-                Текст на корне
+                {d.listKey === FULL_DESCRIPTION_PATH ? "Полный текст описания" : "Текст поля"}
               </option>
             ) : null}
             {availableKinds.includes("numberInRow") ? (
@@ -1122,6 +1187,24 @@ function StructuredConditionRow(props: {
                 cb.updateCond(ri, ci, {
                   value_max: t === "" ? undefined : Number(t),
                 });
+              }}
+            />
+          </label>
+          <label title="Доля от модуля каждой заданной границы (минимум/максимум): коридор правила расширяется. 0 — без допуска.">
+            <span style={{ fontSize: 13, color: "#64748b" }}>Относит. допуск</span>
+            <input
+              type="number"
+              step="any"
+              min={0}
+              style={{ display: "block", width: 120, marginTop: 4, padding: 8, borderRadius: 8, border: "1px solid #cbd5e1" }}
+              value={String(cond.tolerance_rel ?? 0)}
+              onChange={(e) => {
+                const n = Number(e.target.value);
+                if (e.target.value === "" || e.target.value === "-") {
+                  cb.updateCond(ri, ci, { tolerance_rel: 0 });
+                  return;
+                }
+                if (Number.isFinite(n) && n >= 0) cb.updateCond(ri, ci, { tolerance_rel: n });
               }}
             />
           </label>
@@ -1448,11 +1531,7 @@ function StructuredConditionRow(props: {
                   op === "contains" ||
                   op === "notContains" ||
                   op === "startsWith" ||
-                  op === "endsWith" ||
-                  op === "iEquals" ||
-                  op === "iContains" ||
-                  op === "iStartsWith" ||
-                  op === "iEndsWith"
+                  op === "endsWith"
                 ) {
                   value = typeof cond.value === "string" ? cond.value : "";
                 } else if (op === "in") {
@@ -1480,6 +1559,12 @@ function StructuredConditionRow(props: {
               enumLabel="Значение из перечня"
             />
           ) : null}
+          {(cond.op === "regex" || cond.op === "notRegex") && (
+            <div style={{ width: "100%", fontSize: 12, color: "#64748b", lineHeight: 1.45 }}>
+              Подсказка: для простых шаблонов используйте «содержит/начинается/заканчивается». Regex нужен для сложных правил,
+              например <code>^ту\\s*\\d+</code>.
+            </div>
+          )}
         </div>
       )}
 
@@ -1533,6 +1618,24 @@ function StructuredConditionRow(props: {
               }}
             />
           </label>
+          <label title="Для «равно» — как у формулы: |факт − порог| ≤ допуск·max(|факт|,|порог|). Для неравенств — полоса у границы порога. 0 — строго.">
+            <span style={{ fontSize: 13, color: "#64748b" }}>Относит. допуск</span>
+            <input
+              type="number"
+              step="any"
+              min={0}
+              style={{ display: "block", width: 120, marginTop: 4, padding: 8, borderRadius: 8, border: "1px solid #cbd5e1" }}
+              value={String(cond.tolerance_rel ?? 0)}
+              onChange={(e) => {
+                const n = Number(e.target.value);
+                if (e.target.value === "" || e.target.value === "-") {
+                  cb.updateCond(ri, ci, { tolerance_rel: 0 });
+                  return;
+                }
+                if (Number.isFinite(n) && n >= 0) cb.updateCond(ri, ci, { tolerance_rel: n });
+              }}
+            />
+          </label>
         </div>
       )}
 
@@ -1553,7 +1656,19 @@ type Props = {
 };
 
 export default function ClassificationRulesPanel({ value, onChange, structureRowDescriptors }: Props) {
-  const descList = structureRowDescriptors ?? [];
+  const descList = React.useMemo(() => {
+    const base = [...(structureRowDescriptors ?? [])];
+    if (!base.some((d) => d.listKey === FULL_DESCRIPTION_PATH)) {
+      base.push({
+        listKey: FULL_DESCRIPTION_PATH,
+        componentColumnKey: "",
+        wildcardComponentPath: FULL_DESCRIPTION_PATH,
+        allowedValues: [],
+        structureKind: "scalar_text",
+      });
+    }
+    return base;
+  }, [structureRowDescriptors]);
   const hasStructure = descList.length > 0;
   const [editingRuleIndex, setEditingRuleIndex] = React.useState<number | null>(null);
   const [expandedRuleKeys, setExpandedRuleKeys] = React.useState<Set<string>>(() => new Set());
@@ -1684,10 +1799,21 @@ export default function ClassificationRulesPanel({ value, onChange, structureRow
     updateRuleAt(ruleIndex, { conditions: rule.conditions.filter((_, j) => j !== ci) });
   };
 
+  const changeSourceDescriptor = (ruleIndex: number, ci: number, descriptorIndex: number, currentKind: UiCheckKind) => {
+    const d = descList[descriptorIndex];
+    const rule = value.rules[ruleIndex];
+    if (!d || !rule) return;
+    const prev = rule.conditions[ci];
+    const supportedKinds = availableKindsForDescriptor(d);
+    const nextKind = supportedKinds.includes(currentKind) ? currentKind : defaultKindForDescriptor(d);
+    replaceCond(ruleIndex, ci, buildConditionForKind(nextKind, d, prev));
+  };
+
   const condCb: ConditionRowCallbacks = {
     replaceCond,
     updateCond,
     removeCond,
+    changeSourceDescriptor,
   };
 
   return (
@@ -1975,13 +2101,7 @@ export default function ClassificationRulesPanel({ value, onChange, structureRow
                                   }}
                                 >
                                   <div style={{ fontWeight: 600, fontSize: 13, color: "#475569" }}>
-                                    {d.structureKind === "scalar_number"
-                                      ? `${d.listKey} · одно числовое поле верхнего уровня`
-                                      : d.structureKind === "scalar_text"
-                                        ? `${d.listKey} · значение текстового поля`
-                                      : d.structureKind === "text_array"
-                                        ? `${d.listKey} · массив из допустимых значений`
-                                        : `${d.listKey} / ${d.componentColumnKey}`}
+                                    {descriptorLabel(d)}
                                   </div>
                                   {(() => {
                                     const firstEntry = groupConditionIndices[localIndices[0]];
@@ -2030,6 +2150,7 @@ export default function ClassificationRulesPanel({ value, onChange, structureRow
                                       d={d}
                                       kind={kind}
                                       descList={descList}
+                                      descriptorIndex={di}
                                       cb={condCb}
                                       showPrimaryToggle={localIndex !== localIndices[0]}
                                     />

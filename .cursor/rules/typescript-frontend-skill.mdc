@@ -1,0 +1,16 @@
+---
+description: Для TS/TSX и каталога frontend — применять скилл typescript-frontend-excellence.
+globs:
+  - "**/*.ts"
+  - "**/*.tsx"
+  - "frontend/**"
+alwaysApply: false
+---
+
+# Скилл сильного фронтенда на TypeScript
+
+Когда открыт или затронут файл по маске выше (в том числе любая работа под `frontend/`):
+
+1. Руководствуйся пользовательским скиллом агента **typescript-frontend-excellence**: файл `SKILL.md` в каталоге пользовательских скиллов Cursor (как правило `~/.cursor/skills/typescript-frontend-excellence/SKILL.md` или `%USERPROFILE%\.cursor\skills\typescript-frontend-excellence\SKILL.md` в Windows).
+2. Если скилл не попал в контекст чата, попроси пользователя явно подключить скилл **typescript-frontend-excellence** или прочитай указанный `SKILL.md` через доступные инструменты чтения файлов.
+3. Не противоречь приоритетам скилла без явной просьбы пользователя: соответствие кодовой базе, минимальный дифф, строгая типизация, дисциплина хуков и эффектов, a11y и согласованность стилей с проектом.

@@ -19,6 +19,8 @@ from app import main as orchestrator_main  # noqa: E402
 
 
 class _FakeResponse:
+    """Минимальная заглушка httpx.Response для unit-тестов."""
+
     def __init__(self, status_code: int, data: Any) -> None:
         self.status_code = status_code
         self._data = data
@@ -34,6 +36,8 @@ class _FakeResponse:
 
 
 class _FakeAsyncClient:
+    """Асинхронный fake-клиент для изоляции тестов от сетевых вызовов."""
+
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         pass
 
@@ -74,7 +78,19 @@ class _FakeAsyncClient:
                 },
             )
         if url.endswith("/api/v1/search"):
+            desc = str((json or {}).get("description") or "")
+            assert "N16.4" in desc
             return _FakeResponse(200, {"matched": True, "similarity": 0.91, "class_id": "CLASS-A"})
+        if url.endswith("/api/v1/ollama/generate"):
+            return _FakeResponse(200, {"raw_response": "Очищенное описание N16.4"})
+        if url.endswith("/api/v1/embed"):
+            body = json or {}
+            assert body.get("use_query_prefix") is True
+            texts = body.get("texts") or []
+            return _FakeResponse(
+                200,
+                {"embedding_model": "intfloat/multilingual-e5-base", "vectors": [[0.25] * 8 for _ in texts]},
+            )
         if url.endswith("/api/pipeline/semantic-class-consistency"):
             return _FakeResponse(200, {"consistent": True, "message_ru": None})
         if url.endswith("/api/v1/price/validate"):
@@ -87,6 +103,22 @@ class _FakeAsyncClient:
 def test_run_validate_pipeline_stages_and_data(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(orchestrator_main.httpx, "AsyncClient", _FakeAsyncClient)
     monkeypatch.setattr(orchestrator_main, "enqueue_cluster_job", lambda payload: 777)
+    monkeypatch.setattr(
+        orchestrator_main,
+        "load_semantic_cleaning_settings",
+        lambda: {
+            "model": "llm-cleaner",
+            "prompt": "clean",
+            "num_ctx": 2048,
+            "max_new_tokens": 256,
+            "repetition_penalty": 1.0,
+            "temperature": 0.0,
+            "top_p": 1.0,
+            "enable_thinking": False,
+            "constrained_decoding": True,
+            "do_sample": False,
+        },
+    )
 
     phases: list[str] = []
     partial_steps: list[str] = []
@@ -111,13 +143,22 @@ def test_run_validate_pipeline_stages_and_data(monkeypatch: pytest.MonkeyPatch) 
 
     assert out["status"] == "completed"
     assert out["final_class"] == "CLASS-A"
+    train = out.get("semantic_cleaning_for_training") or {}
+    assert train.get("description_before_semantic_cleaning") == "Удобрение N16.4"
+    assert "N16.4" in str(train.get("description_for_semantic_embedding") or "")
+    assert isinstance(train.get("semantic_query_embedding"), list) and len(train["semantic_query_embedding"]) == 8
+    clean_step = next(s for s in out["steps"] if s["step"] == "semantic-description-cleaning")
+    assert clean_step["result"].get("description_before_cleaning") == "Удобрение N16.4"
+    assert clean_step["result"].get("semantic_query_embedding") == train.get("semantic_query_embedding")
     assert any(s["step"] == "semantic-search" for s in out["steps"])
+    assert any(s["step"] == "semantic-description-cleaning" for s in out["steps"])
     assert any(s["step"] == "semantic-class-rule-check" for s in out["steps"])
     assert any(s["step"] == "price-validator" for s in out["steps"])
     assert any(s["step"] == "enqueue-clustering-job" for s in out["steps"])
 
     assert phases == [
         "catalog",
+        "semantic-cleaning",
         "semantic-search",
         "semantic-rule-check",
         "price-validation",

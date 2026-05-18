@@ -6,6 +6,8 @@ services:
       POSTGRES_DB: rules
       POSTGRES_USER: rules_user
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-rules_pass}
+    ports:
+      - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -57,6 +59,7 @@ services:
     container_name: pipeline_semantic_search
     environment:
       SEMANTIC_SEARCH_EMBEDDING_MODEL: ${SEMANTIC_SEARCH_EMBEDDING_MODEL:-intfloat/multilingual-e5-base}
+      SEMANTIC_SEARCH_EMBED_BATCH_SIZE: ${SEMANTIC_SEARCH_EMBED_BATCH_SIZE:-32}
       # Для тестов без загрузки модели: 1 — всегда старая заглушка по ТН ВЭД.
       SEMANTIC_SEARCH_FORCE_STUB: ${SEMANTIC_SEARCH_FORCE_STUB:-0}
     ports:

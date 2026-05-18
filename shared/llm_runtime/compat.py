@@ -19,6 +19,7 @@ def ollama_generate(
     temperature: float = 0.0,
     top_p: float | None = None,
     enable_thinking: bool = False,
+    response_format: dict[str, Any] | None = None,
     timeout: float = 600.0,
 ) -> dict[str, Any]:
     if config.is_vllm():
@@ -31,6 +32,7 @@ def ollama_generate(
             temperature=temperature,
             top_p=top_p,
             enable_thinking=enable_thinking,
+            response_format=response_format,
             timeout=timeout,
         )
     return ollama_backend.ollama_generate(
@@ -42,6 +44,7 @@ def ollama_generate(
         temperature=temperature,
         top_p=top_p,
         enable_thinking=enable_thinking,
+        response_format=response_format,
         timeout=timeout,
     )
 

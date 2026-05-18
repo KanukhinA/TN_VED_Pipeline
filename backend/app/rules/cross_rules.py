@@ -1,3 +1,5 @@
+"""Выполнение межполевых правил DSL: связь нескольких путей в данных одной декларации."""
+
 from __future__ import annotations
 
 import re
@@ -18,7 +20,7 @@ from .path_utils import extract_first_value, extract_values, path_exists
 
 
 class CrossRuleError(BaseModel):
-    """Структурированная ошибка проверки cross-rule."""
+    """Структурированная ошибка проверки межполевого правила."""
     template: str
     path: Optional[str] = None
     message: str
@@ -26,7 +28,7 @@ class CrossRuleError(BaseModel):
 
 
 def _compare(left: Any, op: ComparisonOpType, right: Any) -> bool:
-    """Унифицированное сравнение значений для условий кросс-правил."""
+    """Унифицированное сравнение значений для условий межполевых правил."""
     if op == "exists":
         return left is not None
     if op == "notExists":
@@ -41,7 +43,7 @@ def _compare(left: Any, op: ComparisonOpType, right: Any) -> bool:
         return eq if op == "equals" else (not eq)
 
     if op in {"gt", "gte", "lt", "lte"}:
-        # В MVP стараемся сравнивать числа; иначе считаем несовместимость false.
+        # В MVP стараемся сравнивать числа; иначе считаем условие несовместимым.
         try:
             lf = float(left)
             rf = float(right)
@@ -68,7 +70,9 @@ def _compare(left: Any, op: ComparisonOpType, right: Any) -> bool:
         if right is None or str(right).strip() == "":
             return False
         try:
-            m = re.search(str(right), str(left)) is not None
+            # Декларации часто приходят в ВЕРХНЕМ РЕГИСТРЕ, поэтому для бизнес-правил
+            # регулярные проверки выполняем без учёта регистра.
+            m = re.search(str(right), str(left), flags=re.IGNORECASE) is not None
         except re.error:
             return False
         return m if op == "regex" else (not m)
@@ -77,7 +81,7 @@ def _compare(left: Any, op: ComparisonOpType, right: Any) -> bool:
 
 
 def validate_cross_rules(data: Any, rules: List[CrossRule]) -> List[CrossRuleError]:
-    """Применяет все cross-rules к данным и возвращает накопленный список нарушений."""
+    """Применяет все межполевые правила к данным и возвращает накопленный список нарушений."""
     errors: List[CrossRuleError] = []
 
     for rule in rules:

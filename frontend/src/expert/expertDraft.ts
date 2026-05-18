@@ -396,7 +396,6 @@ export function draftToDsl(draft: ExpertCatalogDraft): any {
       classification = {
         strategy: "exactly_one",
         rules,
-        ambiguous_match_resolution: "comma_join",
       };
     }
   }

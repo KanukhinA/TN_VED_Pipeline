@@ -1,5 +1,5 @@
 /**
- * Черновик структуры «несколько числовых характеристик на корне JSON»:
+ * Черновик структуры «несколько числовых характеристик на верхнем уровне JSON»:
  * каждая характеристика: массив объектов { [текстовый ключ]: компонент, [имя характеристики]: число }.
  */
 
@@ -9,7 +9,7 @@ import { suggestModelId } from "./expertDraft";
 
 export const NUMERIC_CHARACTERISTICS_DRAFT_VERSION = 3;
 
-/** Ключ массива «прочие характеристики» на корне JSON. */
+/** Ключ массива «прочие характеристики» на верхнем уровне JSON. */
 export const PROCHEE_ROOT_KEY = "прочее";
 
 /** Типовой набор строк для блока «прочее» (редактируемый в форме). */
@@ -23,17 +23,17 @@ export const DEFAULT_PROCHEE_TEMPLATE: ReadonlyArray<Record<string, unknown>> = 
   { параметр: "марка", значение: "N7-P20-K30-S3" },
 ];
 
-/** Группа полей: массив объектов на корне. Скаляр: одно число на корне документа (например плотность). */
+/** Группа полей: массив объектов верхнего уровня. Скаляр: одно число на верхнем уровне документа (например плотность). */
 export type NumericCharacteristicLayout = "group" | "scalar";
 
 export interface NumericCharacteristicLine {
   /**
-   * Имя поля на корне JSON и одновременно имя числового поля в каждом элементе массива
+   * Имя поля на верхнем уровне JSON и одновременно имя числового поля в каждом элементе массива
    * (как «числовая характеристика 1» в примере).
    */
   characteristicKey: string;
   /**
-   * Режим: массив строк с компонентом и числом (`group`) или одно число на корне (`scalar`).
+   * Режим: массив строк с компонентом и числом (`group`) или одно число на верхнем уровне (`scalar`).
    * По умолчанию `group` для обратной совместимости.
    */
   layout?: NumericCharacteristicLayout;
@@ -51,20 +51,20 @@ export interface NumericCharacteristicLine {
   allowedComponentValues?: string[];
 }
 
-/** Фиксированное текстовое поле-массив: ключ на корне совпадает с ключом внутри каждого элемента. */
+/** Фиксированное текстовое поле-массив: ключ верхнего уровня совпадает с ключом внутри каждого элемента. */
 export interface TextArrayFieldLine {
-  /** Один и тот же ключ для массива на корне и для свойства в объекте строки. */
+  /** Один и тот же ключ для массива верхнего уровня и для свойства в объекте строки. */
   fieldKey: string;
-  /** Разрешать пустой массив [] и отсутствие поля на корне. */
+  /** Разрешать пустой массив [] и отсутствие поля на верхнем уровне. */
   allowEmpty?: boolean;
   /** Примеры допустимых значений (в схеме — enum для строки). */
   exampleValues?: string[];
 }
 
-/** Простое текстовое поле на корне JSON: key: "value". */
+/** Простое текстовое поле верхнего уровня JSON: key: "value". */
 export interface TextScalarFieldLine {
   fieldKey: string;
-  /** Разрешать отсутствие поля на корне. */
+  /** Разрешать отсутствие поля на верхнем уровне. */
   allowEmpty?: boolean;
   /** Примеры допустимых значений (в схеме — enum для строки). */
   exampleValues?: string[];
@@ -124,7 +124,7 @@ export function parseAllowedComponentValuesFromText(raw: string): string[] | und
   return uniq.length ? uniq : undefined;
 }
 
-/** Нормализация перечня: trim, lower case, без дубликатов. */
+/** Нормализация перечня: обрезка пробелов, нижний регистр, удаление дубликатов. */
 export function normalizeAllowedComponentValuesList(values: string[] | undefined): string[] | undefined {
   if (!values?.length) return undefined;
   const out = [...new Set(values.map((s) => String(s).trim().toLowerCase()).filter(Boolean))];
@@ -215,7 +215,7 @@ export type StructureRowFieldDescriptor = {
   wildcardComponentPath: string;
   /** Пусто: перечень на шаге структуры не задан, в условиях остаётся только ручной ввод */
   allowedValues: string[];
-  /** Скаляры на корне и массивы строк; определяет доступные режимы условий. */
+  /** Скаляры верхнего уровня и массивы строк; определяет доступные режимы условий. */
   structureKind?: "array_row" | "scalar_number" | "text_array" | "scalar_text";
 };
 
@@ -266,7 +266,25 @@ export function buildStructureRowDescriptors(draft: NumericCharacteristicsDraft)
       structureKind: "scalar_text" as const,
     };
   });
-  return [...numeric, ...text, ...textScalar];
+  const prochee: StructureRowFieldDescriptor[] = d.procheeEnabled
+    ? [
+        {
+          listKey: PROCHEE_ROOT_KEY,
+          componentColumnKey: "параметр",
+          wildcardComponentPath: `${PROCHEE_ROOT_KEY}[*].параметр`,
+          allowedValues: [
+            ...new Set(
+              (d.procheeRows ?? [])
+                .map((row) => String((row as Record<string, unknown>)?.["параметр"] ?? "").trim().toLowerCase())
+                .filter(Boolean),
+            ),
+          ],
+          // Для блока «прочее» безопасно включаем текстовые проверки по названию параметра.
+          structureKind: "text_array",
+        },
+      ]
+    : [];
+  return [...numeric, ...text, ...textScalar, ...prochee];
 }
 
 /** Сопоставляет путь вида list[*].col или list[].col с полем из структуры. */
@@ -278,7 +296,7 @@ export function matchStructureRowDescriptorByPath(
   return descriptors.find((f) => f.wildcardComponentPath.toLowerCase() === n);
 }
 
-/** Путь к числовому полю в строках массива (ключ числа совпадает с ключом поля на корне). */
+/** Путь к числовому полю в строках массива (ключ числа совпадает с ключом поля верхнего уровня). */
 export function matchStructureNumericValuePath(
   path: string,
   descriptors: StructureRowFieldDescriptor[],
@@ -308,14 +326,14 @@ export interface NumericCharacteristicsDraft {
   catalogName: string;
   catalogDescription: string;
   modelId: string;
-  /** Числовые поля: массив строк (`group`) или одно число на корне (`scalar`). */
+  /** Числовые поля: массив строк (`group`) или одно число на верхнем уровне (`scalar`). */
   characteristics: NumericCharacteristicLine[];
-  /** Массив «прочее» на корне: строки с разным набором полей. */
+  /** Массив «прочее» на верхнем уровне: строки с разным набором полей. */
   procheeEnabled?: boolean;
   procheeRows?: Array<Record<string, unknown>>;
   /** Поля вида key: [ { key: "..." }, ... ] с тем же именем ключа. */
   textArrayFields?: TextArrayFieldLine[];
-  /** Поля вида key: "..." на корне JSON. */
+  /** Поля вида key: "..." на верхнем уровне JSON. */
   textScalarFields?: TextScalarFieldLine[];
 }
 
@@ -448,7 +466,7 @@ function textScalarPropertyDef(
   };
 }
 
-/** Схема Rule DSL под структуру с несколькими массивами числовых характеристик на корне. */
+/** Схема Rule DSL под структуру с несколькими массивами числовых характеристик на верхнем уровне. */
 export function numericCharacteristicsToDsl(draft: NumericCharacteristicsDraft): any {
   const normalized = normalizeNumericCharacteristicsDraft(draft);
   const model_id = (normalized.modelId || suggestModelId(normalized.catalogName || "spravochnik")).trim().toLowerCase();

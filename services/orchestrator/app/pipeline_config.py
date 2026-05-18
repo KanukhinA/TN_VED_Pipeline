@@ -6,6 +6,8 @@ import json
 import os
 from pathlib import Path
 
+from app.semantic_cleaning import DEFAULT_SEMANTIC_CLEANING_PROMPT
+
 DEFAULT_THRESHOLD = 0.75
 DEFAULT_NEIGHBOR_FLOOR_S0 = 0.35
 DEFAULT_NEIGHBOR_WEIGHT_GAMMA = 2.0
@@ -88,3 +90,33 @@ def load_semantic_support_threshold_tau2() -> float:
         return float(os.getenv("SEMANTIC_SUPPORT_THRESHOLD_TAU2", str(DEFAULT_SUPPORT_THRESHOLD_TAU2)))
     except (TypeError, ValueError):
         return DEFAULT_SUPPORT_THRESHOLD_TAU2
+
+
+def load_semantic_cleaning_settings() -> dict[str, object]:
+    raw = _load_pipeline_dict()
+    prompt = str(raw.get("semantic_cleaning_prompt") or DEFAULT_SEMANTIC_CLEANING_PROMPT).strip()
+
+    def _int_val(key: str, default: int, lo: int, hi: int) -> int:
+        try:
+            return max(lo, min(int(raw.get(key, default)), hi))
+        except (TypeError, ValueError):
+            return default
+
+    def _float_val(key: str, default: float, lo: float, hi: float) -> float:
+        try:
+            return max(lo, min(float(raw.get(key, default)), hi))
+        except (TypeError, ValueError):
+            return default
+
+    return {
+        "model": "",
+        "prompt": prompt,
+        "num_ctx": _int_val("semantic_cleaning_num_ctx", 8192, 256, 65536),
+        "max_new_tokens": _int_val("semantic_cleaning_max_new_tokens", 1024, 32, 8192),
+        "repetition_penalty": _float_val("semantic_cleaning_repetition_penalty", 1.0, 0.5, 2.0),
+        "temperature": _float_val("semantic_cleaning_temperature", 0.0, 0.0, 2.0),
+        "top_p": _float_val("semantic_cleaning_top_p", 1.0, 0.0, 1.0),
+        "enable_thinking": bool(raw.get("semantic_cleaning_enable_thinking", False)),
+        "constrained_decoding": bool(raw.get("semantic_cleaning_constrained_decoding", True)),
+        "do_sample": bool(raw.get("semantic_cleaning_do_sample", False)),
+    }

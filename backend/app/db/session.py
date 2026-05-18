@@ -29,11 +29,14 @@ def _ensure_rules_archived_column(engine: Engine) -> None:
 
 def _get_database_url() -> str:
     """
-    По умолчанию используем SQLite, чтобы разработка/прототип могли стартовать без инфраструктуры.
-    Для прод-использования выставьте DATABASE_URL на PostgreSQL.
+    Единая БД проекта — PostgreSQL. Если DATABASE_URL не задан, подключаемся к контейнеру compose
+    на localhost:5432 (см. docker-compose.yml: сервис postgres, пользователь и БД rules).
+    Переопределение: переменная окружения DATABASE_URL (как в Docker: postgresql+psycopg2://…).
     """
-
-    return os.getenv("DATABASE_URL", "sqlite:///./rules.db")
+    explicit = (os.getenv("DATABASE_URL") or "").strip()
+    if explicit:
+        return explicit
+    return "postgresql+psycopg2://rules_user:rules_pass@127.0.0.1:5432/rules"
 
 
 def get_engine() -> Engine:

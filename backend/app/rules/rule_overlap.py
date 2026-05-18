@@ -28,6 +28,7 @@ from .classification import (
     _rule_first_match_tiebreak_score,
     _rule_matches,
     row_indicator_numeric_value_satisfies,
+    scalar_numeric_op_feasible_interval,
     select_rule_for_first_match,
 )
 from .dsl_models import (
@@ -94,21 +95,12 @@ def _numeric_interval_from_path(cond: PathClassificationCondition) -> Optional[t
     """Допустимый интервал для скалярного сравнения по полю (gt/gte/lt/lte/equals) при объединении условий на одном path."""
     op = str(cond.op)
     val = cond.value
+    tol = max(0.0, float(cond.tolerance_rel))
     try:
-        if op == "gt":
-            return float(val) + 1e-12, float("inf")
-        if op == "gte":
-            return float(val), float("inf")
-        if op == "lt":
-            return float("-inf"), float(val) - 1e-12
-        if op == "lte":
-            return float("-inf"), float(val)
-        if op == "equals":
-            x = float(val)
-            return x, x
-    except Exception:
+        v = float(val)
+    except (TypeError, ValueError):
         return None
-    return None
+    return scalar_numeric_op_feasible_interval(op, v, tol)
 
 
 def _fmt_overlap_num(x: float) -> str:
@@ -171,14 +163,15 @@ def _path_cond_numeric_piece(
 def _row_cond_numeric_piece(
     c: RowIndicatorCondition, rule_lbl: str
 ) -> Optional[tuple[tuple[float, float], str]]:
-    if c.value_min is not None and c.value_max is not None:
-        lo, hi = float(c.value_min), float(c.value_max)
-        return (lo, hi), f"«{rule_lbl}»: от {_fmt_overlap_num(lo)} до {_fmt_overlap_num(hi)}"
-    if c.value_min is not None and c.value_max is None:
-        lo = float(c.value_min)
-        return (lo, float("inf")), f"«{rule_lbl}»: не меньше {_fmt_overlap_num(lo)}"
-    if c.value_max is not None and c.value_min is None:
-        hi = float(c.value_max)
+    if c.value_min is not None or c.value_max is not None:
+        inter0 = _numeric_interval_from_row_indicator_legacy(c)
+        if inter0 is None:
+            return None
+        lo, hi = inter0
+        if c.value_min is not None and c.value_max is not None:
+            return (lo, hi), f"«{rule_lbl}»: от {_fmt_overlap_num(lo)} до {_fmt_overlap_num(hi)}"
+        if c.value_min is not None and c.value_max is None:
+            return (lo, float("inf")), f"«{rule_lbl}»: не меньше {_fmt_overlap_num(lo)}"
         return (float("-inf"), hi), f"«{rule_lbl}»: не больше {_fmt_overlap_num(hi)}"
     inter = _numeric_interval_from_row_indicator_legacy(c)
     if inter is None:
@@ -470,23 +463,19 @@ def _numeric_interval_from_row_indicator_legacy(cond: RowIndicatorCondition) -> 
     if cond.value_min is not None or cond.value_max is not None:
         lo = float(cond.value_min) if cond.value_min is not None else float("-inf")
         hi = float(cond.value_max) if cond.value_max is not None else float("inf")
+        tol = max(0.0, float(cond.tolerance_rel))
+        if lo != float("-inf"):
+            lo -= tol * max(abs(lo), 1e-12)
+        if hi != float("inf"):
+            hi += tol * max(abs(hi), 1e-12)
         return lo, hi
     op = cond.op
     try:
-        if op == "gt":
-            return float(cond.value) + 1e-12, float("inf")
-        if op == "gte":
-            return float(cond.value), float("inf")
-        if op == "lt":
-            return float("-inf"), float(cond.value) - 1e-12
-        if op == "lte":
-            return float("-inf"), float(cond.value)
-        if op == "equals":
-            x = float(cond.value)
-            return x, x
+        v = float(cond.value)
     except Exception:
         return None
-    return None
+    inter = scalar_numeric_op_feasible_interval(str(op or ""), v, max(0.0, float(cond.tolerance_rel)))
+    return inter
 
 
 def _pair_ratio_key(c: RowPairRatioCondition) -> tuple[str, str, str, str, str]:

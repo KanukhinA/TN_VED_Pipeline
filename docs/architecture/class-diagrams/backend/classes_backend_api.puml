@@ -1,10 +1,10 @@
 @startuml classes_backend_api
 set namespaceSeparator none
 class "app.api.routes_expert_decisions.ExpertDecisionCreate" as app.api.routes_expert_decisions.ExpertDecisionCreate {
-  category : str
-  declaration_id : str
+  category : Optional[str]
+  declaration_id : Optional[str]
   model_config
-  payload : Dict[str, Any]
+  payload : Optional[Dict[str, Any]]
   rule_id : Optional[str]
   summary_ru : str
 }
@@ -28,21 +28,24 @@ class "app.api.routes_expert_decisions.ExpertDecisionListPageOut" as app.api.rou
 }
 class "app.api.routes_expert_decisions.ExpertDecisionPatch" as app.api.routes_expert_decisions.ExpertDecisionPatch {
   model_config
-  resolution : Dict[str, Any]
+  resolution : Optional[Dict[str, Any]]
   status : Literal['pending', 'resolved', 'dismissed']
 }
 class "app.api.routes_feature_extraction_settings.FewShotAssistRunCreate" as app.api.routes_feature_extraction_settings.FewShotAssistRunCreate {
   model_config
-  result : Dict[str, Any]
+  result : Optional[Dict[str, Any]]
   rule_id : str
 }
 class "app.api.routes_feature_extraction_settings.ModelRuntimeSettingsPayload" as app.api.routes_feature_extraction_settings.ModelRuntimeSettingsPayload {
   model_config
-  models : dict[str, dict[str, Any]]
+  models : Optional[dict[str, dict[str, Any]]]
 }
 class "app.api.routes_feature_extraction_settings.PrimaryCatalogSettingsPayload" as app.api.routes_feature_extraction_settings.PrimaryCatalogSettingsPayload {
-  by_group_code : dict[str, Optional[str]]
+  by_group_code : Optional[dict[str, Optional[str]]]
   model_config
+}
+class "app.api.routes_officer_pipeline.LocalOfficerPipelineRunner" as app.api.routes_officer_pipeline.LocalOfficerPipelineRunner {
+  run(payload: OfficerRunRequest, db: Session) -> Dict[str, Any]
 }
 class "app.api.routes_officer_pipeline.OfficerRunRequest" as app.api.routes_officer_pipeline.OfficerRunRequest {
   declaration_id : str
@@ -56,78 +59,15 @@ class "app.api.routes_officer_pipeline.OfficerRunRequest" as app.api.routes_offi
 class "app.api.routes_officer_pipeline.SemanticClassConsistencyRequest" as app.api.routes_officer_pipeline.SemanticClassConsistencyRequest {
   class_id : str
   rule_id : str
-  validated_features : Dict[str, Any]
-}
-class "app.api.routes_rules.CloneRuleRequest" as app.api.routes_rules.CloneRuleRequest {
-  model_id : Optional[str]
-  name : Optional[str]
-}
-class "app.api.routes_rules.CreateRuleResponse" as app.api.routes_rules.CreateRuleResponse {
-  created_at : datetime
-  dsl : Dict[str, Any]
-  rule_id : UUID
-  version : int
+  validated_features : Optional[Dict[str, Any]]
 }
 class "app.api.routes_rules.DSLSchemaResponse" as app.api.routes_rules.DSLSchemaResponse {
   model_config : dict
-  schema_ : Dict[str, Any]
+  schema_ : Optional[Dict[str, Any]]
 }
 class "app.api.routes_rules.ExampleResponse" as app.api.routes_rules.ExampleResponse {
   dsl : Dict[str, Any]
   example_data : Any
-}
-class "app.api.routes_rules.ReferenceExampleBulkIn" as app.api.routes_rules.ReferenceExampleBulkIn {
-  items : list[ReferenceExampleBulkItem]
-}
-class "app.api.routes_rules.ReferenceExampleBulkItem" as app.api.routes_rules.ReferenceExampleBulkItem {
-  assigned_class_id : Optional[str]
-  data : Any
-  description_text : str
-}
-class "app.api.routes_rules.ReferenceExampleBulkOut" as app.api.routes_rules.ReferenceExampleBulkOut {
-  inserted : int
-  skipped : list[dict[str, Any]]
-}
-class "app.api.routes_rules.RuleConflictItem" as app.api.routes_rules.RuleConflictItem {
-  adjustment_recommendations_ru : list[str]
-  ambiguous_example : Optional[Dict[str, Any]]
-  ambiguous_example_note_ru : Optional[str]
-  corridor_risk_ru : Optional[str]
-  left_class_id : str
-  left_rule_index : int
-  left_title : Optional[str]
-  overlap_axis_summary_ru : Optional[str]
-  overlap_columns : list[RuleOverlapColumnItem]
-  overlap_context_note_ru : Optional[str]
-  priority_resolution_ru : Optional[str]
-  range_intersections_ru : list[str]
-  reason_ru : str
-  right_class_id : str
-  right_rule_index : int
-  right_title : Optional[str]
-  rule_class_ids : list[str]
-  rule_indices : list[int]
-  rule_titles : list[Optional[str]]
-  simplified_analysis_note_ru : Optional[str]
-}
-class "app.api.routes_rules.RuleConflictsResponse" as app.api.routes_rules.RuleConflictsResponse {
-  conflicts : list[RuleConflictItem]
-  has_conflicts : bool
-}
-class "app.api.routes_rules.RuleListItem" as app.api.routes_rules.RuleListItem {
-  created_at : datetime
-  description : Optional[str]
-  is_archived : bool
-  model_id : str
-  name : Optional[str]
-  rule_id : UUID
-  tn_ved_group_code : Optional[str]
-  version : int
-}
-class "app.api.routes_rules.RuleOverlapColumnItem" as app.api.routes_rules.RuleOverlapColumnItem {
-  constraints_compact_ru : str
-  label_ru : str
-  rule_index : int
 }
 class "app.api.routes_rules.TemplateDetailsResponse" as app.api.routes_rules.TemplateDetailsResponse {
   description : str
@@ -141,13 +81,161 @@ class "app.api.routes_rules.TemplateListItem" as app.api.routes_rules.TemplateLi
   template_id : str
   title : str
 }
-class "app.api.routes_rules.ValidateRequest" as app.api.routes_rules.ValidateRequest {
-  data : Any
+class "app.application.use_cases.officer_pipeline.OfficerPipelineRunnerPort" as app.application.use_cases.officer_pipeline.OfficerPipelineRunnerPort {
+  run(payload: Any, db: Session) -> Dict[str, Any]
 }
-class "app.api.routes_rules.ValidateResponse" as app.api.routes_rules.ValidateResponse {
-  assigned_class : Optional[str]
-  errors : list[Any]
-  ok : bool
-  validated_data : Optional[Dict[str, Any]]
+class "pydantic.config.ConfigDict" as pydantic.config.ConfigDict {
+  alias_generator : Callable[[str], str] | AliasGenerator | None
+  allow_inf_nan : bool
+  arbitrary_types_allowed : bool
+  cache_strings : bool | Literal['all', 'keys', 'none']
+  coerce_numbers_to_str : bool
+  defer_build : bool
+  extra : ExtraValues | None
+  field_title_generator : Callable[[str, FieldInfo | ComputedFieldInfo], str] | None
+  from_attributes : bool
+  frozen : bool
+  hide_input_in_errors : bool
+  ignored_types : tuple[type, ...]
+  json_encoders : dict[type[object], JsonEncoder] | None
+  json_schema_extra : JsonDict | JsonSchemaExtraCallable | None
+  json_schema_mode_override : Literal['validation', 'serialization', None]
+  json_schema_serialization_defaults_required : bool
+  loc_by_alias : bool
+  model_title_generator : Callable[[type], str] | None
+  plugin_settings : dict[str, object] | None
+  polymorphic_serialization : bool
+  populate_by_name : bool
+  protected_namespaces : tuple[str | Pattern[str], ...]
+  regex_engine : Literal['rust-regex', 'python-re']
+  revalidate_instances : Literal['always', 'never', 'subclass-instances']
+  schema_generator : type[_GenerateSchema] | None
+  ser_json_bytes : Literal['utf8', 'base64', 'hex']
+  ser_json_inf_nan : Literal['null', 'constants', 'strings']
+  ser_json_temporal : Literal['iso8601', 'seconds', 'milliseconds']
+  ser_json_timedelta : Literal['iso8601', 'float']
+  serialize_by_alias : bool
+  str_max_length : int | None
+  str_min_length : int
+  str_strip_whitespace : bool
+  str_to_lower : bool
+  str_to_upper : bool
+  strict : bool
+  title : str | None
+  url_preserve_empty_path : bool
+  use_attribute_docstrings : bool
+  use_enum_values : bool
+  val_json_bytes : Literal['utf8', 'base64', 'hex']
+  val_temporal_unit : Literal['seconds', 'milliseconds', 'infer']
+  validate_assignment : bool
+  validate_by_alias : bool
+  validate_by_name : bool
+  validate_default : bool
+  validate_return : bool
+  validation_error_cause : bool
 }
+class "pydantic.main.BaseModel" as pydantic.main.BaseModel {
+  __class_vars__ : ClassVar[set[str]]
+  __fields__ : dict[str, FieldInfo]
+  __fields_set__ : set[str]
+  __pretty__
+  __private_attributes__ : ClassVar[Dict[str, ModelPrivateAttr]]
+  __pydantic_complete__ : ClassVar[bool]
+  __pydantic_computed_fields__ : ClassVar[Dict[str, ComputedFieldInfo]]
+  __pydantic_core_schema__ : ClassVar[CoreSchema]
+  __pydantic_custom_init__ : ClassVar[bool]
+  __pydantic_decorators__ : ClassVar[_decorators.DecoratorInfos]
+  __pydantic_extra__ : Dict[str, Any] | None
+  __pydantic_extra_info__ : ClassVar[PydanticExtraInfo | None]
+  __pydantic_fields__ : ClassVar[Dict[str, FieldInfo]]
+  __pydantic_fields_set__ : set[str]
+  __pydantic_generic_metadata__ : ClassVar[_generics.PydanticGenericMetadata]
+  __pydantic_parent_namespace__ : Optional[ClassVar[Dict[str, Any] | None]]
+  __pydantic_post_init__ : ClassVar[None | Literal['model_post_init']]
+  __pydantic_private__ : Dict[str, Any] | None
+  __pydantic_root_model__ : ClassVar[bool]
+  __pydantic_serializer__ : ClassVar[SchemaSerializer]
+  __pydantic_setattr_handlers__ : ClassVar[Dict[str, Callable[[BaseModel, str, Any], None]]]
+  __pydantic_validator__ : ClassVar[SchemaValidator | PluggableSchemaValidator]
+  __repr_name__
+  __repr_recursion__
+  __repr_str__
+  __rich_repr__
+  __signature__ : ClassVar[Signature]
+  __slots__ : tuple
+  model_config : ClassVar[ConfigDict]
+  model_extra : dict[str, Any] | None
+  model_fields_set : set[str]
+  __class_getitem__(typevar_values: type[Any] | tuple[type[Any], ...]) -> type[BaseModel] | _forward_ref.PydanticRecursiveRef
+  __copy__() -> Self
+  __deepcopy__(memo: dict[int, Any] | None) -> Self
+  __delattr__(item: str) -> Any
+  __eq__(other: Any) -> bool
+  __get_pydantic_core_schema__() -> CoreSchema
+  __get_pydantic_json_schema__() -> JsonSchemaValue
+  __getattr__(item: str) -> Any
+  __getstate__() -> dict[Any, Any]
+  __init__() -> None
+  {abstract}__init_subclass__()
+  __iter__() -> TupleGenerator
+  {abstract}__pydantic_init_subclass__() -> None
+  {abstract}__pydantic_on_complete__() -> None
+  __replace__() -> Self
+  __repr__() -> str
+  __repr_args__() -> _repr.ReprArgs
+  __setattr__(name: str, value: Any) -> None
+  __setstate__(state: dict[Any, Any]) -> None
+  __str__() -> str
+  _calculate_keys() -> Any
+  _copy_and_set_values() -> Any
+  _get_value() -> Any
+  _iter() -> Any
+  _setattr_handler(name: str, value: Any) -> Callable[[BaseModel, str, Any], None] | None
+  construct(_fields_set: set[str] | None) -> Self
+  copy() -> Self
+  dict() -> Dict[str, Any]
+  from_orm(obj: Any) -> Self
+  json() -> str
+  model_computed_fields() -> dict[str, ComputedFieldInfo]
+  model_construct(_fields_set: set[str] | None) -> Self
+  model_copy() -> Self
+  model_dump() -> dict[str, Any]
+  model_dump_json() -> str
+  model_fields() -> dict[str, FieldInfo]
+  model_json_schema(by_alias: bool, ref_template: str, schema_generator: type[GenerateJsonSchema], mode: JsonSchemaMode) -> dict[str, Any]
+  model_parametrized_name(params: tuple[type[Any], ...]) -> str
+  {abstract}model_post_init() -> None
+  model_rebuild() -> bool | None
+  model_validate(obj: Any) -> Self
+  model_validate_json(json_data: str | bytes | bytearray) -> Self
+  model_validate_strings(obj: Any) -> Self
+  parse_file(path: str | Path) -> Self
+  parse_obj(obj: Any) -> Self
+  parse_raw(b: str | bytes) -> Self
+  schema(by_alias: bool, ref_template: str) -> Dict[str, Any]
+  schema_json() -> str
+  update_forward_refs() -> None
+  validate(value: Any) -> Self
+}
+class "typing_extensions.TypedDict" as typing_extensions.TypedDict {
+}
+app.api.routes_expert_decisions.ExpertDecisionCreate --|> pydantic.main.BaseModel
+app.api.routes_expert_decisions.ExpertDecisionItemOut --|> pydantic.main.BaseModel
+app.api.routes_expert_decisions.ExpertDecisionListPageOut --|> pydantic.main.BaseModel
+app.api.routes_expert_decisions.ExpertDecisionPatch --|> pydantic.main.BaseModel
+app.api.routes_feature_extraction_settings.FewShotAssistRunCreate --|> pydantic.main.BaseModel
+app.api.routes_feature_extraction_settings.ModelRuntimeSettingsPayload --|> pydantic.main.BaseModel
+app.api.routes_feature_extraction_settings.PrimaryCatalogSettingsPayload --|> pydantic.main.BaseModel
+app.api.routes_officer_pipeline.LocalOfficerPipelineRunner --|> app.application.use_cases.officer_pipeline.OfficerPipelineRunnerPort
+app.api.routes_officer_pipeline.OfficerRunRequest --|> pydantic.main.BaseModel
+app.api.routes_officer_pipeline.SemanticClassConsistencyRequest --|> pydantic.main.BaseModel
+app.api.routes_rules.DSLSchemaResponse --|> pydantic.main.BaseModel
+app.api.routes_rules.ExampleResponse --|> pydantic.main.BaseModel
+app.api.routes_rules.TemplateDetailsResponse --|> pydantic.main.BaseModel
+app.api.routes_rules.TemplateListItem --|> pydantic.main.BaseModel
+pydantic.config.ConfigDict --* app.api.routes_expert_decisions.ExpertDecisionCreate : model_config
+pydantic.config.ConfigDict --* app.api.routes_expert_decisions.ExpertDecisionPatch : model_config
+pydantic.config.ConfigDict --* app.api.routes_feature_extraction_settings.FewShotAssistRunCreate : model_config
+pydantic.config.ConfigDict --* app.api.routes_feature_extraction_settings.ModelRuntimeSettingsPayload : model_config
+pydantic.config.ConfigDict --* app.api.routes_feature_extraction_settings.PrimaryCatalogSettingsPayload : model_config
 @enduml

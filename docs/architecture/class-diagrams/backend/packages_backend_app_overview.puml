@@ -12,6 +12,48 @@ package "app.api.routes_officer_pipeline" as app.api.routes_officer_pipeline {
 }
 package "app.api.routes_rules" as app.api.routes_rules {
 }
+package "app.application" as app.application {
+}
+package "app.application.dto" as app.application.dto {
+}
+package "app.application.dto.rules_catalog" as app.application.dto.rules_catalog {
+}
+package "app.application.ports" as app.application.ports {
+}
+package "app.application.ports.external_services" as app.application.ports.external_services {
+}
+package "app.application.ports.repositories" as app.application.ports.repositories {
+}
+package "app.application.services" as app.application.services {
+}
+package "app.application.services.classification_conflicts" as app.application.services.classification_conflicts {
+}
+package "app.application.services.dsl_meta" as app.application.services.dsl_meta {
+}
+package "app.application.services.feature_extraction_meta" as app.application.services.feature_extraction_meta {
+}
+package "app.application.services.rule_clone" as app.application.services.rule_clone {
+}
+package "app.application.services.rule_list" as app.application.services.rule_list {
+}
+package "app.application.services.semantic_threshold" as app.application.services.semantic_threshold {
+}
+package "app.application.use_cases" as app.application.use_cases {
+}
+package "app.application.use_cases.expert_decisions" as app.application.use_cases.expert_decisions {
+}
+package "app.application.use_cases.expert_decisions_query" as app.application.use_cases.expert_decisions_query {
+}
+package "app.application.use_cases.feature_extraction_settings" as app.application.use_cases.feature_extraction_settings {
+}
+package "app.application.use_cases.officer_pipeline" as app.application.use_cases.officer_pipeline {
+}
+package "app.application.use_cases.rules_catalog" as app.application.use_cases.rules_catalog {
+}
+package "app.application.use_cases.rules_catalog_operations" as app.application.use_cases.rules_catalog_operations {
+}
+package "app.composition" as app.composition {
+}
 package "app.db" as app.db {
 }
 package "app.db.base" as app.db.base {
@@ -23,6 +65,20 @@ package "app.db.session" as app.db.session {
 package "app.examples" as app.examples {
 }
 package "app.examples.fertilizer_rule_dsl" as app.examples.fertilizer_rule_dsl {
+}
+package "app.infrastructure" as app.infrastructure {
+}
+package "app.infrastructure.http" as app.infrastructure.http {
+}
+package "app.infrastructure.http.semantic_search_client" as app.infrastructure.http.semantic_search_client {
+}
+package "app.infrastructure.repositories" as app.infrastructure.repositories {
+}
+package "app.infrastructure.repositories.sqlalchemy_app_settings" as app.infrastructure.repositories.sqlalchemy_app_settings {
+}
+package "app.infrastructure.repositories.sqlalchemy_expert_decisions" as app.infrastructure.repositories.sqlalchemy_expert_decisions {
+}
+package "app.infrastructure.repositories.sqlalchemy_rule_catalog" as app.infrastructure.repositories.sqlalchemy_rule_catalog {
 }
 package "app.main" as app.main {
 }
@@ -54,6 +110,16 @@ package "app.rules.rule_overlap" as app.rules.rule_overlap {
 }
 package "app.rules.schema_normalize" as app.rules.schema_normalize {
 }
+app.composition --> app.application.use_cases.expert_decisions
+app.composition --> app.application.use_cases.expert_decisions_query
+app.composition --> app.application.use_cases.feature_extraction_settings
+app.composition --> app.application.use_cases.rules_catalog
+app.composition --> app.application.use_cases.rules_catalog_operations
+app.composition --> app.infrastructure.repositories.sqlalchemy_app_settings
+app.composition --> app.infrastructure.repositories.sqlalchemy_expert_decisions
+app.composition --> app.infrastructure.repositories.sqlalchemy_rule_catalog
+app.composition --> app.rules.compiler
+app.composition --> app.rules.dsl_models
 app.db.models --> app.db.base
 app.db.session --> app.db.base
 app.main --> app.api.routes_expert_decisions

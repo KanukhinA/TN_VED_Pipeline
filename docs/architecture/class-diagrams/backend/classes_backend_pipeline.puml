@@ -11,5 +11,11 @@ class "app.pipeline.validator.CompiledRuleCacheKey" as app.pipeline.validator.Co
   version : int
   __init__(self, rule_id: uuid.UUID, rule_version_id: uuid.UUID, version: int) -> None
 }
+class "app.pipeline.validator.RuleValidationService" as app.pipeline.validator.RuleValidationService {
+  _cache
+  __init__(cache: Optional[CompiledRuleCache]) -> None
+  validate_with_rule(rule_id: uuid.UUID, data: Any, db: Session) -> Tuple[bool, list[Any], Optional[dict[str, Any]], Optional[str]]
+}
+app.pipeline.validator.RuleValidationService --> app.pipeline.validator.CompiledRuleCache : _cache
 app.pipeline.validator.CompiledRuleCache --> app.pipeline.validator.CompiledRuleCacheKey : _cache
 @enduml

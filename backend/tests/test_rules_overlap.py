@@ -1,8 +1,9 @@
-"""Тесты пересечения правил классификации (rule_overlap / routes_rules)."""
+"""Тесты пересечения правил классификации (rule_overlap / classification_conflicts)."""
 
 import math
 
-from app.api.routes_rules import _rules_potentially_overlap, classification_conflict_items_for_rules
+from app.application.services.classification_conflicts import classification_conflict_items_for_rules
+from app.rules.rule_overlap import rules_potentially_overlap as _rules_potentially_overlap
 from app.rules.dsl_models import (
     ClassificationRule,
     PathClassificationCondition,
@@ -106,8 +107,8 @@ def test_overlap_row_formula_incompatible_equals():
     assert "Формула по нескольким показателям" in reason
 
 
-def test_corridor_minmax_visual_overlap_runtime_infeasible():
-    """Два коридора min–max на оси пересекаются, но одна цель у середине — совместимости нет; флаг риска."""
+def test_corridor_minmax_overlap_is_detected():
+    """Два коридора min-max на оси пересекаются и считаются совместимыми."""
     a = ClassificationRule(
         class_id="a",
         title="Правило A",
@@ -139,9 +140,7 @@ def test_corridor_minmax_visual_overlap_runtime_infeasible():
         ],
     )
     d = analyze_rules_overlap(a, b, left_title="A", right_title="B")
-    assert d.overlaps is False
-    assert d.corridor_risk_ru is not None
-    assert "диапазон" in d.corridor_risk_ru.lower() or "середин" in d.corridor_risk_ru.lower()
+    assert d.overlaps is True
     assert d.priority_resolution_ru is not None
     assert d.range_intersections_ru
     joined = " ".join(d.range_intersections_ru).lower()

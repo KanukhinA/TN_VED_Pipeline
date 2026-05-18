@@ -7,6 +7,8 @@ from typing import Any, List, Literal, Optional
 
 @dataclass(frozen=True)
 class PathStep:
+    """Один шаг разбора пути: свойство объекта или wildcard массива."""
+
     kind: Literal["prop", "wildcard"]
     name: Optional[str] = None
 

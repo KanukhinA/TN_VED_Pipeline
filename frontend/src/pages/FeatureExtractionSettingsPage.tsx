@@ -72,8 +72,7 @@ type FeatureExtractionConfig = {
   /** Один промпт на всю конфигурацию; в DSL дублируется в `prompts_by_model` для каждой выбранной модели (совместимость). */
   prompt: string;
   /**
-   * Только constrained decoding (llguidance). Текст промпта — в `prompt`, не из «шаблонов».
-   * В meta пишем structured_output + use_guidance (см. extractionRuntimeToDsl).
+   * Constrained decoding: в DSL как constrained_decoding; в preprocessing — JSON Schema (Ollama format / vLLM response_format).
    */
   extraction_runtime: {
     constrained_decoding: boolean;
@@ -86,24 +85,20 @@ function defaultExtractionRuntime(): FeatureExtractionConfig["extraction_runtime
   };
 }
 
-/** Сериализация в meta DSL / вызов теста: structured JSON + constrained decoding через guidance. */
+/** Сериализация в meta.extraction_runtime для сохранения и теста извлечения. */
 function extractionRuntimeToDsl(ui: FeatureExtractionConfig["extraction_runtime"]): {
-  structured_output: boolean;
-  use_guidance: boolean;
+  constrained_decoding: boolean;
 } {
-  const use_guidance = Boolean(ui.constrained_decoding);
   return {
-    structured_output: true,
-    use_guidance,
+    constrained_decoding: Boolean(ui.constrained_decoding),
   };
 }
 
-/** Из сохранённого DSL: use_guidance и legacy Outlines → одна галка в UI. */
+/** Из сохранённого DSL (meta.extraction_runtime). */
 function extractionRuntimeFromStored(c: any): FeatureExtractionConfig["extraction_runtime"] {
   const er = c?.extraction_runtime ?? {};
-  const legacyConstrained = Boolean(er.use_outlines) || Boolean(er.pydantic_outlines);
   return {
-    constrained_decoding: Boolean(er.use_guidance) || legacyConstrained,
+    constrained_decoding: Boolean(er.constrained_decoding),
   };
 }
 
@@ -1702,7 +1697,9 @@ export default function FeatureExtractionSettingsPage() {
                       }
                       style={{ width: 16, height: 16, flexShrink: 0 }}
                     />
-                    <span style={{ lineHeight: 1.35 }}>Включить constrained decoding (guidance)</span>
+                    <span style={{ lineHeight: 1.35 }}>
+                      Ответ модели строго по JSON Schema справочника (Ollama / vLLM)
+                    </span>
                   </label>
                   <button
                     type="button"

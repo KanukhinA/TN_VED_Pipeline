@@ -1,0 +1,937 @@
+{
+  "classification": {
+    "strategy": "exactly_one",
+    "rules": [
+      {
+        "class_id": "сульфат аммония",
+        "priority": 990,
+        "tn_ved_group_code": "3102210000",
+        "condition_groups": [
+          "group_1"
+        ],
+        "conditions": [
+          {
+            "type": "rowIndicator",
+            "array_path": "массовая доля",
+            "name_field": "вещество",
+            "name_equals": "n",
+            "value_field": "массовая доля",
+            "value_min": 21,
+            "group_id": "group_1",
+            "conjunction": "and",
+            "primary": true
+          },
+          {
+            "type": "rowIndicator",
+            "array_path": "массовая доля",
+            "name_field": "вещество",
+            "name_equals": "s",
+            "value_field": "массовая доля",
+            "value_min": 23,
+            "group_id": "group_1",
+            "conjunction": "and",
+            "primary": true
+          }
+        ]
+      },
+      {
+        "class_id": "сульфат-нитрат аммония 26:13",
+        "priority": 980,
+        "tn_ved_group_code": "3102290000",
+        "condition_groups": [
+          "group_1"
+        ],
+        "conditions": [
+          {
+            "type": "rowIndicator",
+            "array_path": "массовая доля",
+            "name_field": "вещество",
+            "name_equals": "n",
+            "value_field": "массовая доля",
+            "value_min": 25,
+            "group_id": "group_1",
+            "conjunction": "and",
+            "primary": true
+          },
+          {
+            "type": "rowIndicator",
+            "array_path": "массовая доля",
+            "name_field": "вещество",
+            "name_equals": "s",
+            "value_field": "массовая доля",
+            "value_min": 11,
+            "group_id": "group_1",
+            "conjunction": "and",
+            "primary": true
+          },
+          {
+            "type": "rowPairRatio",
+            "array_path": "массовая доля",
+            "name_field": "вещество",
+            "value_field": "массовая доля",
+            "left_name": "n",
+            "right_name": "s",
+            "ratio_left": 2,
+            "ratio_right": 1,
+            "tolerance_rel": 0.001,
+            "group_id": "group_1",
+            "conjunction": "and",
+            "primary": true
+          }
+        ]
+      },
+      {
+        "class_id": "аммиачная селитра",
+        "priority": 970,
+        "tn_ved_group_code": "3102309000",
+        "condition_groups": [
+          "group_1"
+        ],
+        "conditions": [
+          {
+            "type": "rowIndicator",
+            "array_path": "массовая доля",
+            "name_field": "вещество",
+            "name_equals": "n",
+            "value_field": "массовая доля",
+            "value_min": 34,
+            "group_id": "group_1",
+            "conjunction": "and",
+            "primary": true
+          }
+        ]
+      },
+      {
+        "class_id": "известково-аммиачная селитра",
+        "priority": 960,
+        "tn_ved_group_code": "3102401000",
+        "condition_groups": [
+          "group_1"
+        ],
+        "conditions": [
+          {
+            "type": "rowIndicator",
+            "array_path": "массовая доля",
+            "name_field": "вещество",
+            "name_equals": "n",
+            "value_field": "массовая доля",
+            "value_min": 20,
+            "value_max": 28,
+            "group_id": "group_1",
+            "conjunction": "and",
+            "primary": true
+          },
+          {
+            "type": "path",
+            "path": "массовая доля[*].вещество",
+            "op": "in",
+            "value": [
+              "cao",
+              "caco3"
+            ],
+            "group_id": "group_1",
+            "conjunction": "and",
+            "primary": true
+          }
+        ]
+      },
+      {
+        "class_id": "натриевая селитра",
+        "priority": 950,
+        "tn_ved_group_code": "3102509000",
+        "condition_groups": [
+          "group_1"
+        ],
+        "conditions": [
+          {
+            "type": "rowIndicator",
+            "array_path": "массовая доля",
+            "name_field": "вещество",
+            "name_equals": "n",
+            "value_field": "массовая доля",
+            "value_min": 15,
+            "group_id": "group_1",
+            "conjunction": "and",
+            "primary": true
+          },
+          {
+            "type": "path",
+            "path": "массовая доля[*].вещество",
+            "op": "in",
+            "value": [
+              "na"
+            ],
+            "group_id": "group_1",
+            "conjunction": "and",
+            "primary": true
+          }
+        ]
+      },
+      {
+        "class_id": "кальциевая селитра",
+        "priority": 940,
+        "tn_ved_group_code": "3102600000",
+        "condition_groups": [
+          "group_1"
+        ],
+        "conditions": [
+          {
+            "type": "rowIndicator",
+            "array_path": "массовая доля",
+            "name_field": "вещество",
+            "name_equals": "n",
+            "value_field": "массовая доля",
+            "value_min": 14,
+            "group_id": "group_1",
+            "conjunction": "and",
+            "primary": true
+          },
+          {
+            "type": "path",
+            "path": "массовая доля[*].вещество",
+            "op": "in",
+            "value": [
+              "cao",
+              "caco3",
+              "ca"
+            ],
+            "group_id": "group_1",
+            "conjunction": "and",
+            "primary": true
+          }
+        ]
+      },
+      {
+        "class_id": "магниевая селитра",
+        "priority": 930,
+        "tn_ved_group_code": "3102900000",
+        "condition_groups": [
+          "group_1",
+          "group_2"
+        ],
+        "conditions": [
+          {
+            "type": "rowIndicator",
+            "array_path": "массовая доля",
+            "name_field": "вещество",
+            "name_equals": "n",
+            "value_field": "массовая доля",
+            "value_min": 8,
+            "group_id": "group_1",
+            "conjunction": "and",
+            "primary": true
+          },
+          {
+            "type": "rowIndicator",
+            "array_path": "массовая доля",
+            "name_field": "вещество",
+            "name_equals": "mgo",
+            "value_field": "массовая доля",
+            "value_min": 15,
+            "value_max": 16,
+            "group_id": "group_1",
+            "conjunction": "and",
+            "primary": true
+          },
+          {
+            "type": "rowIndicator",
+            "array_path": "массовая доля",
+            "name_field": "вещество",
+            "name_equals": "mg",
+            "value_field": "массовая доля",
+            "value_min": 9,
+            "value_max": 10,
+            "group_id": "group_2",
+            "conjunction": "or",
+            "primary": true
+          },
+          {
+            "type": "rowIndicator",
+            "array_path": "массовая доля",
+            "name_field": "вещество",
+            "name_equals": "n",
+            "value_field": "массовая доля",
+            "value_min": 7,
+            "group_id": "group_2",
+            "conjunction": "and",
+            "primary": true
+          }
+        ]
+      },
+      {
+        "class_id": "калиевая селитра",
+        "priority": 920,
+        "tn_ved_group_code": "3105901000",
+        "condition_groups": [
+          "group_1"
+        ],
+        "conditions": [
+          {
+            "type": "rowIndicator",
+            "array_path": "массовая доля",
+            "name_field": "вещество",
+            "name_equals": "n",
+            "value_field": "массовая доля",
+            "value_min": 13,
+            "value_max": 16.3,
+            "group_id": "group_1",
+            "conjunction": "and",
+            "primary": true
+          },
+          {
+            "type": "rowIndicator",
+            "array_path": "массовая доля",
+            "name_field": "вещество",
+            "name_equals": "k2o",
+            "value_field": "массовая доля",
+            "value_min": 44,
+            "group_id": "group_1",
+            "conjunction": "and",
+            "primary": true
+          }
+        ]
+      },
+      {
+        "class_id": "аммофос",
+        "priority": 910,
+        "tn_ved_group_code": "3105400000",
+        "condition_groups": [
+          "group_1"
+        ],
+        "conditions": [
+          {
+            "type": "rowIndicator",
+            "array_path": "массовая доля",
+            "name_field": "вещество",
+            "name_equals": "n",
+            "value_field": "массовая доля",
+            "value_min": 10,
+            "value_max": 13,
+            "group_id": "group_1",
+            "conjunction": "and",
+            "primary": true
+          },
+          {
+            "type": "rowIndicator",
+            "array_path": "массовая доля",
+            "name_field": "вещество",
+            "name_equals": "p2o5",
+            "value_field": "массовая доля",
+            "value_min": 42,
+            "value_max": 53,
+            "group_id": "group_1",
+            "conjunction": "and",
+            "primary": true
+          },
+          {
+            "type": "rowPairRatio",
+            "array_path": "массовая доля",
+            "name_field": "вещество",
+            "value_field": "массовая доля",
+            "left_name": "p2o5",
+            "right_name": "n",
+            "ratio_left": 4,
+            "ratio_right": 1,
+            "tolerance_rel": 0.25,
+            "group_id": "group_1",
+            "conjunction": "and",
+            "primary": true
+          }
+        ]
+      },
+      {
+        "class_id": "диаммофос",
+        "priority": 900,
+        "tn_ved_group_code": "3105400000",
+        "condition_groups": [
+          "group_1"
+        ],
+        "conditions": [
+          {
+            "type": "rowIndicator",
+            "array_path": "массовая доля",
+            "name_field": "вещество",
+            "name_equals": "n",
+            "value_field": "массовая доля",
+            "value_min": 17,
+            "value_max": 19,
+            "group_id": "group_1",
+            "conjunction": "and",
+            "primary": true
+          },
+          {
+            "type": "rowIndicator",
+            "array_path": "массовая доля",
+            "name_field": "вещество",
+            "name_equals": "p2o5",
+            "value_field": "массовая доля",
+            "value_min": 45,
+            "value_max": 47,
+            "group_id": "group_1",
+            "conjunction": "and",
+            "primary": true
+          },
+          {
+            "type": "rowPairRatio",
+            "array_path": "массовая доля",
+            "name_field": "вещество",
+            "value_field": "массовая доля",
+            "left_name": "p2o5",
+            "right_name": "n",
+            "ratio_left": 2.5,
+            "ratio_right": 1,
+            "tolerance_rel": 0.15,
+            "group_id": "group_1",
+            "conjunction": "and",
+            "primary": true
+          }
+        ]
+      },
+      {
+        "class_id": "нитроаммофос марка а",
+        "priority": 890,
+        "tn_ved_group_code": "3105510000",
+        "condition_groups": [
+          "group_1"
+        ],
+        "conditions": [
+          {
+            "type": "rowIndicator",
+            "array_path": "массовая доля",
+            "name_field": "вещество",
+            "name_equals": "n",
+            "value_field": "массовая доля",
+            "value_min": 22,
+            "value_max": 24,
+            "group_id": "group_1",
+            "conjunction": "and",
+            "primary": true
+          },
+          {
+            "type": "rowIndicator",
+            "array_path": "массовая доля",
+            "name_field": "вещество",
+            "name_equals": "p2o5",
+            "value_field": "массовая доля",
+            "value_min": 22,
+            "value_max": 24,
+            "group_id": "group_1",
+            "conjunction": "and",
+            "primary": true
+          },
+          {
+            "type": "rowPairRatio",
+            "array_path": "массовая доля",
+            "name_field": "вещество",
+            "value_field": "массовая доля",
+            "left_name": "n",
+            "right_name": "p2o5",
+            "ratio_left": 1,
+            "ratio_right": 1,
+            "tolerance_rel": 0.05,
+            "group_id": "group_1",
+            "conjunction": "and",
+            "primary": true
+          }
+        ]
+      },
+      {
+        "class_id": "нитроаммофос марка б",
+        "priority": 880,
+        "tn_ved_group_code": "3105510000",
+        "condition_groups": [
+          "group_1"
+        ],
+        "conditions": [
+          {
+            "type": "rowIndicator",
+            "array_path": "массовая доля",
+            "name_field": "вещество",
+            "name_equals": "n",
+            "value_field": "массовая доля",
+            "value_min": 15,
+            "value_max": 17,
+            "group_id": "group_1",
+            "conjunction": "and",
+            "primary": true
+          },
+          {
+            "type": "rowIndicator",
+            "array_path": "массовая доля",
+            "name_field": "вещество",
+            "name_equals": "p2o5",
+            "value_field": "массовая доля",
+            "value_min": 23,
+            "value_max": 25,
+            "group_id": "group_1",
+            "conjunction": "and",
+            "primary": true
+          },
+          {
+            "type": "rowPairRatio",
+            "array_path": "массовая доля",
+            "name_field": "вещество",
+            "value_field": "массовая доля",
+            "left_name": "p2o5",
+            "right_name": "n",
+            "ratio_left": 1.5,
+            "ratio_right": 1,
+            "tolerance_rel": 0.1,
+            "group_id": "group_1",
+            "conjunction": "and",
+            "primary": true
+          }
+        ]
+      },
+      {
+        "class_id": "нитроаммофос марка в",
+        "priority": 870,
+        "tn_ved_group_code": "3105510000",
+        "condition_groups": [
+          "group_1"
+        ],
+        "conditions": [
+          {
+            "type": "rowIndicator",
+            "array_path": "массовая доля",
+            "name_field": "вещество",
+            "name_equals": "n",
+            "value_field": "массовая доля",
+            "value_min": 24,
+            "value_max": 26,
+            "group_id": "group_1",
+            "conjunction": "and",
+            "primary": true
+          },
+          {
+            "type": "rowIndicator",
+            "array_path": "массовая доля",
+            "name_field": "вещество",
+            "name_equals": "p2o5",
+            "value_field": "массовая доля",
+            "value_min": 19,
+            "value_max": 21,
+            "group_id": "group_1",
+            "conjunction": "and",
+            "primary": true
+          },
+          {
+            "type": "rowPairRatio",
+            "array_path": "массовая доля",
+            "name_field": "вещество",
+            "value_field": "массовая доля",
+            "left_name": "n",
+            "right_name": "p2o5",
+            "ratio_left": 1.25,
+            "ratio_right": 1,
+            "tolerance_rel": 0.1,
+            "group_id": "group_1",
+            "conjunction": "and",
+            "primary": true
+          }
+        ]
+      },
+      {
+        "class_id": "сульфоаммофос",
+        "priority": 860,
+        "tn_ved_group_code": "3105590000",
+        "condition_groups": [
+          "group_1"
+        ],
+        "conditions": [
+          {
+            "type": "rowIndicator",
+            "array_path": "массовая доля",
+            "name_field": "вещество",
+            "name_equals": "n",
+            "value_field": "массовая доля",
+            "value_min": 14,
+            "value_max": 20,
+            "group_id": "group_1",
+            "conjunction": "and",
+            "primary": true
+          },
+          {
+            "type": "rowIndicator",
+            "array_path": "массовая доля",
+            "name_field": "вещество",
+            "name_equals": "p2o5",
+            "value_field": "массовая доля",
+            "value_min": 20,
+            "value_max": 34,
+            "group_id": "group_1",
+            "conjunction": "and",
+            "primary": true
+          },
+          {
+            "type": "rowIndicator",
+            "array_path": "массовая доля",
+            "name_field": "вещество",
+            "name_equals": "s",
+            "value_field": "массовая доля",
+            "value_min": 8,
+            "value_max": 14,
+            "group_id": "group_1",
+            "conjunction": "and",
+            "primary": true
+          }
+        ]
+      },
+      {
+        "class_id": "аммонийно-фосфатная смесь 19:55",
+        "priority": 850,
+        "tn_ved_group_code": "3105400000",
+        "condition_groups": [
+          "group_1"
+        ],
+        "conditions": [
+          {
+            "type": "rowIndicator",
+            "array_path": "массовая доля",
+            "name_field": "вещество",
+            "name_equals": "n",
+            "value_field": "массовая доля",
+            "value_min": 18,
+            "value_max": 20,
+            "group_id": "group_1",
+            "conjunction": "and",
+            "primary": true
+          },
+          {
+            "type": "rowIndicator",
+            "array_path": "массовая доля",
+            "name_field": "вещество",
+            "name_equals": "p2o5",
+            "value_field": "массовая доля",
+            "value_min": 54,
+            "value_max": 56,
+            "group_id": "group_1",
+            "conjunction": "and",
+            "primary": true
+          },
+          {
+            "type": "rowPairRatio",
+            "array_path": "массовая доля",
+            "name_field": "вещество",
+            "value_field": "массовая доля",
+            "left_name": "p2o5",
+            "right_name": "n",
+            "ratio_left": 3,
+            "ratio_right": 1,
+            "tolerance_rel": 0.1,
+            "group_id": "group_1",
+            "conjunction": "and",
+            "primary": true
+          }
+        ]
+      },
+      {
+        "class_id": "нитроаммофоска 16-16-16",
+        "priority": 840,
+        "tn_ved_group_code": "3105201000",
+        "condition_groups": [
+          "group_1"
+        ],
+        "conditions": [
+          {
+            "type": "rowIndicator",
+            "array_path": "массовая доля",
+            "name_field": "вещество",
+            "name_equals": "n",
+            "value_field": "массовая доля",
+            "value_min": 14,
+            "value_max": 18,
+            "group_id": "group_1",
+            "conjunction": "and",
+            "primary": true
+          },
+          {
+            "type": "rowIndicator",
+            "array_path": "массовая доля",
+            "name_field": "вещество",
+            "name_equals": "p2o5",
+            "value_field": "массовая доля",
+            "value_min": 14,
+            "value_max": 18,
+            "group_id": "group_1",
+            "conjunction": "and",
+            "primary": true
+          },
+          {
+            "type": "rowIndicator",
+            "array_path": "массовая доля",
+            "name_field": "вещество",
+            "name_equals": "k2o",
+            "value_field": "массовая доля",
+            "value_min": 14,
+            "value_max": 18,
+            "group_id": "group_1",
+            "conjunction": "and",
+            "primary": true
+          }
+        ]
+      },
+      {
+        "class_id": "нитроаммофоска 15-15-15",
+        "priority": 835,
+        "tn_ved_group_code": "3105201000",
+        "condition_groups": [
+          "group_1"
+        ],
+        "conditions": [
+          {
+            "type": "rowIndicator",
+            "array_path": "массовая доля",
+            "name_field": "вещество",
+            "name_equals": "n",
+            "value_field": "массовая доля",
+            "value_min": 15,
+            "group_id": "group_1",
+            "conjunction": "and",
+            "primary": true
+          },
+          {
+            "type": "rowIndicator",
+            "array_path": "массовая доля",
+            "name_field": "вещество",
+            "name_equals": "p2o5",
+            "value_field": "массовая доля",
+            "value_min": 15,
+            "group_id": "group_1",
+            "conjunction": "and",
+            "primary": true
+          },
+          {
+            "type": "rowIndicator",
+            "array_path": "массовая доля",
+            "name_field": "вещество",
+            "name_equals": "k2o",
+            "value_field": "массовая доля",
+            "value_min": 15,
+            "group_id": "group_1",
+            "conjunction": "and",
+            "primary": true
+          }
+        ]
+      },
+      {
+        "class_id": "нитроаммофоска 10-26-26",
+        "priority": 830,
+        "tn_ved_group_code": "3105201000",
+        "condition_groups": [
+          "group_1"
+        ],
+        "conditions": [
+          {
+            "type": "rowIndicator",
+            "array_path": "массовая доля",
+            "name_field": "вещество",
+            "name_equals": "n",
+            "value_field": "массовая доля",
+            "value_min": 9,
+            "value_max": 11,
+            "group_id": "group_1",
+            "conjunction": "and",
+            "primary": true
+          },
+          {
+            "type": "rowIndicator",
+            "array_path": "массовая доля",
+            "name_field": "вещество",
+            "name_equals": "p2o5",
+            "value_field": "массовая доля",
+            "value_min": 24,
+            "value_max": 28,
+            "group_id": "group_1",
+            "conjunction": "and",
+            "primary": true
+          },
+          {
+            "type": "rowIndicator",
+            "array_path": "массовая доля",
+            "name_field": "вещество",
+            "name_equals": "k2o",
+            "value_field": "массовая доля",
+            "value_min": 24,
+            "value_max": 28,
+            "group_id": "group_1",
+            "conjunction": "and",
+            "primary": true
+          }
+        ]
+      },
+      {
+        "class_id": "нитроаммофоска 16-16-15",
+        "priority": 825,
+        "tn_ved_group_code": "3105201000",
+        "condition_groups": [
+          "group_1"
+        ],
+        "conditions": [
+          {
+            "type": "rowIndicator",
+            "array_path": "массовая доля",
+            "name_field": "вещество",
+            "name_equals": "n",
+            "value_field": "массовая доля",
+            "value_min": 14,
+            "value_max": 18,
+            "group_id": "group_1",
+            "conjunction": "and",
+            "primary": true
+          },
+          {
+            "type": "rowIndicator",
+            "array_path": "массовая доля",
+            "name_field": "вещество",
+            "name_equals": "p2o5",
+            "value_field": "массовая доля",
+            "value_min": 14,
+            "value_max": 18,
+            "group_id": "group_1",
+            "conjunction": "and",
+            "primary": true
+          },
+          {
+            "type": "rowIndicator",
+            "array_path": "массовая доля",
+            "name_field": "вещество",
+            "name_equals": "k2o",
+            "value_field": "массовая доля",
+            "value_min": 13,
+            "value_max": 17,
+            "group_id": "group_1",
+            "conjunction": "and",
+            "primary": true
+          }
+        ]
+      },
+      {
+        "class_id": "борофоска",
+        "priority": 820,
+        "tn_ved_group_code": "3105209000",
+        "condition_groups": [
+          "group_1"
+        ],
+        "conditions": [
+          {
+            "type": "rowIndicator",
+            "array_path": "массовая доля",
+            "name_field": "вещество",
+            "name_equals": "n",
+            "value_field": "массовая доля",
+            "value_min": 9,
+            "value_max": 11,
+            "group_id": "group_1",
+            "conjunction": "and",
+            "primary": true
+          },
+          {
+            "type": "rowIndicator",
+            "array_path": "массовая доля",
+            "name_field": "вещество",
+            "name_equals": "p2o5",
+            "value_field": "массовая доля",
+            "value_min": 15,
+            "value_max": 17,
+            "group_id": "group_1",
+            "conjunction": "and",
+            "primary": true
+          },
+          {
+            "type": "rowIndicator",
+            "array_path": "массовая доля",
+            "name_field": "вещество",
+            "name_equals": "k2o",
+            "value_field": "массовая доля",
+            "value_min": 15,
+            "value_max": 17,
+            "group_id": "group_1",
+            "conjunction": "and",
+            "primary": true
+          },
+          {
+            "type": "path",
+            "path": "массовая доля[*].вещество",
+            "op": "in",
+            "value": [
+              "b",
+              "boron",
+              "бор"
+            ],
+            "group_id": "group_1",
+            "conjunction": "and",
+            "primary": true
+          }
+        ]
+      },
+      {
+        "class_id": "калий кислый сернокислый",
+        "priority": 810,
+        "tn_ved_group_code": "3104300000",
+        "condition_groups": [
+          "group_1"
+        ],
+        "conditions": [
+          {
+            "type": "rowIndicator",
+            "array_path": "массовая доля",
+            "name_field": "вещество",
+            "name_equals": "k2o",
+            "value_field": "массовая доля",
+            "value_min": 50,
+            "value_max": 53,
+            "group_id": "group_1",
+            "conjunction": "and",
+            "primary": true
+          },
+          {
+            "type": "rowIndicator",
+            "array_path": "массовая доля",
+            "name_field": "вещество",
+            "name_equals": "s",
+            "value_field": "массовая доля",
+            "value_min": 18,
+            "group_id": "group_1",
+            "conjunction": "and",
+            "primary": true
+          }
+        ]
+      },
+      {
+        "class_id": "мука фосфоритная",
+        "priority": 800,
+        "tn_ved_group_code": "3103100000",
+        "condition_groups": [
+          "group_1"
+        ],
+        "conditions": [
+          {
+            "type": "rowIndicator",
+            "array_path": "массовая доля",
+            "name_field": "вещество",
+            "name_equals": "p2o5",
+            "value_field": "массовая доля",
+            "value_min": 19,
+            "value_max": 30,
+            "group_id": "group_1",
+            "conjunction": "and",
+            "primary": true
+          },
+          {
+            "type": "rowIndicator",
+            "array_path": "массовая доля",
+            "name_field": "вещество",
+            "name_equals": "water",
+            "value_field": "массовая доля",
+            "value_max": 2,
+            "group_id": "group_1",
+            "conjunction": "and",
+            "primary": true
+          }
+        ]
+      }
+    ],
+    "ambiguous_match_resolution": "comma_join"
+  }
+}

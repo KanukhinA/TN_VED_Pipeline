@@ -140,6 +140,8 @@ TN_VED_GROUP_TITLES: tuple[str, ...] = (
 
 
 class ClassLabelEntry(BaseModel):
+    """Подпись класса (class_id + читаемое название) для промпта именования."""
+
     class_id: str = ""
     title: str = ""
 
@@ -154,10 +156,14 @@ class SuggestRequest(BaseModel):
 
 
 class PromptTemplateUpdateRequest(BaseModel):
+    """Тело запроса обновления шаблона системного промпта."""
+
     template: str = ""
 
 
 class ClassNamingGenerationConfigUpdateRequest(BaseModel):
+    """Настройки длины генерации для сервиса именования классов."""
+
     max_new_tokens: int = Field(DEFAULT_CLASS_NAMING_MAX_NEW_TOKENS, ge=8, le=256)
 
 

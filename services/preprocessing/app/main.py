@@ -33,14 +33,20 @@ PREPROCESSING_CONTAINER_NAME = (os.getenv("PREPROCESSING_CONTAINER_NAME") or "pi
 
 
 class ModelDeployRequest(BaseModel):
+    """Запрос запуска/прогрева указанной модели."""
+
     model: str
 
 
 class ModelActionRequest(BaseModel):
+    """Запрос действия над моделью (pause/delete/load и т.п.)."""
+
     model: str
 
 
 class ModelRuntimeSettingsPayload(BaseModel):
+    """Runtime-настройки моделей для preprocessing-сервиса."""
+
     models: dict[str, dict[str, Any]] = Field(default_factory=dict)
     model_config = ConfigDict(extra="ignore")
 
@@ -104,6 +110,8 @@ def _warm_load_model_into_ram(model: str) -> dict[str, Any]:
 
 
 class PreprocessRequest(BaseModel):
+    """Запрос извлечения признаков из декларации."""
+
     declaration_id: str
     description: str
     tnved_code: str | None = None
@@ -116,6 +124,16 @@ class ParseModelJsonRequest(BaseModel):
 
 
 class OllamaGenerateRequest(BaseModel):
+    """Низкоуровневый запрос генерации текста через Ollama или vLLM.
+
+    ``constrained_decoding``: при ``True`` и ``do_sample=False`` — ``temperature=0``, ``top_p=1``.
+
+    ``format``: JSON Schema для встроенного structured output: у Ollama — поле ``format`` в
+    ``/api/chat``; у vLLM — ``response_format`` (``type: json_schema``) в ``/v1/completions``.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
     model: str
     prompt: str
     num_ctx: int = Field(default=8192, ge=256)
@@ -126,6 +144,10 @@ class OllamaGenerateRequest(BaseModel):
     enable_thinking: bool = False
     constrained_decoding: bool = True
     do_sample: bool = False
+    format: dict[str, Any] | None = Field(
+        default=None,
+        description="JSON Schema: Ollama → format; vLLM → response_format.type=json_schema.",
+    )
 
 
 @app.get("/health")
@@ -288,9 +310,10 @@ def ollama_generate_endpoint(body: OllamaGenerateRequest) -> dict[str, Any]:
     if not (body.prompt or "").strip():
         raise HTTPException(status_code=400, detail="prompt is required")
     unload_other_running_ollama_models(body.model.strip())
-    # Для совместимости между backends:
-    # - constrained_decoding=True + do_sample=False: максимально детерминированный режим
-    # - do_sample=True: разрешаем стохастическую генерацию (temperature/top_p)
+    # Для совместимости между backends (Ollama / vLLM):
+    # - constrained_decoding=True + do_sample=False: детерминированная выборка (temperature=0, top_p=1).
+    # - format: JSON Schema — Ollama ``format``; vLLM ``response_format`` (json_schema), см. shared.llm_runtime.vllm_backend.
+    # - do_sample=True: стохастическая генерация (temperature/top_p из тела запроса).
     runtime_temperature = float(body.temperature)
     runtime_top_p = body.top_p
     if body.do_sample:
@@ -311,12 +334,15 @@ def ollama_generate_endpoint(body: OllamaGenerateRequest) -> dict[str, Any]:
             temperature=runtime_temperature,
             top_p=runtime_top_p,
             enable_thinking=body.enable_thinking,
+            response_format=body.format,
         )
         out["runtime_generation"] = {
+            "llm_backend": "vllm" if is_vllm() else "ollama",
             "constrained_decoding": body.constrained_decoding,
             "do_sample": body.do_sample,
             "temperature": runtime_temperature,
             "top_p": runtime_top_p,
+            "structured_schema_requested": bool(body.format),
         }
         return out
     except httpx.HTTPStatusError as e:

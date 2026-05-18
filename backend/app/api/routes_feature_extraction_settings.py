@@ -11,9 +11,13 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 
-from ..db.models import AppSetting, FewShotAssistRun, Rule
+from ..composition import (
+    get_feature_extraction_settings_use_case,
+    put_feature_extraction_settings_use_case,
+)
+from ..db.models import FewShotAssistRun, Rule
 from ..db.session import get_db_session
-from ..primary_catalog_settings import get_effective_primary_catalog_map, validate_and_save_primary_catalog_map
+from ..primary_catalog_settings import PrimaryCatalogService
 
 router = APIRouter(prefix="/api/feature-extraction", tags=["feature-extraction-settings"])
 
@@ -49,6 +53,8 @@ def file_default_model_settings() -> Dict[str, Any]:
 
 
 class ModelRuntimeSettingsPayload(BaseModel):
+    """Runtime-параметры моделей извлечения признаков."""
+
     models: dict[str, dict[str, Any]] = Field(default_factory=dict)
     model_config = ConfigDict(extra="ignore")
 
@@ -56,15 +62,7 @@ class ModelRuntimeSettingsPayload(BaseModel):
 @router.get("/model-settings")
 def get_feature_extraction_model_settings(db: Session = Depends(get_db_session)) -> Dict[str, Any]:
     """Читает runtime-настройки моделей из БД с fallback на файл по умолчанию."""
-    row: AppSetting | None = db.query(AppSetting).filter(AppSetting.key == SETTINGS_KEY).one_or_none()
-    if not row:
-        return file_default_model_settings()
-    normalized = _normalize_settings(row.value_json)
-    models = normalized.get("models")
-    if not isinstance(models, dict) or len(models) == 0:
-        # Защита от пустых runtime-настроек в БД: в этом случае используем стабильные дефолты из файла.
-        return file_default_model_settings()
-    return normalized
+    return get_feature_extraction_settings_use_case(db, file_default_model_settings).execute()
 
 
 @router.put("/model-settings")
@@ -72,17 +70,7 @@ def put_feature_extraction_model_settings(
     payload: ModelRuntimeSettingsPayload, db: Session = Depends(get_db_session)
 ) -> Dict[str, Any]:
     """Сохраняет runtime-настройки моделей извлечения в `AppSetting`."""
-    normalized = _normalize_settings(payload.model_dump())
-    models = normalized.get("models")
-    if not isinstance(models, dict) or len(models) == 0:
-        raise HTTPException(status_code=400, detail="Список моделей не может быть пустым.")
-    row: AppSetting | None = db.query(AppSetting).filter(AppSetting.key == SETTINGS_KEY).one_or_none()
-    if row is None:
-        row = AppSetting(key=SETTINGS_KEY, value_json=normalized, updated_at=datetime.utcnow())
-        db.add(row)
-    else:
-        row.value_json = normalized
-        row.updated_at = datetime.utcnow()
+    normalized = put_feature_extraction_settings_use_case(db).execute(_normalize_settings(payload.model_dump()))
     db.commit()
     return normalized
 
@@ -97,7 +85,7 @@ class PrimaryCatalogSettingsPayload(BaseModel):
 @router.get("/primary-catalog-settings")
 def get_primary_catalog_settings(db: Session = Depends(get_db_session)) -> Dict[str, Any]:
     """Возвращает эффективные основные справочники по группам ТН ВЭД."""
-    return {"by_group_code": get_effective_primary_catalog_map(db)}
+    return {"by_group_code": PrimaryCatalogService().get_effective_map(db)}
 
 
 @router.put("/primary-catalog-settings")
@@ -106,13 +94,15 @@ def put_primary_catalog_settings(
 ) -> Dict[str, Any]:
     """Валидирует и сохраняет назначения основных справочников по группам."""
     try:
-        normalized = validate_and_save_primary_catalog_map(db, dict(payload.by_group_code))
+        normalized = PrimaryCatalogService().validate_and_save(db, dict(payload.by_group_code))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"by_group_code": normalized}
 
 
 class FewShotAssistRunCreate(BaseModel):
+    """Тело запроса на сохранение результата few-shot помощника."""
+
     rule_id: str
     result: Dict[str, Any] = Field(default_factory=dict)
     model_config = ConfigDict(extra="ignore")

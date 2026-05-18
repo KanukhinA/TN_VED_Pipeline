@@ -5,7 +5,9 @@ from __future__ import annotations
 import uuid
 from unittest.mock import MagicMock
 
+import pytest
 from app.db.models import RuleVersion
+from app.rules.dsl_models import PathClassificationCondition
 from app.pipeline.validator import (
     CompiledRuleCache,
     CompiledRuleCacheKey,
@@ -115,3 +117,15 @@ def test_validate_with_rule_validation_error_from_compiler():
     assert isinstance(errors[0], str)
     assert validated is None
     assert assigned is None
+
+
+def test_path_condition_normalizes_description_alias_to_canonical_path():
+    cond = PathClassificationCondition(type="path", path="description", op="regex", value="калий")
+    assert cond.path == "description_text"
+
+
+def test_path_condition_rejects_invalid_or_empty_regex():
+    with pytest.raises(ValueError):
+        PathClassificationCondition(type="path", path="description_text", op="regex", value="")
+    with pytest.raises(ValueError):
+        PathClassificationCondition(type="path", path="description_text", op="regex", value="(")

@@ -262,7 +262,7 @@ export type OfficerValidationPayload = {
   declaration_id?: string | null;
   /** Если задан — сервер пропускает вызов модели извлечения и использует этот JSON. */
   extracted_features_override?: Record<string, unknown> | null;
-  /** k для выбора класса по kNN в семантическом fallback. */
+  /** k для выбора класса в семантическом резервном сценарии kNN. */
   semantic_k?: number;
 };
 
@@ -452,6 +452,15 @@ export async function savePipelineConfig(body: {
   semantic_neighbor_similarity_floor_s0?: number;
   semantic_neighbor_weight_gamma?: number;
   semantic_support_threshold_tau2?: number;
+  semantic_cleaning_prompt?: string;
+  semantic_cleaning_num_ctx?: number;
+  semantic_cleaning_max_new_tokens?: number;
+  semantic_cleaning_repetition_penalty?: number;
+  semantic_cleaning_temperature?: number;
+  semantic_cleaning_top_p?: number;
+  semantic_cleaning_enable_thinking?: boolean;
+  semantic_cleaning_constrained_decoding?: boolean;
+  semantic_cleaning_do_sample?: boolean;
 }): Promise<any> {
   const res = await fetchWithRetry(`${API_BASE}/admin/pipeline-config`, {
     method: "PUT",
@@ -463,6 +472,29 @@ export async function savePipelineConfig(body: {
     throw new Error(json?.detail ?? "Не удалось сохранить конфигурацию пайплайна");
   }
   return json;
+}
+
+export async function testSemanticCleaning(text: string): Promise<{
+  cleaned_text: string;
+  used_fallback: boolean;
+  model?: string;
+  debug?: Record<string, unknown>;
+}> {
+  const res = await fetchWithRetry(`${API_BASE}/admin/semantic-cleaning/test`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text }),
+  });
+  const json = await parseJsonSafe(res);
+  if (!res.ok) {
+    throw new Error(formatFastApiDetail(json?.detail) || "Не удалось выполнить тест чистки описания");
+  }
+  return {
+    cleaned_text: typeof json?.cleaned_text === "string" ? json.cleaned_text : "",
+    used_fallback: Boolean(json?.used_fallback),
+    model: typeof json?.model === "string" ? json.model : undefined,
+    debug: json?.debug && typeof json.debug === "object" ? (json.debug as Record<string, unknown>) : undefined,
+  };
 }
 
 export async function getClassNamingPromptTemplate(): Promise<{ template: string; path?: string }> {
@@ -585,8 +617,7 @@ export type FeatureExtractionTestPayload = {
   raw_llm_output?: string;
   llm_inference_options?: LlmInferenceOptions;
   runtime?: {
-    structured_output?: boolean;
-    use_guidance?: boolean;
+    constrained_decoding?: boolean;
   };
   rules_preview?: string;
 };
@@ -992,6 +1023,23 @@ export async function createExpertDecision(payload: {
     throw new Error(formatFastApiDetail(json?.detail) ?? "Не удалось сохранить запись");
   }
   return json as ExpertDecisionItem;
+}
+
+export type RepairLlmNamingExpertQueueResult = {
+  status: string;
+  review_rows_scanned: number;
+  review_payload_enriched: number;
+  class_name_confirmation_created: number;
+  class_name_confirmation_already_pending: number;
+};
+
+export async function repairExpertLlmNamingQueue(): Promise<RepairLlmNamingExpertQueueResult> {
+  const res = await fetchWithRetry(`${API_BASE}/expert-decisions/repair-llm-naming-queue`, { method: "POST" });
+  const json = await parseJsonSafe(res);
+  if (!res.ok) {
+    throw new Error(formatFastApiDetail(json?.detail) ?? "Не удалось восстановить очередь имён LLM");
+  }
+  return json as RepairLlmNamingExpertQueueResult;
 }
 
 export async function listExpertDecisions(params?: ExpertDecisionListQuery): Promise<ExpertDecisionListPage> {

@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
+from ..application.use_cases.officer_pipeline import OfficerPipelineRunnerPort, ValidateOfficerDeclarationUseCase
 from ..db.models import Rule, RuleVersion
 from ..db.session import get_db_session
 from ..rules.classification import (
@@ -310,13 +311,17 @@ def _coerce_officer_parsed_features(parsed_raw: Any) -> Tuple[Dict[str, Any], Op
 def _merge_officer_into_prochee(
     data: Dict[str, Any],
     *,
+    description_text: Optional[str],
     gross: Optional[float],
     net: Optional[float],
     price: Optional[float],
     root_names: set[str],
 ) -> Dict[str, Any]:
-    """Добавляет параметры инспектора (масса/стоимость) в секцию `прочее`, если поле есть в схеме."""
+    """Добавляет параметры инспектора и канонический текст описания для правил path/regex."""
     out = dict(data)
+    description_norm = str(description_text or "").strip()
+    if description_norm:
+        out["description_text"] = description_norm
     extras: List[Dict[str, Any]] = []
     if gross is not None:
         extras.append({"параметр": "вес брутто (графа 35)", "масса": float(gross), "единица": "кг"})
@@ -425,6 +430,8 @@ def _extract_classification_expert_review(errors: List[Any]) -> Optional[Dict[st
 
 
 class OfficerRunRequest(BaseModel):
+    """Входные данные инспектора для полного цикла проверки декларации."""
+
     declaration_id: str
     description: str
     tnved_code: str | None = None
@@ -438,6 +445,8 @@ class OfficerRunRequest(BaseModel):
 
 
 class SemanticClassConsistencyRequest(BaseModel):
+    """Запрос проверки согласованности семантического кандидата с правилами класса."""
+
     rule_id: str
     class_id: str
     validated_features: Dict[str, Any] = Field(
@@ -488,10 +497,9 @@ def semantic_class_consistency(
     }
 
 
-@router.post("/api/pipeline/officer-run")
-def officer_run(
+def _run_officer_pipeline(
     payload: OfficerRunRequest,
-    db: Session = Depends(get_db_session),
+    db: Session,
 ) -> Dict[str, Any]:
     """
     Полный цикл для UI инспектора: справочник по ТН ВЭД → LLM-извлечение → правила → классификация.
@@ -551,11 +559,14 @@ def officer_run(
         else:
             prompt = _assemble_llm_prompt(fe_cfg, payload.description)
             runtime_cfg = fe_cfg.get("extraction_runtime") if isinstance(fe_cfg.get("extraction_runtime"), dict) else {}
-            configured_constrained = bool(
-                runtime_cfg.get("use_guidance")
-                or runtime_cfg.get("use_outlines")
-                or runtime_cfg.get("pydantic_outlines")
-            )
+            configured_constrained = bool(runtime_cfg.get("constrained_decoding"))
+            extraction_json_schema: dict[str, Any] | None = None
+            if configured_constrained:
+                try:
+                    extraction_json_schema = compiled.model.model_json_schema()
+                except Exception:
+                    extraction_json_schema = None
+
             base_ollama_body: Dict[str, Any] = {
                 "model": model,
                 "prompt": prompt,
@@ -565,24 +576,34 @@ def officer_run(
                 "temperature": 0.0,
                 "enable_thinking": False,
             }
+
+            def _extraction_attempt(extra: Dict[str, Any]) -> Dict[str, Any]:
+                row = {**base_ollama_body, **extra}
+                if row.get("constrained_decoding") and extraction_json_schema is not None:
+                    row["format"] = extraction_json_schema
+                return row
+
             generation_attempts: list[Dict[str, Any]] = [
-                # Сначала пробуем конфигурацию из настроек, затем fallback-стратегии.
-                {
-                    **base_ollama_body,
-                    "constrained_decoding": configured_constrained,
-                    "do_sample": False,
-                },
-                {
-                    **base_ollama_body,
-                    "constrained_decoding": not configured_constrained,
-                    "do_sample": False,
-                },
-                {
-                    **base_ollama_body,
-                    "constrained_decoding": not configured_constrained,
-                    "do_sample": True,
-                    "temperature": 0.2,
-                },
+                # Сначала пробуем конфигурацию из настроек, затем резервные стратегии.
+                _extraction_attempt(
+                    {
+                        "constrained_decoding": configured_constrained,
+                        "do_sample": False,
+                    }
+                ),
+                _extraction_attempt(
+                    {
+                        "constrained_decoding": not configured_constrained,
+                        "do_sample": False,
+                    }
+                ),
+                _extraction_attempt(
+                    {
+                        "constrained_decoding": not configured_constrained,
+                        "do_sample": True,
+                        "temperature": 0.2,
+                    }
+                ),
             ]
             selected_attempt_idx = 0
             gen_json: Dict[str, Any] | None = None
@@ -615,13 +636,13 @@ def officer_run(
                             }
                         )
                         if candidate_raw:
-                            # Как только получили непустой текст, дальше не ретраим.
+                            # Как только получили непустой текст, дальше запрос не повторяем.
                             gen_json = candidate_json
                             raw_text = candidate_raw
                             selected_attempt_idx = idx
                             break
                     if not raw_text:
-                        # Сохраняем последнюю попытку для диагностики.
+                        # Сохраняем данные последней попытки для диагностики.
                         selected_attempt_idx = len(generation_attempts) - 1
                         gen_json = candidate_json if "candidate_json" in locals() else None
 
@@ -711,6 +732,7 @@ def officer_run(
     root_names = _root_property_names(compiled.root_schema)
     merged = _merge_officer_into_prochee(
         parsed,
+        description_text=payload.description,
         gross=payload.gross_weight_kg,
         net=payload.net_weight_kg,
         price=payload.price,
@@ -720,8 +742,8 @@ def officer_run(
     ok, errors, validated_dict, assigned_class = compiled.validate(merged)
     classification_expert_review = _extract_classification_expert_review(errors)
     exactly_one_conflict = classification_expert_review
-    # Запись в expert_decision_items здесь не создаём: officer-run вызывается при каждой проверке в UI
-    # и из оркестратора; очередь эксперта и полный payload (ТН ВЭД, цена, фрагмент описания) формируются
+    # Запись в `expert_decision_items` здесь не создаём: `officer-run` вызывается при каждой проверке в интерфейсе
+    # и из оркестратора; очередь эксперта и полный набор данных (ТН ВЭД, цена, фрагмент описания) формируются
     # в оркестраторе / по кнопкам инспектора, иначе в архив попадают дубли без полей для отображения.
 
     clf_cfg = compiled.classification
@@ -732,13 +754,6 @@ def officer_run(
     rule_title: Optional[str] = None
     if matched_rule is not None:
         rule_title = matched_rule.title or matched_rule.class_id
-    elif (
-        clf_cfg
-        and clf_cfg.strategy == "first_match"
-        and assigned_class
-        and clf_cfg.default_class_id == assigned_class
-    ):
-        rule_title = "Класс по умолчанию (default_class_id)"
 
     sep = "─" * 40
     extracted_text = (
@@ -768,7 +783,7 @@ def officer_run(
         summary_lines.append(f"Сработавшее правило классификации: {rule_title}")
     errors_ru = humanize_officer_error_list(errors) if errors else []
     if errors:
-        # В summary кладём человекочитаемые причины, чтобы инспектор видел контекст без дебага JSON.
+        # В `summary` добавляем понятные причины, чтобы инспектор видел контекст без отладочного JSON.
         summary_lines.append("Ошибки (пояснение): " + json.dumps(errors_ru, ensure_ascii=False))
     if classification_expert_review:
         summary_lines.append(
@@ -812,3 +827,20 @@ def officer_run(
         "requires_expert_review": bool(classification_expert_review),
     }
     return out
+
+
+class LocalOfficerPipelineRunner(OfficerPipelineRunnerPort):
+    """Локальный адаптер сценария officer-run для use-case слоя."""
+
+    def run(self, payload: OfficerRunRequest, db: Session) -> Dict[str, Any]:
+        return _run_officer_pipeline(payload, db)
+
+
+@router.post("/api/pipeline/officer-run")
+def officer_run(
+    payload: OfficerRunRequest,
+    db: Session = Depends(get_db_session),
+) -> Dict[str, Any]:
+    """HTTP-адаптер: делегирует бизнес-сценарий use-case слою."""
+    use_case = ValidateOfficerDeclarationUseCase(runner=LocalOfficerPipelineRunner())
+    return use_case.execute(payload, db)

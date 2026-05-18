@@ -193,7 +193,7 @@ export default function NumericCharacteristicsForm({ draft, onChange, hideInline
 
       <h3 style={{ marginTop: 0, marginBottom: 8, fontSize: 17 }}>Структура полей документа</h3>
       <p style={{ margin: "0 0 12px", fontSize: 13, color: "#475569", lineHeight: 1.45 }}>
-        Нажмите «Добавить поле» и выберите: <strong>одно число на корне</strong> (например плотность в декларации — ключ и
+        Нажмите «Добавить поле» и выберите: <strong>одно число на верхнем уровне JSON</strong> (например плотность в декларации — ключ и
         значение-число без массива) или <strong>группу полей (массив)</strong> — как раньше: несколько строк с полем
         значения и числом. Для текстовых массивов и блока «прочее» используйте кнопки ниже.
       </p>
@@ -341,20 +341,20 @@ export default function NumericCharacteristicsForm({ draft, onChange, hideInline
               style={{ fontWeight: 600, marginBottom: 8, fontSize: 15, cursor: "help", width: "fit-content" }}
               title={
                 isScalar
-                  ? "На корне JSON одно поле с числом: { \"плотность\": 0.85 }."
-                  : "Один блок задаёт массив на корне: в каждой строке текстовое значение и число."
+                  ? "На верхнем уровне JSON одно числовое поле: { \"плотность\": 0.85 }."
+                  : "Один блок задаёт массив на верхнем уровне JSON: в каждой строке текстовое значение и число."
               }
             >
               {`Поле ${fieldNo}. `}
-              {isScalar ? `Одно число на корне ${ordinal}` : `Группа полей (массив) ${ordinal}`}
+              {isScalar ? `Одно число на верхнем уровне JSON ${ordinal}` : `Группа полей (массив) ${ordinal}`}
             </div>
             <label style={{ display: "block", marginBottom: 10 }}>
               <span
                 style={labelText}
                 title={
                   isScalar
-                    ? "Имя поля на корне документа; значение в декларации — одно число."
-                    : "Это имя в JSON дважды: ключ массива на корне документа и имя поля с числовым значением в каждой строке массива."
+                    ? "Имя поля верхнего уровня документа; значение в декларации — одно число."
+                    : "Это имя в JSON используется дважды: как ключ массива верхнего уровня и как имя числового поля в каждой строке массива."
                 }
               >
                 {isScalar ? (
@@ -492,7 +492,7 @@ export default function NumericCharacteristicsForm({ draft, onChange, hideInline
             Поле {draft.characteristics.length + idx + 1}. Простое текстовое поле {idx + 1}
           </div>
           <label style={{ display: "block", marginBottom: 10 }}>
-            <span style={labelText} title='Ключ текстового поля на корне JSON, например { "стандарт": "ТУ ..." }.'>
+            <span style={labelText} title='Ключ текстового поля верхнего уровня JSON, например { "стандарт": "ТУ ..." }.'>
               Ключ поля {reqStar}
             </span>
             <input
@@ -594,7 +594,7 @@ export default function NumericCharacteristicsForm({ draft, onChange, hideInline
             Поле {draft.characteristics.length + (draft.textScalarFields?.length ?? 0) + idx + 1}. Массив из допустимых значений {idx + 1}
           </div>
           <label style={{ display: "block", marginBottom: 10 }}>
-            <span style={labelText} title="Один и тот же ключ для массива на корне и для свойства в каждой строке.">
+            <span style={labelText} title="Один и тот же ключ для массива верхнего уровня и для свойства в каждой строке.">
               Ключ поля {reqStar}
             </span>
             <input
@@ -680,7 +680,7 @@ export default function NumericCharacteristicsForm({ draft, onChange, hideInline
 
       <h3 style={{ marginTop: 20, marginBottom: 8, fontSize: 17 }}>Блок «прочее»</h3>
       <p style={{ margin: "0 0 10px", fontSize: 13, color: "#475569", lineHeight: 1.45 }}>
-        Массив на корне JSON с ключом «прочее»: в каждой строке свой набор полей (масса, количество, марка, стандарт и т.д.). Добавляет в
+        Массив верхнего уровня JSON с ключом «прочее»: в каждой строке свой набор полей (масса, количество, марка, стандарт и т.д.). Добавляет в
         схему отдельное свойство с гибкой структурой строк.
       </p>
       {!draft.procheeEnabled ? (
@@ -739,7 +739,7 @@ export default function NumericCharacteristicsForm({ draft, onChange, hideInline
             </button>
           </div>
           <label style={{ display: "block", marginBottom: 6 }}>
-            <span style={{ ...labelText, cursor: "help" }} title="Массив объектов — содержимое ключа «прочее» на корне документа.">
+            <span style={{ ...labelText, cursor: "help" }} title="Массив объектов — содержимое ключа «прочее» на верхнем уровне документа.">
               JSON массива «прочее»
             </span>
             <ProcheeJsonTextarea rows={draft.procheeRows} onCommit={(procheeRows) => onChange({ ...draft, procheeRows })} />

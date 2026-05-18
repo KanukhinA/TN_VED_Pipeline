@@ -26,15 +26,6 @@ id_ed25519
 service-account*.json
 firebase-adminsdk*.json
 
-# Local databases, dumps, and backups
-*.sqlite
-*.sqlite3
-*.db
-*.bak
-*.backup
-*.dump
-*.sql
-
 # Logs with potentially sensitive content
 *.log
 logs/

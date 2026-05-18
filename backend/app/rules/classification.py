@@ -6,6 +6,8 @@ from pydantic import BaseModel
 
 from .cross_rules import _compare
 from .dsl_models import (
+    CANONICAL_DESCRIPTION_PATH,
+    DESCRIPTION_PATH_ALIASES,
     ClassificationCondition,
     ClassificationConfig,
     ClassificationRule,
@@ -15,11 +17,13 @@ from .dsl_models import (
     RowFormulaCondition,
 )
 from .formula_safe_eval import eval_numeric_formula
-from .numeric_cell import coerce_numeric_cell_to_scalar
+from .numeric_cell import coerce_numeric_cell_to_scalar, numeric_interval_from_cell
 from .path_utils import extract_first_value, extract_values
 
 
 class ClassificationError(BaseModel):
+    """Структурированная ошибка классификации для ответа API."""
+
     message: str
     details: Optional[Dict[str, Any]] = None
 
@@ -29,17 +33,108 @@ class ClassificationError(BaseModel):
 # (|26·1−26·2|/max ≤ 0.5). Кламп не меняет типичные правила с tolerance_rel ≤ 0.01.
 _MAX_ROW_PAIR_RATIO_TOLERANCE_REL = 0.1
 
+_PATH_NUMERIC_OPS = frozenset({"equals", "gt", "gte", "lt", "lte"})
 
-def _row_indicator_value_matches_range(lf: float, cond: RowIndicatorCondition) -> bool:
-    """Проверяет числовое значение индикатора по диапазону из условия."""
+
+def _relative_slack_around_threshold(threshold: float, tolerance_rel: float) -> float:
+    """Полоса у порога: tolerance_rel · max(|порог|, ε). При 0 — без расширения."""
+    t = max(0.0, float(tolerance_rel))
+    if t <= 0:
+        return 0.0
+    return t * max(abs(float(threshold)), 1e-12)
+
+
+def scalar_numeric_op_feasible_interval(
+    op: str, threshold: float, tolerance_rel: float
+) -> Optional[Tuple[float, float]]:
+    """
+    Образ на числовой оси значений, удовлетворяющих одному скалярному сравнению с порогом
+    (как в рантайме при tolerance_rel). Для анализа пересечений правил.
+    """
+    v = float(threshold)
+    slack = _relative_slack_around_threshold(v, tolerance_rel)
+    if op == "gt":
+        return v - slack + 1e-12, float("inf")
+    if op == "gte":
+        return v - slack, float("inf")
+    if op == "lt":
+        return float("-inf"), v + slack - 1e-12
+    if op == "lte":
+        return float("-inf"), v + slack
+    if op == "equals":
+        tol = max(0.0, float(tolerance_rel))
+        if tol <= 0:
+            return v, v
+        b = tol * max(abs(v), 1e-12)
+        return v - b, v + b
+    return None
+
+
+def _numeric_compare_with_tolerance(lhs: float, op: str, rhs: float, tolerance_rel: float) -> bool:
+    """Числовое сравнение с относительным допуском (0 — как строгое сравнение)."""
+    t = max(0.0, float(tolerance_rel))
+    if op == "equals":
+        scale = max(abs(lhs), abs(rhs), 1e-12)
+        return abs(lhs - rhs) <= t * scale
+    slack = _relative_slack_around_threshold(rhs, t)
+    if op == "gt":
+        return lhs > rhs - slack
+    if op == "gte":
+        return lhs >= rhs - slack
+    if op == "lt":
+        return lhs < rhs + slack
+    if op == "lte":
+        return lhs <= rhs + slack
+    return False
+
+
+def _path_left_as_float(left: Any) -> Optional[float]:
+    c = coerce_numeric_cell_to_scalar(left)
+    if c is not None:
+        return c
+    try:
+        return float(left)
+    except (TypeError, ValueError):
+        return None
+
+
+def _effective_row_indicator_bounds(cond: RowIndicatorCondition) -> Tuple[Optional[float], Optional[float]]:
+    """value_min/value_max с расширением коридора при tolerance_rel > 0."""
+    tol = max(0.0, float(cond.tolerance_rel))
     vmin = cond.value_min
     vmax = cond.value_max
+    if vmin is not None:
+        fv = float(vmin)
+        vmin = fv - _relative_slack_around_threshold(fv, tol)
+    if vmax is not None:
+        fv = float(vmax)
+        vmax = fv + _relative_slack_around_threshold(fv, tol)
+    return vmin, vmax
+
+
+def _row_indicator_value_matches_range(lf: float, cond: RowIndicatorCondition) -> bool:
+    """Проверяет числовое значение индикатора по диапазону из условия (с учётом tolerance_rel)."""
+    vmin, vmax = _effective_row_indicator_bounds(cond)
     if vmin is not None and vmax is not None:
         return vmin <= lf <= vmax
     if vmin is not None:
         return lf >= vmin
     if vmax is not None:
         return lf <= vmax
+    return False
+
+
+def _row_indicator_data_interval_inside_rule_range(
+    d_lo: float, d_hi: float, cond: RowIndicatorCondition
+) -> bool:
+    """Весь отрезок [d_lo, d_hi] из ячейки должен лежать в коридоре правила (с учётом tolerance_rel)."""
+    vmin, vmax = _effective_row_indicator_bounds(cond)
+    if vmin is not None and vmax is not None:
+        return vmin <= d_lo and d_hi <= vmax
+    if vmin is not None:
+        return d_lo >= vmin
+    if vmax is not None:
+        return d_hi <= vmax
     return False
 
 
@@ -51,9 +146,31 @@ def row_indicator_numeric_value_satisfies(lf: float, cond: RowIndicatorCondition
     has_range = cond.value_min is not None or cond.value_max is not None
     if has_range:
         return _row_indicator_value_matches_range(lf, cond)
+    if cond.op is not None and str(cond.op) in _PATH_NUMERIC_OPS and cond.value is not None:
+        try:
+            rhs = float(cond.value)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return bool(_compare(lf, cond.op, cond.value))
+        tol = max(0.0, float(cond.tolerance_rel))
+        return _numeric_compare_with_tolerance(lf, str(cond.op), rhs, tol)
     if cond.op is not None:
         return bool(_compare(lf, cond.op, cond.value))
     return False
+
+
+def _path_compare_one(left: Any, cond: PathClassificationCondition) -> bool:
+    op = str(cond.op)
+    if op in _PATH_NUMERIC_OPS and cond.value is not None:
+        lf = _path_left_as_float(left)
+        if lf is not None:
+            try:
+                rhs = float(cond.value)  # type: ignore[arg-type]
+            except (TypeError, ValueError):
+                pass
+            else:
+                tol = max(0.0, float(cond.tolerance_rel))
+                return _numeric_compare_with_tolerance(lf, op, rhs, tol)
+    return bool(_compare(left, cond.op, cond.value))
 
 
 def _rule_first_match_tiebreak_score(rule: ClassificationRule) -> float:
@@ -153,66 +270,164 @@ def _condition_group_id(cond: ClassificationCondition) -> Optional[str]:
     return None
 
 
+class ConditionEvaluator:
+    """ООП-диспетчер проверки одного условия по его типу."""
+
+    def evaluate(self, data: Any, cond: ClassificationCondition) -> bool:
+        if isinstance(cond, PathClassificationCondition):
+            return self._path_holds(data, cond)
+        if isinstance(cond, RowIndicatorCondition):
+            return _row_indicator_holds(data, cond)
+        if isinstance(cond, RowPairRatioCondition):
+            return _row_pair_ratio_holds(data, cond)
+        if isinstance(cond, RowFormulaCondition):
+            return _row_formula_holds(data, cond)
+        raise TypeError(f"Unknown classification condition: {type(cond)}")
+
+    @staticmethod
+    def _description_candidates(data: Any) -> List[Any]:
+        """Собирает кандидаты «полного описания» из канонического и legacy-ключей."""
+        if not isinstance(data, dict):
+            return []
+        out: List[Any] = []
+        for key in DESCRIPTION_PATH_ALIASES:
+            val = data.get(key)
+            if val is not None:
+                out.append(val)
+        seen: set[str] = set()
+        uniq: List[Any] = []
+        for item in out:
+            marker = repr(item)
+            if marker in seen:
+                continue
+            seen.add(marker)
+            uniq.append(item)
+        return uniq
+
+    @classmethod
+    def _extract_path_values(cls, data: Any, path: str) -> List[Any]:
+        if path == CANONICAL_DESCRIPTION_PATH:
+            return cls._description_candidates(data)
+        return extract_values(data, path)
+
+    @classmethod
+    def _path_holds(cls, data: Any, cond: PathClassificationCondition) -> bool:
+        values = cls._extract_path_values(data, cond.path)
+        if cond.op == "exists":
+            return bool(values)
+        if cond.op == "notExists":
+            return not values
+        if not values:
+            left = extract_first_value(data, cond.path) if cond.path != CANONICAL_DESCRIPTION_PATH else None
+            return _path_compare_one(left, cond)
+        if cond.op in ("notEquals", "notRegex"):
+            return all(_path_compare_one(left, cond) for left in values)
+        return any(_path_compare_one(left, cond) for left in values)
+
+
+class RuleMatcher:
+    """ООП-обёртка над логикой матчинга правил с обратной совместимостью фасадов."""
+
+    def __init__(self, evaluator: Optional[ConditionEvaluator] = None) -> None:
+        self._evaluator = evaluator or ConditionEvaluator()
+
+    def condition_holds(self, data: Any, cond: ClassificationCondition) -> bool:
+        return self._evaluator.evaluate(data, cond)
+
+    def _evaluate_primary_chain(self, data: Any, conds: List[ClassificationCondition]) -> bool:
+        """Связка условий по полю conjunction у каждого условия после первого (как в плоском списке DSL)."""
+        if not conds:
+            return True
+        result = self.condition_holds(data, conds[0])
+        for cond in conds[1:]:
+            if _condition_conjunction(cond) == "or":
+                result = result or self.condition_holds(data, cond)
+            else:
+                result = result and self.condition_holds(data, cond)
+        return result
+
+    def rule_matches_by_groups(self, data: Any, conditions: List[ClassificationCondition]) -> bool:
+        groups: Dict[str, List[ClassificationCondition]] = {}
+        order: List[str] = []
+        for cond in conditions:
+            group_id = _condition_group_id(cond)
+            if not group_id:
+                continue
+            if group_id not in groups:
+                groups[group_id] = []
+                order.append(group_id)
+            groups[group_id].append(cond)
+        for group_id in order:
+            group_conds = groups[group_id]
+            if not group_conds:
+                continue
+            if self._evaluate_primary_chain(data, group_conds):
+                return True
+        return False
+
+    def rule_matches(self, data: Any, rule: ClassificationRule) -> bool:
+        if not rule.conditions:
+            return True
+        primary_conds = [c for c in rule.conditions if _condition_is_primary(c)]
+        to_check = primary_conds if primary_conds else rule.conditions
+        if any(_condition_group_id(cond) for cond in to_check):
+            return self.rule_matches_by_groups(data, to_check)
+        return self._evaluate_primary_chain(data, to_check)
+
+
+_DEFAULT_RULE_MATCHER = RuleMatcher()
+
+
+def _normalized_rule_class_id(rule: ClassificationRule) -> str:
+    return (rule.class_id or "").strip()
+
+
+def _rule_refinement_holds(data: Any, rule: ClassificationRule) -> bool:
+    """Уточняющие условия (primary=False): если их нет — считаем выполненными."""
+    refining = [c for c in (rule.conditions or []) if not _condition_is_primary(c)]
+    if not refining:
+        return True
+    probe = ClassificationRule(
+        class_id=rule.class_id,
+        title=rule.title,
+        priority=rule.priority,
+        tn_ved_group_code=rule.tn_ved_group_code,
+        condition_groups=list(rule.condition_groups or []),
+        conditions=refining,
+    )
+    return _DEFAULT_RULE_MATCHER.rule_matches(data, probe)
+
+
+def _narrow_first_match_by_refinements_when_multi_class(
+    data: Any,
+    matches: List[ClassificationRule],
+) -> List[ClassificationRule]:
+    """
+    Если по основным подошли правила минимум двух разных классов — оставляем те,
+    у которых выполняются и уточняющие условия; при пустом результате возвращаем исходный набор.
+    """
+    if len(matches) <= 1:
+        return matches
+    classes = {_normalized_rule_class_id(r) for r in matches if _normalized_rule_class_id(r)}
+    if len(classes) < 2:
+        return matches
+    refined = [r for r in matches if _rule_refinement_holds(data, r)]
+    return refined if refined else matches
+
+
 def _rule_matches_by_groups(data: Any, conditions: List[ClassificationCondition]) -> bool:
     """Проверяет правило в режиме групп: достаточно прохождения любой полной группы."""
-    groups: Dict[str, List[ClassificationCondition]] = {}
-    order: List[str] = []
-    for cond in conditions:
-        group_id = _condition_group_id(cond)
-        if not group_id:
-            continue
-        if group_id not in groups:
-            groups[group_id] = []
-            order.append(group_id)
-        groups[group_id].append(cond)
-    for group_id in order:
-        group_conds = groups[group_id]
-        if not group_conds:
-            continue
-        if all(_condition_holds(data, cond) for cond in group_conds):
-            return True
-    return False
+    return _DEFAULT_RULE_MATCHER.rule_matches_by_groups(data, conditions)
 
 
 def _rule_matches(data: Any, rule: ClassificationRule) -> bool:
     """Проверяет, выполняется ли правило классификации для данных."""
-    if not rule.conditions:
-        return True
-    primary_conds = [c for c in rule.conditions if _condition_is_primary(c)]
-    # Если нет primary-условий, проверяем все как в старом поведении.
-    to_check = primary_conds if primary_conds else rule.conditions
-    if any(_condition_group_id(cond) for cond in to_check):
-        return _rule_matches_by_groups(data, to_check)
-    result = _condition_holds(data, to_check[0])
-    for cond in to_check[1:]:
-        if _condition_conjunction(cond) == "or":
-            result = result or _condition_holds(data, cond)
-        else:
-            result = result and _condition_holds(data, cond)
-    return result
+    return _DEFAULT_RULE_MATCHER.rule_matches(data, rule)
 
 
 def _condition_holds(data: Any, cond: ClassificationCondition) -> bool:
     """Диспетчер проверки одного условия по его типу."""
-    if isinstance(cond, PathClassificationCondition):
-        if cond.op == "exists":
-            return bool(extract_values(data, cond.path))
-        if cond.op == "notExists":
-            return not extract_values(data, cond.path)
-        values = extract_values(data, cond.path)
-        if not values:
-            left = extract_first_value(data, cond.path)
-            return _compare(left, cond.op, cond.value)
-        if cond.op in ("notEquals", "notRegex"):
-            return all(_compare(left, cond.op, cond.value) for left in values)
-        return any(_compare(left, cond.op, cond.value) for left in values)
-    if isinstance(cond, RowIndicatorCondition):
-        return _row_indicator_holds(data, cond)
-    if isinstance(cond, RowPairRatioCondition):
-        return _row_pair_ratio_holds(data, cond)
-    if isinstance(cond, RowFormulaCondition):
-        return _row_formula_holds(data, cond)
-    raise TypeError(f"Unknown classification condition: {type(cond)}")
+    return _DEFAULT_RULE_MATCHER.condition_holds(data, cond)
 
 
 def _op_to_text(op: str) -> str:
@@ -253,6 +468,12 @@ def _value_to_ru(value: Any) -> str:
     return str(value)
 
 
+def _tolerance_suffix_ru(tol: float) -> str:
+    if tol <= 0:
+        return ""
+    return f", относительный допуск {tol:g}"
+
+
 def _condition_to_ru(cond: ClassificationCondition) -> str:
     """Строит краткое русское описание условия для сообщений об ошибках."""
     if isinstance(cond, PathClassificationCondition):
@@ -266,21 +487,21 @@ def _condition_to_ru(cond: ClassificationCondition) -> str:
         if cond.op == "notIn":
             return f"{field_name} не должно входить в набор {_value_to_ru(cond.value)}"
         if cond.op == "equals":
-            return f"{field_name} должно быть равно {_value_to_ru(cond.value)}"
+            return f"{field_name} должно быть равно {_value_to_ru(cond.value)}{_tolerance_suffix_ru(float(cond.tolerance_rel))}"
         if cond.op == "notEquals":
             return f"{field_name} не должно быть равно {_value_to_ru(cond.value)}"
-        return f"{field_name}: {_op_to_text(cond.op)} {_value_to_ru(cond.value)}"
+        return f"{field_name}: {_op_to_text(cond.op)} {_value_to_ru(cond.value)}{_tolerance_suffix_ru(float(cond.tolerance_rel))}"
     if isinstance(cond, RowIndicatorCondition):
         if cond.value_min is not None or cond.value_max is not None:
             lo = cond.value_min if cond.value_min is not None else "—"
             hi = cond.value_max if cond.value_max is not None else "—"
             return (
                 f"для строки с показателем «{cond.name_equals}» число должно соответствовать диапазону от {lo} до {hi} "
-                f"(как в мастере: «У поля с таким значением, диапазон числа»)"
+                f"(как в мастере: «У поля с таким значением, диапазон числа»){_tolerance_suffix_ru(float(cond.tolerance_rel))}"
             )
         return (
             f"для строки с показателем «{cond.name_equals}» число в таблице: "
-            f"{_op_to_text(str(cond.op or 'equals'))} {_value_to_ru(cond.value)}"
+            f"{_op_to_text(str(cond.op or 'equals'))} {_value_to_ru(cond.value)}{_tolerance_suffix_ru(float(cond.tolerance_rel))}"
         )
     if isinstance(cond, RowPairRatioCondition):
         return (
@@ -326,14 +547,28 @@ def _row_indicator_holds(data: Any, cond: RowIndicatorCondition) -> bool:
             continue
         left = row.get(cond.value_field)
         if has_range:
-            lf = coerce_numeric_cell_to_scalar(left)
-            if lf is None:
+            span = numeric_interval_from_cell(left)
+            if span is None:
                 continue
-            if _row_indicator_value_matches_range(lf, cond):
+            d_lo, d_hi = span
+            if _row_indicator_data_interval_inside_rule_range(d_lo, d_hi, cond):
                 return True
             continue
-        if cond.op is not None and _compare(left, cond.op, cond.value):
-            return True
+        if cond.op is not None:
+            if str(cond.op) in _PATH_NUMERIC_OPS and cond.value is not None:
+                lf = _path_left_as_float(left)
+                if lf is not None:
+                    try:
+                        rhs = float(cond.value)  # type: ignore[arg-type]
+                    except (TypeError, ValueError):
+                        pass
+                    else:
+                        tol = max(0.0, float(cond.tolerance_rel))
+                        if _numeric_compare_with_tolerance(lf, str(cond.op), rhs, tol):
+                            return True
+                        continue
+            if _compare(left, cond.op, cond.value):
+                return True
     return False
 
 
@@ -420,11 +655,91 @@ def _ordered_rules_list(rules: List[ClassificationRule]) -> List[ClassificationR
     return [r for _, r in indexed]
 
 
+class ClassificationEngine:
+    """ООП-движок классификации с фасадами обратной совместимости."""
+
+    def find_first_matching(
+        self,
+        data: Any,
+        config: Optional[ClassificationConfig],
+    ) -> Optional[ClassificationRule]:
+        if config is None or not config.rules:
+            return None
+        if config.strategy != "first_match":
+            return None
+        ordered = _ordered_rules_list(config.rules)
+        matches = [r for r in ordered if _rule_matches(data, r)]
+        if not matches:
+            return None
+        narrowed = _narrow_first_match_by_refinements_when_multi_class(data, matches)
+        return select_rule_for_first_match(narrowed, ordered)
+
+    def evaluate(
+        self,
+        data: Any,
+        config: Optional[ClassificationConfig],
+    ) -> Tuple[bool, Optional[str], List[ClassificationError]]:
+        if config is None or not config.rules:
+            return (True, None, [])
+
+        ordered = _ordered_rules_list(config.rules)
+        if config.strategy == "first_match":
+            matches = [r for r in ordered if _rule_matches(data, r)]
+            if matches:
+                narrowed = _narrow_first_match_by_refinements_when_multi_class(data, matches)
+                winner = select_rule_for_first_match(narrowed, ordered)
+                return (True, winner.class_id, [])
+            return (
+                False,
+                None,
+                [
+                    ClassificationError(
+                        message="classification: ни одно правило не подошло",
+                        details={"strategy": config.strategy},
+                    )
+                ],
+            )
+
+        if config.strategy == "exactly_one":
+            matched_indices = [i for i, r in enumerate(ordered) if _rule_matches(data, r)]
+            if len(matched_indices) == 1:
+                return (True, ordered[matched_indices[0]].class_id, [])
+            if len(matched_indices) == 0:
+                return (True, None, [])
+            bi = min(matched_indices, key=lambda i: (ordered[i].priority, i))
+            return (True, ordered[bi].class_id, [])
+
+        return (False, None, [ClassificationError(message=f"Unknown classification strategy: {config.strategy}")])
+
+    def semantic_check(
+        self,
+        data: Any,
+        config: Optional[ClassificationConfig],
+        candidate_class_id: str,
+    ) -> tuple[bool, Optional[str]]:
+        rule = find_classification_rule_for_class_id(config, candidate_class_id)
+        if rule is None:
+            return True, None
+        if _rule_matches(data, rule):
+            return True, None
+        rule_name = (rule.title or "").strip() or (rule.class_id or "").strip() or candidate_class_id.strip()
+        mismatch = _semantic_rule_mismatch_details_ru(data, rule)
+        return (
+            False,
+            "Извлечённые значения не удовлетворяют условиям классификации справочника для класса, "
+            f"выбранного по схожести с эталонами. Не выполнено правило: «{rule_name}»"
+            f". А именно: {mismatch}.",
+        )
+
+
+_DEFAULT_CLASSIFICATION_ENGINE = ClassificationEngine()
+
+
 def find_classification_rule_for_class_id(
     config: Optional[ClassificationConfig],
     class_id: str,
 ) -> Optional[ClassificationRule]:
-    """Правило классификации с данным class_id (точное совпадение или в comma_join)."""
+    """Правило классификации с данным class_id: точное совпадение или вхождение в перечень через запятую в поле class_id правила (legacy JSON)."""
     if not config or not config.rules or not (class_id or "").strip():
         return None
     cid = class_id.strip()
@@ -446,15 +761,7 @@ def find_first_matching_classification_rule(
     config: Optional[ClassificationConfig],
 ) -> Optional[ClassificationRule]:
     """Для strategy first_match — выигравшее подошедшее правило (тот же выбор, что при назначении класса)."""
-    if config is None or not config.rules:
-        return None
-    if config.strategy != "first_match":
-        return None
-    ordered = _ordered_rules_list(config.rules)
-    matches = [r for r in ordered if _rule_matches(data, r)]
-    if not matches:
-        return None
-    return select_rule_for_first_match(matches, ordered)
+    return _DEFAULT_CLASSIFICATION_ENGINE.find_first_matching(data, config)
 
 
 def evaluate_classification(
@@ -463,59 +770,11 @@ def evaluate_classification(
 ) -> Tuple[bool, Optional[str], List[ClassificationError]]:
     """
     Возвращает (ok, assigned_class_id, errors).
-    Для strategy exactly_one при нескольких совпадениях — несколько class_id через запятую
-    (или один при by_priority); при нуле — default_class_id или None без ошибки.
+    Для strategy exactly_one при нескольких совпадениях выбирается одно правило
+    по наименьшему priority, при равенстве — по порядку в списке правил;
+    при нуле совпадений — None без ошибки.
     """
-    if config is None or not config.rules:
-        return (True, None, [])
-
-    ordered = _ordered_rules_list(config.rules)
-
-    if config.strategy == "first_match":
-        # Перебираем не «первое совпавшее по списку», а все совпадения: затем select_rule_for_first_match
-        # уважает priority и при равенстве — более узкие числовые пороги (см. _rule_first_match_tiebreak_score).
-        matches = [r for r in ordered if _rule_matches(data, r)]
-        if matches:
-            winner = select_rule_for_first_match(matches, ordered)
-            return (True, winner.class_id, [])
-        if config.default_class_id:
-            return (True, config.default_class_id, [])
-        return (
-            False,
-            None,
-            [
-                ClassificationError(
-                    message="classification: ни одно правило не подошло и не задан default_class_id",
-                    details={"strategy": config.strategy},
-                )
-            ],
-        )
-
-    if config.strategy == "exactly_one":
-        # Ветвление по числу совпадений: 0 / 1 / несколько; при нескольких — отдельная политика из конфига.
-        matched_indices = [i for i, r in enumerate(ordered) if _rule_matches(data, r)]
-        if len(matched_indices) == 1:
-            return (True, ordered[matched_indices[0]].class_id, [])
-        if len(matched_indices) == 0:
-            if config.default_class_id:
-                return (True, config.default_class_id, [])
-            return (True, None, [])
-        res = config.ambiguous_match_resolution
-        if res == "by_priority":
-            # Один класс: правило с минимальным priority; при равенстве — более ранний индекс в ordered.
-            bi = min(matched_indices, key=lambda i: (ordered[i].priority, i))
-            return (True, ordered[bi].class_id, [])
-        # comma_join (и устаревший reject): склеиваем уникальные class_id в порядке появления правил в списке.
-        seen: set[str] = set()
-        parts: List[str] = []
-        for i in matched_indices:
-            cid = ordered[i].class_id
-            if cid not in seen:
-                seen.add(cid)
-                parts.append(cid)
-        return (True, ",".join(parts), [])
-
-    return (False, None, [ClassificationError(message=f"Unknown classification strategy: {config.strategy}")])
+    return _DEFAULT_CLASSIFICATION_ENGINE.evaluate(data, config)
 
 
 def semantic_candidate_matches_class_rule(
@@ -529,16 +788,4 @@ def semantic_candidate_matches_class_rule(
     Возвращает (True, None) если правила для класса нет (нечего проверять) или условия выполняются;
     (False, message_ru) если правило есть и данные ему не соответствуют.
     """
-    rule = find_classification_rule_for_class_id(config, candidate_class_id)
-    if rule is None:
-        return True, None
-    if _rule_matches(data, rule):
-        return True, None
-    rule_name = (rule.title or "").strip() or (rule.class_id or "").strip() or candidate_class_id.strip()
-    mismatch = _semantic_rule_mismatch_details_ru(data, rule)
-    return (
-        False,
-        "Извлечённые значения не удовлетворяют условиям классификации справочника для класса, "
-        f"выбранного по схожести с эталонами. Не выполнено правило: «{rule_name}»"
-        f". А именно: {mismatch}.",
-    )
+    return _DEFAULT_CLASSIFICATION_ENGINE.semantic_check(data, config, candidate_class_id)

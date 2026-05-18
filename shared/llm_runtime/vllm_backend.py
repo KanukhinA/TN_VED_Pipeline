@@ -12,6 +12,24 @@ import httpx
 from .config import vllm_base_url
 
 
+def _vllm_openai_json_schema_wrapper(schema: dict[str, Any]) -> dict[str, Any]:
+    """Тело поля ``response_format`` для ``/v1/completions`` (vLLM structured outputs, см. docs vLLM)."""
+    name = "pipeline_output"
+    title = schema.get("title")
+    if isinstance(title, str) and title.strip():
+        slug = "".join(ch if ch.isalnum() else "_" for ch in title.strip())
+        slug = slug.strip("_").lower()
+        if slug:
+            name = slug[:64]
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": name,
+            "schema": schema,
+        },
+    }
+
+
 def vllm_completions_generate(
     model: str,
     prompt: str,
@@ -22,6 +40,7 @@ def vllm_completions_generate(
     temperature: float = 0.0,
     top_p: float | None = None,
     enable_thinking: bool = False,
+    response_format: dict[str, Any] | None = None,
     timeout: float = 600.0,
 ) -> dict[str, Any]:
     """Эквивалент ollama_generate: один нестриминговый ответ и те же ключи ответа."""
@@ -38,6 +57,8 @@ def vllm_completions_generate(
     }
     if top_p is not None:
         body["top_p"] = float(top_p)
+    if response_format is not None:
+        body["response_format"] = _vllm_openai_json_schema_wrapper(response_format)
 
     with httpx.Client(timeout=timeout) as client:
         r = client.post(url, json=body)

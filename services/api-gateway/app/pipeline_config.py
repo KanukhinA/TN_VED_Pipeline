@@ -12,11 +12,22 @@ import os
 from pathlib import Path
 from typing import Any
 
+from app.semantic_cleaning import DEFAULT_SEMANTIC_CLEANING_PROMPT
+
 CODE_DEFAULT: dict[str, Any] = {
     "semantic_similarity_threshold": 0.75,
     "semantic_neighbor_similarity_floor_s0": 0.35,
     "semantic_neighbor_weight_gamma": 2.0,
     "semantic_support_threshold_tau2": 0.55,
+    "semantic_cleaning_prompt": DEFAULT_SEMANTIC_CLEANING_PROMPT,
+    "semantic_cleaning_num_ctx": 8192,
+    "semantic_cleaning_max_new_tokens": 1024,
+    "semantic_cleaning_repetition_penalty": 1.0,
+    "semantic_cleaning_temperature": 0.0,
+    "semantic_cleaning_top_p": 1.0,
+    "semantic_cleaning_enable_thinking": False,
+    "semantic_cleaning_constrained_decoding": True,
+    "semantic_cleaning_do_sample": False,
 }
 
 ALLOWED_KEYS = frozenset(CODE_DEFAULT.keys())
@@ -64,6 +75,35 @@ def _clamp_config(merged: dict[str, Any]) -> dict[str, Any]:
         out["semantic_neighbor_weight_gamma"] = max(1.0, min(gamma, 32.0))
     except (TypeError, ValueError):
         out["semantic_neighbor_weight_gamma"] = CODE_DEFAULT["semantic_neighbor_weight_gamma"]
+    out["semantic_cleaning_prompt"] = str(out.get("semantic_cleaning_prompt") or CODE_DEFAULT["semantic_cleaning_prompt"]).strip()
+    try:
+        out["semantic_cleaning_num_ctx"] = max(256, min(int(out.get("semantic_cleaning_num_ctx")), 65536))
+    except (TypeError, ValueError):
+        out["semantic_cleaning_num_ctx"] = CODE_DEFAULT["semantic_cleaning_num_ctx"]
+    try:
+        out["semantic_cleaning_max_new_tokens"] = max(32, min(int(out.get("semantic_cleaning_max_new_tokens")), 8192))
+    except (TypeError, ValueError):
+        out["semantic_cleaning_max_new_tokens"] = CODE_DEFAULT["semantic_cleaning_max_new_tokens"]
+    try:
+        rp = float(out.get("semantic_cleaning_repetition_penalty"))
+        out["semantic_cleaning_repetition_penalty"] = max(0.5, min(rp, 2.0))
+    except (TypeError, ValueError):
+        out["semantic_cleaning_repetition_penalty"] = CODE_DEFAULT["semantic_cleaning_repetition_penalty"]
+    try:
+        temp = float(out.get("semantic_cleaning_temperature"))
+        out["semantic_cleaning_temperature"] = max(0.0, min(temp, 2.0))
+    except (TypeError, ValueError):
+        out["semantic_cleaning_temperature"] = CODE_DEFAULT["semantic_cleaning_temperature"]
+    try:
+        top_p = float(out.get("semantic_cleaning_top_p"))
+        out["semantic_cleaning_top_p"] = max(0.0, min(top_p, 1.0))
+    except (TypeError, ValueError):
+        out["semantic_cleaning_top_p"] = CODE_DEFAULT["semantic_cleaning_top_p"]
+    out["semantic_cleaning_enable_thinking"] = bool(out.get("semantic_cleaning_enable_thinking", CODE_DEFAULT["semantic_cleaning_enable_thinking"]))
+    out["semantic_cleaning_constrained_decoding"] = bool(
+        out.get("semantic_cleaning_constrained_decoding", CODE_DEFAULT["semantic_cleaning_constrained_decoding"])
+    )
+    out["semantic_cleaning_do_sample"] = bool(out.get("semantic_cleaning_do_sample", CODE_DEFAULT["semantic_cleaning_do_sample"]))
     return out
 
 

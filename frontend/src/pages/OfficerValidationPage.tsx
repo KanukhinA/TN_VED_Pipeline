@@ -12,6 +12,7 @@ import { ExtractedFeaturesEditor, deepClone } from "../ui/ExtractedFeaturesEdito
 import TnVedEaeuPicker from "../ui/TnVedEaeuPicker";
 import { ModalCloseButton } from "../ui/ModalCloseButton";
 import { getTnVedGroup } from "../catalog/tnVedGroupsData";
+import { applyKnnMetricsToSemanticPayload, pickSemanticUiLead } from "../expert/semanticKnnDisplay";
 
 function formatDurationMs(ms: number): string {
   const s = ms / 1000;
@@ -176,6 +177,20 @@ function officerPayloadFromResult(raw: any): any {
 }
 
 /** Шаг оркестратора после инспектора: запрос к сервису проверки стоимости (графа 42). */
+const MEANINGLESS_LLM_CLASS_NAMES = new Set(["CLASS", "GENERATION_FAILED", "-", "—", "N/A", "UNKNOWN", "EMPTY"]);
+
+function meaningfulLlmClassFromResult(raw: unknown): string {
+  const step = orchestratorStepFromResult(raw, "llm-class-name-suggestion");
+  if (!step) return "";
+  return String(step.suggested_class_name ?? "").trim();
+}
+
+function isMeaningfulLlmClassName(name: string): boolean {
+  const n = name.trim();
+  if (!n) return false;
+  return !MEANINGLESS_LLM_CLASS_NAMES.has(n.toUpperCase());
+}
+
 function orchestratorStepFromResult(raw: any, stepName: string): Record<string, unknown> | null {
   if (!raw || typeof raw !== "object") return null;
   const steps = raw.steps;
@@ -278,83 +293,6 @@ function semanticMessageWithActualValues(
   }
   if (parts.length === 0) return base;
   return `${base} Фактические значения: ${parts.join("; ")}.`;
-}
-
-function recalculateSemanticForK(semanticPayload: Record<string, unknown> | null, k: number): Record<string, unknown> | null {
-  if (!semanticPayload || typeof semanticPayload !== "object") return semanticPayload;
-  const pointsRaw = semanticPayload.feature_space_points;
-  if (!Array.isArray(pointsRaw)) return semanticPayload;
-  const refs = pointsRaw
-    .filter((p) => p && typeof p === "object" && String((p as Record<string, unknown>).kind ?? "") === "reference")
-    .map((p) => {
-      const row = p as Record<string, unknown>;
-      return {
-        class_id: String(row.class_id ?? "").trim(),
-        similarity: typeof row.similarity === "number" ? row.similarity : Number(row.similarity ?? NaN),
-        description_text: String(row.text ?? "").trim(),
-      };
-    })
-    .filter((r) => r.class_id && Number.isFinite(r.similarity))
-    .sort((a, b) => b.similarity - a.similarity);
-  if (refs.length === 0) return semanticPayload;
-  const kEff = Math.max(1, Math.min(Math.floor(k), refs.length));
-  const top = refs.slice(0, kEff);
-  const s0Raw = semanticPayload.neighbor_similarity_floor_s0;
-  const s0 = typeof s0Raw === "number" ? s0Raw : Number(s0Raw ?? 0.35);
-  const gammaRaw = semanticPayload.neighbor_weight_gamma;
-  const gamma =
-    typeof gammaRaw === "number" && Number.isFinite(gammaRaw) && gammaRaw >= 1 ? gammaRaw : 2;
-  const voteW = (sim: number) => {
-    const margin = Math.max(0, sim - s0);
-    return margin <= 0 ? 0 : margin ** gamma;
-  };
-  const tau1Raw = semanticPayload.threshold_tau1 ?? semanticPayload.similarity_threshold;
-  const tau1 = typeof tau1Raw === "number" ? tau1Raw : Number(tau1Raw ?? NaN);
-  const tau2Raw = semanticPayload.threshold_tau2;
-  const tau2 = typeof tau2Raw === "number" ? tau2Raw : Number(tau2Raw ?? 0.55);
-  const eps = 1e-9;
-  const votes = new Map<string, { vw: number; count: number; best: number }>();
-  let totalWeight = 0;
-  for (const n of top) {
-    const w = voteW(n.similarity);
-    totalWeight += w;
-    const cur = votes.get(n.class_id) ?? { vw: 0, count: 0, best: -Infinity };
-    cur.vw += w;
-    cur.count += 1;
-    if (n.similarity > cur.best) cur.best = n.similarity;
-    votes.set(n.class_id, cur);
-  }
-  const winner = [...votes.entries()].sort((a, b) => {
-    const pa = a[1].vw / (totalWeight + eps);
-    const pb = b[1].vw / (totalWeight + eps);
-    if (pb !== pa) return pb - pa;
-    if (b[1].count !== a[1].count) return b[1].count - a[1].count;
-    if (b[1].best !== a[1].best) return b[1].best - a[1].best;
-    return a[0].localeCompare(b[0], "ru");
-  })[0];
-  const classId = winner?.[0] ?? null;
-  const bestSim = winner?.[1]?.best ?? null;
-  const supportP = winner ? winner[1].vw / (totalWeight + eps) : 0;
-  const matched = Number.isFinite(bestSim as number) && Number.isFinite(tau1) && Number.isFinite(tau2)
-    ? (bestSim as number) > tau1 && supportP > tau2
-    : Boolean(classId);
-  const knnNeighbors = top.map((n, idx) => ({
-    index: idx,
-    class_id: n.class_id,
-    similarity: n.similarity,
-    weight: voteW(n.similarity),
-    description_text: n.description_text,
-  }));
-  return {
-    ...semanticPayload,
-    knn_k: kEff,
-    knn_neighbors: knnNeighbors,
-    class_id: classId,
-    similarity: Number.isFinite(bestSim as number) ? bestSim : semanticPayload.similarity,
-    support_p: supportP,
-    matched,
-    below_threshold: Number.isFinite(tau1) && Number.isFinite(bestSim as number) ? (bestSim as number) <= tau1 : semanticPayload.below_threshold,
-  };
 }
 
 function hasAnyMeaningfulExtractedFeature(value: unknown): boolean {
@@ -693,9 +631,13 @@ export default function OfficerValidationPage() {
   const core = result ? officerPayloadFromResult(result) : null;
   const semanticPayloadRaw = result ? orchestratorStepFromResult(result, "semantic-search") : null;
   const semanticPayload = useMemo(
-    () => recalculateSemanticForK(semanticPayloadRaw, semanticK),
+    () => applyKnnMetricsToSemanticPayload(semanticPayloadRaw, semanticK),
     [semanticPayloadRaw, semanticK],
   );
+  const semanticUiLead = useMemo(() => {
+    if (!semanticPayload || typeof semanticPayload !== "object") return null;
+    return pickSemanticUiLead(semanticPayload as Record<string, unknown>, semanticK);
+  }, [semanticPayload, semanticK]);
   const semanticRuleCheckPayload = result ? orchestratorStepFromResult(result, "semantic-class-rule-check") : null;
   const llmNamingPayload = result ? orchestratorStepFromResult(result, "llm-class-name-suggestion") : null;
   const expertRoutingPayload = result ? orchestratorStepFromResult(result, "expert-review-routing") : null;
@@ -723,10 +665,14 @@ export default function OfficerValidationPage() {
   );
   const semanticAboveThreshold = Boolean(
     semanticPayload &&
-      semanticPayload.below_threshold === false &&
-      typeof semanticPayload.similarity === "number" &&
-      typeof semanticPayload.similarity_threshold === "number" &&
-      semanticPayload.similarity > semanticPayload.similarity_threshold,
+      (semanticPayload.matched === true ||
+        (semanticPayload.below_threshold === false &&
+          typeof semanticPayload.similarity === "number" &&
+          typeof semanticPayload.similarity_threshold === "number" &&
+          semanticPayload.similarity > semanticPayload.similarity_threshold &&
+          (typeof semanticPayload.support_p !== "number" ||
+            typeof semanticPayload.threshold_tau2 !== "number" ||
+            semanticPayload.support_p > semanticPayload.threshold_tau2))),
   );
   const semanticCandidateNoClass = semanticAboveThreshold && (finalClass == null || finalClass === "");
   const semanticInspectorActionHint = useMemo(() => {
@@ -1090,6 +1036,43 @@ export default function OfficerValidationPage() {
           : !finalClass
             ? "Правило-ориентированная классификация не назначила класс."
             : "";
+      const llmNameAtDecision = meaningfulLlmClassFromResult(result);
+      const llmMeaningfulAtDecision = isMeaningfulLlmClassName(llmNameAtDecision);
+      const expertDecisionLlmResult: Record<string, unknown> = {
+        suggested_class_name: llmNameAtDecision,
+        requires_expert_confirmation: Boolean(
+          llmNamingPayload?.requires_expert_confirmation ?? llmMeaningfulAtDecision,
+        ),
+        prompt_includes: {
+          tnved_code: form.graph33.trim(),
+          declared_price: Number(form.graph42),
+          description_excerpt: form.graph31.trim().slice(0, 1200),
+        },
+      };
+      if (llmNamingPayload?.mode != null && String(llmNamingPayload.mode).trim()) {
+        expertDecisionLlmResult.mode = String(llmNamingPayload.mode).trim();
+      }
+      const expertDecisionPayloadCommon: Record<string, unknown> = {
+        source: "officer_validation",
+        officer_input: {
+          graph31: form.graph31.trim(),
+          graph33: form.graph33.trim(),
+          graph35: Number(form.graph35),
+          graph38: Number(form.graph38),
+          graph42: Number(form.graph42),
+        },
+        gross_weight_kg: Number(form.graph35),
+        net_weight_kg: Number(form.graph38),
+        llm_result: expertDecisionLlmResult,
+        llm_naming_ran: Boolean(llmNamingPayload && llmMeaningfulAtDecision),
+        llm_naming_suggested_class: llmMeaningfulAtDecision ? llmNameAtDecision : null,
+        naming_lane: llmMeaningfulAtDecision ? "model" : undefined,
+        semantic_llm_naming_applied: llmMeaningfulAtDecision,
+        declared_price: Number(form.graph42),
+        parsed_features: parsedFeatures,
+        extracted_features_lines_ru: extractedFeatureLinesRu,
+        extracted_features_summary_ru: extractedFeatureSummaryRu,
+      };
       const created = await createExpertDecision({
         category: "officer_final_decision",
         declaration_id: declId,
@@ -1101,27 +1084,7 @@ export default function OfficerValidationPage() {
               ? `Инспектор отклонил декларацию (${declId})`
               : `Инспектор отправил декларацию в экспертизу (${declId})`,
         payload: {
-          source: "officer_validation",
-          officer_input: {
-            graph31: form.graph31.trim(),
-            graph33: form.graph33.trim(),
-            graph35: Number(form.graph35),
-            graph38: Number(form.graph38),
-            graph42: Number(form.graph42),
-          },
-          gross_weight_kg: Number(form.graph35),
-          net_weight_kg: Number(form.graph38),
-          llm_result: {
-            prompt_includes: {
-              tnved_code: form.graph33.trim(),
-              declared_price: Number(form.graph42),
-              description_excerpt: form.graph31.trim().slice(0, 1200),
-            },
-          },
-          declared_price: Number(form.graph42),
-          parsed_features: parsedFeatures,
-          extracted_features_lines_ru: extractedFeatureLinesRu,
-          extracted_features_summary_ru: extractedFeatureSummaryRu,
+          ...expertDecisionPayloadCommon,
           reason_ru: decision === "rejected" ? rejectReason?.trim() || null : null,
           final_decision: decision,
           final_decision_class: effectiveDecisionClass || null,
@@ -1157,28 +1120,12 @@ export default function OfficerValidationPage() {
             rule_id: ruleId,
             summary_ru: `Правка извлечённых признаков инспектором — на проверку эксперта (${declId})`,
             payload: {
-              source: "officer_validation",
+              ...expertDecisionPayloadCommon,
               correction_requires_expert_review: true,
               parsed_before_override: pendingFeatureCorrection.parsedBefore,
               parsed_after_override: pendingFeatureCorrection.parsedAfter,
               recorded_at: new Date().toISOString(),
               linked_officer_final_decision_id: created.id,
-              officer_input: {
-                graph31: form.graph31.trim(),
-                graph33: form.graph33.trim(),
-                graph35: Number(form.graph35),
-                graph38: Number(form.graph38),
-                graph42: Number(form.graph42),
-              },
-              llm_result: {
-                prompt_includes: {
-                  tnved_code: form.graph33.trim(),
-                  declared_price: Number(form.graph42),
-                  description_excerpt: form.graph31.trim().slice(0, 1200),
-                },
-              },
-              gross_weight_kg: Number(form.graph35),
-              net_weight_kg: Number(form.graph38),
             },
           });
           setPendingFeatureCorrection(null);
@@ -1210,27 +1157,7 @@ export default function OfficerValidationPage() {
           rule_id: ruleId,
           summary_ru: summaryRu,
           payload: {
-            source: "officer_validation",
-            officer_input: {
-              graph31: form.graph31.trim(),
-              graph33: form.graph33.trim(),
-              graph35: Number(form.graph35),
-              graph38: Number(form.graph38),
-              graph42: Number(form.graph42),
-            },
-            gross_weight_kg: Number(form.graph35),
-            net_weight_kg: Number(form.graph38),
-            llm_result: {
-              prompt_includes: {
-                tnved_code: form.graph33.trim(),
-                declared_price: Number(form.graph42),
-                description_excerpt: form.graph31.trim().slice(0, 1200),
-              },
-            },
-            declared_price: Number(form.graph42),
-            parsed_features: parsedFeatures,
-            extracted_features_lines_ru: extractedFeatureLinesRu,
-            extracted_features_summary_ru: extractedFeatureSummaryRu,
+            ...expertDecisionPayloadCommon,
             linked_officer_final_decision_id: created.id,
             auto_classification_status: autoClassificationFailed ? "failed" : "ok",
             auto_classification_failure_reason_ru: reviewReasonRu,
@@ -1242,6 +1169,32 @@ export default function OfficerValidationPage() {
             manual_class_assigned_by_officer: manualClassAssignedByOfficer ? manualApprovalClass.trim() : null,
           },
         });
+        if (llmMeaningfulAtDecision) {
+          const llmNamingExplanation =
+            typeof llmNamingPayload?.explanation_ru === "string" ? llmNamingPayload.explanation_ru.trim() : "";
+          try {
+            await createExpertDecision({
+              category: "class_name_confirmation",
+              declaration_id: declId,
+              rule_id: ruleId,
+              summary_ru: `Подтвердить имя класса, предложенное моделью (${declId})`,
+              payload: {
+                ...expertDecisionPayloadCommon,
+                linked_officer_final_decision_id: created.id,
+                linked_auto_classification_review: true,
+                llm_naming_explanation_ru: llmNamingExplanation || null,
+                auto_classification_status: autoClassificationFailed ? "failed" : "ok",
+                final_decision: decision,
+              },
+            });
+          } catch (e: unknown) {
+            setCorrectionLogError(
+              `Решение инспектора сохранено, но задачу подтверждения имени класса (LLM) создать не удалось: ${
+                e instanceof Error ? e.message : String(e)
+              }`,
+            );
+          }
+        }
       }
       setDecisionResetMessage(
         decision === "approved"
@@ -1270,13 +1223,19 @@ export default function OfficerValidationPage() {
     if (!semanticPayload) return "";
     const matched = Boolean(semanticPayload.matched);
     if (matched && semanticCandidateClassId) {
-      return "Пороговые условия выполнены: найден устойчивый класс-кандидат по семантической близости.";
+      const k =
+        typeof semanticPayload.knn_k === "number" && Number.isFinite(semanticPayload.knn_k)
+          ? Math.floor(semanticPayload.knn_k)
+          : semanticK;
+      return k > 1
+        ? "Пороговые условия выполнены: V_best > τ₁ и P(c) > τ₂. Справа — P(c)=V_best(c)·V_w(c)/(ε+Σw_j) по k соседям."
+        : "Пороговые условия выполнены: схожесть лучшего соседа выше τ₁.";
     }
     if (semanticCandidateClassId) {
-      return "Найден класс-кандидат, но пороговые условия автопринятия не выполнены.";
+      return "Найден класс-кандидат, но автопринятие не выполнено. Справа — схожесть по формуле P(c) (при k>1) или V_best (при k=1) и соответствующий порог.";
     }
     return "Устойчивый класс-кандидат по семантической проверке не найден.";
-  }, [semanticPayload, semanticCandidateClassId]);
+  }, [semanticPayload, semanticCandidateClassId, semanticK]);
   return (
     <div className="container officer-page">
       <header className="officer-hero">
@@ -1779,17 +1738,61 @@ export default function OfficerValidationPage() {
                       flex: "0 0 auto",
                       fontSize: "0.84rem",
                       color: "#92400e",
-                      whiteSpace: "nowrap",
+                      whiteSpace: "normal",
+                      textAlign: "right",
+                      maxWidth: "20rem",
                     }}
                   >
-                    Схожесть:{" "}
-                    <strong>
-                      {typeof semanticPayload.similarity === "number"
-                        ? semanticPayload.similarity.toFixed(4)
-                        : String(semanticPayload.similarity ?? "—")}
-                    </strong>
-                    {" · k="}
-                    <strong>{typeof semanticPayload.knn_k === "number" ? semanticPayload.knn_k : semanticK}</strong>
+                    {semanticUiLead ? (
+                      <>
+                        <span style={{ whiteSpace: "nowrap" }}>
+                          {semanticUiLead.knnK > 1 ? (
+                            <>
+                              P(c) = <strong>{semanticUiLead.supportP.toFixed(4)}</strong>
+                              {" · "}
+                              k = <strong>{semanticUiLead.knnK}</strong>
+                            </>
+                          ) : (
+                            <>
+                              V<sub>best</sub> = <strong>{semanticUiLead.vBest.toFixed(4)}</strong>
+                              {" · "}
+                              k = <strong>{semanticUiLead.knnK}</strong>
+                            </>
+                          )}
+                        </span>
+                        {semanticUiLead.knnK > 1 ? (
+                          <span
+                            style={{
+                              display: "block",
+                              marginTop: 4,
+                              fontSize: "0.78rem",
+                              opacity: 0.95,
+                              fontFamily: `"Cambria Math", "Times New Roman", serif`,
+                            }}
+                          >
+                            = V<sub>best</sub>(c)·V<sub>w</sub>(c) / (ε+Σw<sub>j</sub>) ={" "}
+                            {semanticUiLead.vBest.toFixed(4)}·{semanticUiLead.vw.toFixed(4)} / (
+                            {semanticUiLead.epsilon}+
+                            {semanticUiLead.sumNeighborWeights.toFixed(4)})
+                            {semanticUiLead.thresholdTau2 != null ? (
+                              <span style={{ fontFamily: "inherit" }}>
+                                {" "}
+                                · порог τ₂ = {semanticUiLead.thresholdTau2.toFixed(3)}
+                              </span>
+                            ) : null}
+                          </span>
+                        ) : semanticUiLead.thresholdTau1 != null ? (
+                          <span style={{ display: "block", marginTop: 4, fontSize: "0.78rem", opacity: 0.95 }}>
+                            Порог τ₁ = {semanticUiLead.thresholdTau1.toFixed(3)}
+                          </span>
+                        ) : null}
+                      </>
+                    ) : (
+                      <span style={{ whiteSpace: "nowrap" }}>
+                        k ={" "}
+                        <strong>{typeof semanticPayload.knn_k === "number" ? semanticPayload.knn_k : semanticK}</strong>
+                      </span>
+                    )}
                   </span>
                 </div>
                 <p style={{ margin: 0, fontSize: "0.84rem", color: "#451a03", lineHeight: 1.3 }}>

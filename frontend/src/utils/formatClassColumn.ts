@@ -1,7 +1,6 @@
 /**
  * Текст для колонки / KPI «Класс»: все потенциальные class_id через запятую.
- * Сначала явный список с бэкенда (candidate_class_ids), иначе итоговый assigned_class_id
- * (в т.ч. уже объединённый через запятую при comma_join).
+ * Сначала явный список с бэкенда (candidate_class_ids), иначе итоговый assigned_class_id.
  */
 export function formatClassColumnDisplay(
   finalClass: unknown,

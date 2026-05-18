@@ -11,8 +11,26 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import String, cast, func, or_
 from sqlalchemy.orm import Session
 
+from ..application.use_cases.expert_decisions import (
+    CreateExpertDecisionCommand,
+    CreateExpertDecisionUseCase,
+)
+from ..application.use_cases.expert_decisions_repair import RepairLlmNamingExpertQueueUseCase
+from ..application.use_cases.expert_decisions_query import (
+    ListExpertDecisionsCommand,
+    ListExpertDecisionsUseCase,
+    PatchExpertDecisionCommand,
+    PatchExpertDecisionUseCase,
+)
 from ..db.models import ExpertDecisionItem, RuleReferenceEmbedding, RuleReferenceExample, RuleVersion
 from ..db.session import get_db_session
+from ..infrastructure.http.semantic_search_client import HttpSemanticSearchClient
+from ..infrastructure.repositories.sqlalchemy_expert_decisions import SqlAlchemyExpertDecisionRepository
+from ..composition import (
+    create_expert_decision_use_case,
+    list_expert_decisions_use_case,
+    patch_expert_decisions_use_case,
+)
 from ..rules.compiler import compile_rule
 from ..rules.dsl_models import RuleDSL
 
@@ -21,6 +39,8 @@ SEMANTIC_SEARCH_URL = os.getenv("SEMANTIC_SEARCH_URL", "http://semantic-search:8
 
 
 class ExpertDecisionCreate(BaseModel):
+    """DTO создания записи в очереди экспертных решений."""
+
     category: str = Field(..., min_length=1, max_length=64)
     declaration_id: str = Field(..., min_length=1, max_length=512)
     summary_ru: str = ""
@@ -30,6 +50,8 @@ class ExpertDecisionCreate(BaseModel):
 
 
 class ExpertDecisionItemOut(BaseModel):
+    """DTO карточки экспертного решения в ответах API."""
+
     id: str
     category: str
     rule_id: Optional[str] = None
@@ -43,12 +65,16 @@ class ExpertDecisionItemOut(BaseModel):
 
 
 class ExpertDecisionPatch(BaseModel):
+    """DTO изменения статуса и резолюции экспертной задачи."""
+
     status: Literal["pending", "resolved", "dismissed"]
     resolution: Dict[str, Any] = Field(default_factory=dict)
     model_config = ConfigDict(extra="ignore")
 
 
 class ExpertDecisionListPageOut(BaseModel):
+    """Страничный ответ списка задач эксперта."""
+
     items: List[ExpertDecisionItemOut]
     total: int
     page: int
@@ -181,47 +207,13 @@ def _upsert_reference_embedding(
     ref: RuleReferenceExample,
 ) -> None:
     """Создаёт или обновляет эмбеддинг эталонного примера через semantic-search сервис."""
-    desc = (ref.description_text or "").strip()
-    if not desc:
-        return
-    try:
-        with httpx.Client(timeout=25.0) as client:
-            resp = client.post(
-                f"{SEMANTIC_SEARCH_URL}/api/v1/embed",
-                json={"texts": [desc]},
-            )
-            resp.raise_for_status()
-            data = resp.json()
-    except Exception:
-        # Ошибки внешнего сервиса не должны ломать основной сценарий сохранения решения.
-        return
-    model_name = str(data.get("embedding_model") or "").strip()
-    vectors = data.get("vectors")
-    if not model_name or not isinstance(vectors, list) or len(vectors) == 0 or not isinstance(vectors[0], list):
-        return
-    vector = vectors[0]
-    if not vector:
-        return
-    emb = (
-        db.query(RuleReferenceEmbedding)
-        .filter(RuleReferenceEmbedding.reference_example_id == ref.id)
-        .one_or_none()
+    from ..application.services.reference_embeddings import upsert_reference_embedding
+
+    upsert_reference_embedding(
+        db,
+        ref,
+        client=HttpSemanticSearchClient(SEMANTIC_SEARCH_URL, timeout=60.0),
     )
-    payload = {"vector": vector}
-    now = datetime.utcnow()
-    if emb is None:
-        emb = RuleReferenceEmbedding(
-            reference_example_id=ref.id,
-            embedding_model=model_name,
-            embedding_json=payload,
-            created_at=now,
-            updated_at=now,
-        )
-        db.add(emb)
-    else:
-        emb.embedding_model = model_name
-        emb.embedding_json = payload
-        emb.updated_at = now
 
 
 def _sync_reference_example_from_officer_decision(db: Session, row: ExpertDecisionItem) -> None:
@@ -358,43 +350,31 @@ def _reference_example_to_out(row: RuleReferenceExample) -> ExpertDecisionItemOu
     )
 
 
+@router.post("/repair-llm-naming-queue")
+def repair_llm_naming_expert_queue(db: Session = Depends(get_db_session)) -> Dict[str, Any]:
+    """Дополняет pending review задачами class_name_confirmation по данным решения инспектора."""
+    repo = SqlAlchemyExpertDecisionRepository(db)
+    stats = RepairLlmNamingExpertQueueUseCase(db, repo).execute()
+    return {"status": "ok", **stats}
+
+
 @router.post("", response_model=ExpertDecisionItemOut)
 def create_expert_decision(payload: ExpertDecisionCreate, db: Session = Depends(get_db_session)) -> ExpertDecisionItemOut:
-    """Создаёт запись очереди решения эксперта; для части категорий избегает дублей pending."""
-    category = payload.category.strip()
-    declaration_id = payload.declaration_id.strip()
-    rid: Optional[uuid.UUID] = None
-    if payload.rule_id and str(payload.rule_id).strip():
-        try:
-            rid = uuid.UUID(str(payload.rule_id).strip())
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail="Некорректный rule_id") from exc
-
-    if category in ("class_name_confirmation", "auto_classification_review"):
-        # Для одной декларации и правила держим единственную активную pending-задачу.
-        existing_q = db.query(ExpertDecisionItem).filter(
-            ExpertDecisionItem.category == category,
-            ExpertDecisionItem.declaration_id == declaration_id,
-            ExpertDecisionItem.status == "pending",
+    """Создаёт запись очереди решения эксперта через use-case слой."""
+    try:
+        use_case = create_expert_decision_use_case(db)
+        row = use_case.execute(
+            CreateExpertDecisionCommand(
+                category=payload.category,
+                declaration_id=payload.declaration_id,
+                summary_ru=payload.summary_ru or "",
+                payload=dict(payload.payload),
+                rule_id=payload.rule_id,
+            )
         )
-        if rid is not None:
-            existing_q = existing_q.filter(ExpertDecisionItem.rule_id == rid)
-        existing = existing_q.order_by(ExpertDecisionItem.created_at.desc()).first()
-        if existing is not None:
-            return _to_out(existing)
-
-    row = ExpertDecisionItem(
-        category=category,
-        rule_id=rid,
-        declaration_id=declaration_id,
-        status="pending",
-        summary_ru=(payload.summary_ru or "").strip(),
-        payload_json=dict(payload.payload),
-    )
-    db.add(row)
-    db.flush()
-    if category == "officer_final_decision":
-        _ensure_auto_classification_review_for_approved_officer_decision(db, officer_row=row)
+        db.flush()
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Некорректный rule_id") from exc
     db.commit()
     db.refresh(row)
     return _to_out(row)
@@ -416,6 +396,31 @@ def list_expert_decisions(
     db: Session = Depends(get_db_session),
 ) -> ExpertDecisionListPageOut:
     """Возвращает страницу задач эксперта с фильтрами и опциональным объединением с импортом."""
+    if (
+        not include_imported
+        and not issue_type
+        and not q
+        and not tnved_prefix
+        and has_class is None
+        and created_from is None
+        and created_to is None
+    ):
+        use_case = list_expert_decisions_use_case(db)
+        rows, total = use_case.execute(
+            ListExpertDecisionsCommand(
+                status=status,
+                category=category,
+                page=page,
+                page_size=page_size,
+            )
+        )
+        return ExpertDecisionListPageOut(
+            items=[_to_out(r) for r in rows],
+            total=total,
+            page=page,
+            page_size=page_size,
+        )
+
     query = db.query(ExpertDecisionItem)
     if status and status.strip():
         query = query.filter(ExpertDecisionItem.status == status.strip())
@@ -535,19 +540,19 @@ def patch_expert_decision(
     db: Session = Depends(get_db_session),
 ) -> ExpertDecisionItemOut:
     """Изменяет статус/резолюцию задачи эксперта и, при закрытии, синхронизирует эталон."""
+    use_case = patch_expert_decisions_use_case(db)
     try:
-        uid = uuid.UUID(item_id.strip())
+        row = use_case.execute(
+            PatchExpertDecisionCommand(
+                item_id=item_id,
+                status=body.status,
+                resolution=dict(body.resolution) if body.resolution else {},
+            )
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail="Некорректный id") from exc
-    row = db.query(ExpertDecisionItem).filter(ExpertDecisionItem.id == uid).one_or_none()
     if row is None:
         raise HTTPException(status_code=404, detail="Запись не найдена")
-    row.status = body.status
-    row.resolution_json = dict(body.resolution) if body.resolution else {}
-    if body.status == "pending":
-        row.resolved_at = None
-    else:
-        row.resolved_at = datetime.utcnow()
     if body.status in ("resolved", "dismissed"):
         # При финальном статусе переносим officer-решение в базу эталонных примеров.
         _sync_reference_example_from_officer_decision(db, row)

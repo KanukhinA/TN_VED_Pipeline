@@ -14,6 +14,16 @@ from .rules.dsl_models import normalize_tn_ved_eaeu_code_value
 PRIMARY_CATALOG_APP_KEY = "primary_catalog_by_tn_ved_group_v1"
 
 
+class PrimaryCatalogService:
+    """ООП-сервис настроек основного справочника по группам ТН ВЭД."""
+
+    def get_effective_map(self, db: Session) -> Dict[str, str]:
+        return get_effective_primary_catalog_map(db)
+
+    def validate_and_save(self, db: Session, mapping: Dict[str, Optional[str]]) -> Dict[str, Any]:
+        return validate_and_save_primary_catalog_map(db, mapping)
+
+
 def group_rule_ids_by_tn_ved(db: Session) -> Dict[str, Set[uuid.UUID]]:
     """Все неархивные справочники с активной версией и заданным meta.tn_ved_group_code, сгруппированные по коду."""
     stmt = (
@@ -34,7 +44,7 @@ def group_rule_ids_by_tn_ved(db: Session) -> Dict[str, Set[uuid.UUID]]:
 
 def get_effective_primary_catalog_map(db: Session) -> Dict[str, str]:
     """
-    Эффективное назначение для офицера и UI: для каждой группы с справочниками всегда есть rule_id.
+    Эффективное назначение для инспектора и UI: для каждой группы с справочниками всегда есть rule_id.
     Если в БД нет записи или она устарела — для группы с несколькими справочниками берётся детерминированно
     минимальный UUID (до явного сохранения экспертом).
     """

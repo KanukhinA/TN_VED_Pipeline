@@ -12,9 +12,27 @@ class ".Literal" as .Literal {
 }
 class ".Literal" as .Literal {
 }
+class "app.rules.classification.ClassificationEngine" as app.rules.classification.ClassificationEngine {
+  evaluate(data: Any, config: Optional[ClassificationConfig]) -> Tuple[bool, Optional[str], List[ClassificationError]]
+  find_first_matching(data: Any, config: Optional[ClassificationConfig]) -> Optional[ClassificationRule]
+  semantic_check(data: Any, config: Optional[ClassificationConfig], candidate_class_id: str) -> tuple[bool, Optional[str]]
+}
 class "app.rules.classification.ClassificationError" as app.rules.classification.ClassificationError {
   details : Optional[Dict[str, Any]]
   message : str
+}
+class "app.rules.classification.ConditionEvaluator" as app.rules.classification.ConditionEvaluator {
+  _description_candidates(data: Any) -> List[Any]
+  _extract_path_values(data: Any, path: str) -> List[Any]
+  _path_holds(data: Any, cond: PathClassificationCondition) -> bool
+  evaluate(data: Any, cond: ClassificationCondition) -> bool
+}
+class "app.rules.classification.RuleMatcher" as app.rules.classification.RuleMatcher {
+  _evaluator
+  __init__(evaluator: Optional[ConditionEvaluator]) -> None
+  condition_holds(data: Any, cond: ClassificationCondition) -> bool
+  rule_matches(data: Any, rule: ClassificationRule) -> bool
+  rule_matches_by_groups(data: Any, conditions: List[ClassificationCondition]) -> bool
 }
 class "app.rules.compiler.CompiledRule" as app.rules.compiler.CompiledRule {
   classification : Optional[ClassificationConfig]
@@ -40,7 +58,7 @@ class "app.rules.dsl_models.ArrayFieldSchema" as app.rules.dsl_models.ArrayField
 class "app.rules.dsl_models.AtLeastOnePresentRule" as app.rules.dsl_models.AtLeastOnePresentRule {
   min_count : int
   model_config
-  paths : List[str]
+  paths : Optional[List[str]]
   template : Literal['atLeastOnePresent']
 }
 class "app.rules.dsl_models.BaseFieldSchema" as app.rules.dsl_models.BaseFieldSchema {
@@ -52,18 +70,16 @@ class "app.rules.dsl_models.BooleanFieldSchema" as app.rules.dsl_models.BooleanF
   type : Literal['boolean']
 }
 class "app.rules.dsl_models.ClassificationConfig" as app.rules.dsl_models.ClassificationConfig {
-  ambiguous_match_resolution
   declared_class_path : Optional[str]
-  default_class_id : Optional[str]
   model_config
-  rules : List[ClassificationRule]
+  rules : Optional[List[ClassificationRule]]
   strategy
   _migrate_legacy_validate_declared(data: Any) -> Any
 }
 class "app.rules.dsl_models.ClassificationRule" as app.rules.dsl_models.ClassificationRule {
-  class_id : str
-  condition_groups : List[str]
-  conditions : List[ClassificationCondition]
+  class_id : Optional[str]
+  condition_groups : Optional[List[str]]
+  conditions : Optional[List[ClassificationCondition]]
   model_config
   priority : int
   title : Optional[str]
@@ -73,7 +89,7 @@ class "app.rules.dsl_models.ClassificationRule" as app.rules.dsl_models.Classifi
 class "app.rules.dsl_models.ComparisonCond" as app.rules.dsl_models.ComparisonCond {
   model_config
   op
-  path : str
+  path : Optional[str]
   value : Optional[Union[str, float, int, bool, List[Union[str, float, int, bool]]]]
 }
 class "app.rules.dsl_models.ComparisonOp" as app.rules.dsl_models.ComparisonOp {
@@ -101,8 +117,8 @@ class "app.rules.dsl_models.NumberFieldSchema" as app.rules.dsl_models.NumberFie
 }
 class "app.rules.dsl_models.ObjectFieldSchema" as app.rules.dsl_models.ObjectFieldSchema {
   additional_properties : bool
-  properties : List[PropertyDef]
-  required : List[str]
+  properties : Optional[List[PropertyDef]]
+  required : Optional[List[str]]
   type : Literal['object']
 }
 class "app.rules.dsl_models.PathClassificationCondition" as app.rules.dsl_models.PathClassificationCondition {
@@ -110,79 +126,81 @@ class "app.rules.dsl_models.PathClassificationCondition" as app.rules.dsl_models
   group_id : Optional[str]
   model_config
   op
-  path : str
-  primary : bool
+  path : Optional[str]
+  primary : Optional[bool]
   type : Literal['path']
   value : Optional[Union[str, float, int, bool, List[Union[str, float, int, bool]]]]
+  _normalize_description_path_alias(v: Any) -> str
+  _validate_value_for_operator() -> PathClassificationCondition
 }
 class "app.rules.dsl_models.PropertyDef" as app.rules.dsl_models.PropertyDef {
   model_config
-  name : str
+  name : Optional[str]
   schema_ : str
 }
 class "app.rules.dsl_models.RequiredIfRule" as app.rules.dsl_models.RequiredIfRule {
-  if_
+  if_ : Optional[ComparisonCond]
   model_config
   template : Literal['requiredIf']
   then : str
 }
 class "app.rules.dsl_models.RowFormulaCondition" as app.rules.dsl_models.RowFormulaCondition {
-  array_path : str
+  array_path : Optional[str]
   conjunction
-  formula : str
+  formula : Optional[str]
   group_id : Optional[str]
   model_config
-  name_field : str
+  name_field : Optional[str]
   op
-  primary : bool
-  tolerance_rel : float
+  primary : Optional[bool]
+  tolerance_rel : Optional[float]
   type : Literal['rowFormula']
   value : float
-  value_field : str
-  variables : Dict[str, str]
+  value_field : Optional[str]
+  variables : Optional[Dict[str, str]]
   _normalize_variable_map(v: Any) -> Dict[str, str]
   _validate_keys_and_formula() -> RowFormulaCondition
 }
 class "app.rules.dsl_models.RowIndicatorCondition" as app.rules.dsl_models.RowIndicatorCondition {
-  array_path : str
+  array_path : Optional[str]
   conjunction
   group_id : Optional[str]
   model_config
-  name_equals : str
-  name_field : str
+  name_equals : Optional[str]
+  name_field : Optional[str]
   op : Optional[ComparisonOpType]
-  primary : bool
+  primary : Optional[bool]
   type : Literal['rowIndicator']
   value : Optional[Union[str, float, int, bool, List[Union[str, float, int, bool]]]]
-  value_field : str
+  value_field : Optional[str]
   value_max : Optional[float]
   value_min : Optional[float]
   _row_indicator_range_or_op() -> RowIndicatorCondition
 }
 class "app.rules.dsl_models.RowPairRatioCondition" as app.rules.dsl_models.RowPairRatioCondition {
-  array_path : str
+  array_path : Optional[str]
   conjunction
   group_id : Optional[str]
-  left_name : str
+  left_name : Optional[str]
   model_config
-  name_field : str
-  primary : bool
-  ratio_left : float
-  ratio_right : float
-  right_name : str
-  tolerance_rel : float
+  name_field : Optional[str]
+  primary : Optional[bool]
+  ratio_left : Optional[float]
+  ratio_right : Optional[float]
+  right_name : Optional[str]
+  tolerance_rel : Optional[float]
   type : Literal['rowPairRatio']
-  value_field : str
+  value_field : Optional[str]
   _names_distinct() -> RowPairRatioCondition
   _normalize_pair_names(v: Any) -> str
 }
 class "app.rules.dsl_models.RuleDSL" as app.rules.dsl_models.RuleDSL {
   classification : Optional[ClassificationConfig]
-  cross_rules : List[CrossRule]
+  cross_rules : Optional[List[CrossRule]]
   meta : Optional[RuleMeta]
   model_config
-  model_id : str
-  schema_
+  model_id : Optional[str]
+  schema_ : Optional[ObjectFieldSchema]
 }
 class "app.rules.dsl_models.RuleMeta" as app.rules.dsl_models.RuleMeta {
   description : Optional[str]
@@ -210,12 +228,12 @@ class "app.rules.dsl_models.StringFieldSchema" as app.rules.dsl_models.StringFie
 class "app.rules.dsl_models.SumEqualsRule" as app.rules.dsl_models.SumEqualsRule {
   expected : float
   model_config
-  path : str
+  path : Optional[str]
   template : Literal['sumEquals']
   tolerance : float
 }
 class "app.rules.dsl_models.ThenRequired" as app.rules.dsl_models.ThenRequired {
-  required_paths : List[str]
+  required_paths : Optional[List[str]]
 }
 class "app.rules.path_utils.PathStep" as app.rules.path_utils.PathStep {
   kind : Literal['prop', 'wildcard']
@@ -234,15 +252,170 @@ class "app.rules.rule_overlap.RuleOverlapDetail" as app.rules.rule_overlap.RuleO
   simplified_analysis_note_ru : Optional[str]
   __init__(self, overlaps: bool, reason_ru: str, corridor_risk_ru: Optional[str], overlap_context_note_ru: Optional[str], simplified_analysis_note_ru: Optional[str], priority_resolution_ru: Optional[str], range_intersections_ru: list[str], adjustment_recommendations_ru: list[str], overlap_axis_summary_ru: Optional[str]) -> None
 }
+class "pydantic.config.ConfigDict" as pydantic.config.ConfigDict {
+  alias_generator : Callable[[str], str] | AliasGenerator | None
+  allow_inf_nan : bool
+  arbitrary_types_allowed : bool
+  cache_strings : bool | Literal['all', 'keys', 'none']
+  coerce_numbers_to_str : bool
+  defer_build : bool
+  extra : ExtraValues | None
+  field_title_generator : Callable[[str, FieldInfo | ComputedFieldInfo], str] | None
+  from_attributes : bool
+  frozen : bool
+  hide_input_in_errors : bool
+  ignored_types : tuple[type, ...]
+  json_encoders : dict[type[object], JsonEncoder] | None
+  json_schema_extra : JsonDict | JsonSchemaExtraCallable | None
+  json_schema_mode_override : Literal['validation', 'serialization', None]
+  json_schema_serialization_defaults_required : bool
+  loc_by_alias : bool
+  model_title_generator : Callable[[type], str] | None
+  plugin_settings : dict[str, object] | None
+  polymorphic_serialization : bool
+  populate_by_name : bool
+  protected_namespaces : tuple[str | Pattern[str], ...]
+  regex_engine : Literal['rust-regex', 'python-re']
+  revalidate_instances : Literal['always', 'never', 'subclass-instances']
+  schema_generator : type[_GenerateSchema] | None
+  ser_json_bytes : Literal['utf8', 'base64', 'hex']
+  ser_json_inf_nan : Literal['null', 'constants', 'strings']
+  ser_json_temporal : Literal['iso8601', 'seconds', 'milliseconds']
+  ser_json_timedelta : Literal['iso8601', 'float']
+  serialize_by_alias : bool
+  str_max_length : int | None
+  str_min_length : int
+  str_strip_whitespace : bool
+  str_to_lower : bool
+  str_to_upper : bool
+  strict : bool
+  title : str | None
+  url_preserve_empty_path : bool
+  use_attribute_docstrings : bool
+  use_enum_values : bool
+  val_json_bytes : Literal['utf8', 'base64', 'hex']
+  val_temporal_unit : Literal['seconds', 'milliseconds', 'infer']
+  validate_assignment : bool
+  validate_by_alias : bool
+  validate_by_name : bool
+  validate_default : bool
+  validate_return : bool
+  validation_error_cause : bool
+}
+class "pydantic.main.BaseModel" as pydantic.main.BaseModel {
+  __class_vars__ : ClassVar[set[str]]
+  __fields__ : dict[str, FieldInfo]
+  __fields_set__ : set[str]
+  __pretty__
+  __private_attributes__ : ClassVar[Dict[str, ModelPrivateAttr]]
+  __pydantic_complete__ : ClassVar[bool]
+  __pydantic_computed_fields__ : ClassVar[Dict[str, ComputedFieldInfo]]
+  __pydantic_core_schema__ : ClassVar[CoreSchema]
+  __pydantic_custom_init__ : ClassVar[bool]
+  __pydantic_decorators__ : ClassVar[_decorators.DecoratorInfos]
+  __pydantic_extra__ : Dict[str, Any] | None
+  __pydantic_extra_info__ : ClassVar[PydanticExtraInfo | None]
+  __pydantic_fields__ : ClassVar[Dict[str, FieldInfo]]
+  __pydantic_fields_set__ : set[str]
+  __pydantic_generic_metadata__ : ClassVar[_generics.PydanticGenericMetadata]
+  __pydantic_parent_namespace__ : Optional[ClassVar[Dict[str, Any] | None]]
+  __pydantic_post_init__ : ClassVar[None | Literal['model_post_init']]
+  __pydantic_private__ : Dict[str, Any] | None
+  __pydantic_root_model__ : ClassVar[bool]
+  __pydantic_serializer__ : ClassVar[SchemaSerializer]
+  __pydantic_setattr_handlers__ : ClassVar[Dict[str, Callable[[BaseModel, str, Any], None]]]
+  __pydantic_validator__ : ClassVar[SchemaValidator | PluggableSchemaValidator]
+  __repr_name__
+  __repr_recursion__
+  __repr_str__
+  __rich_repr__
+  __signature__ : ClassVar[Signature]
+  __slots__ : tuple
+  model_config : ClassVar[ConfigDict]
+  model_extra : dict[str, Any] | None
+  model_fields_set : set[str]
+  __class_getitem__(typevar_values: type[Any] | tuple[type[Any], ...]) -> type[BaseModel] | _forward_ref.PydanticRecursiveRef
+  __copy__() -> Self
+  __deepcopy__(memo: dict[int, Any] | None) -> Self
+  __delattr__(item: str) -> Any
+  __eq__(other: Any) -> bool
+  __get_pydantic_core_schema__() -> CoreSchema
+  __get_pydantic_json_schema__() -> JsonSchemaValue
+  __getattr__(item: str) -> Any
+  __getstate__() -> dict[Any, Any]
+  __init__() -> None
+  {abstract}__init_subclass__()
+  __iter__() -> TupleGenerator
+  {abstract}__pydantic_init_subclass__() -> None
+  {abstract}__pydantic_on_complete__() -> None
+  __replace__() -> Self
+  __repr__() -> str
+  __repr_args__() -> _repr.ReprArgs
+  __setattr__(name: str, value: Any) -> None
+  __setstate__(state: dict[Any, Any]) -> None
+  __str__() -> str
+  _calculate_keys() -> Any
+  _copy_and_set_values() -> Any
+  _get_value() -> Any
+  _iter() -> Any
+  _setattr_handler(name: str, value: Any) -> Callable[[BaseModel, str, Any], None] | None
+  construct(_fields_set: set[str] | None) -> Self
+  copy() -> Self
+  dict() -> Dict[str, Any]
+  from_orm(obj: Any) -> Self
+  json() -> str
+  model_computed_fields() -> dict[str, ComputedFieldInfo]
+  model_construct(_fields_set: set[str] | None) -> Self
+  model_copy() -> Self
+  model_dump() -> dict[str, Any]
+  model_dump_json() -> str
+  model_fields() -> dict[str, FieldInfo]
+  model_json_schema(by_alias: bool, ref_template: str, schema_generator: type[GenerateJsonSchema], mode: JsonSchemaMode) -> dict[str, Any]
+  model_parametrized_name(params: tuple[type[Any], ...]) -> str
+  {abstract}model_post_init() -> None
+  model_rebuild() -> bool | None
+  model_validate(obj: Any) -> Self
+  model_validate_json(json_data: str | bytes | bytearray) -> Self
+  model_validate_strings(obj: Any) -> Self
+  parse_file(path: str | Path) -> Self
+  parse_obj(obj: Any) -> Self
+  parse_raw(b: str | bytes) -> Self
+  schema(by_alias: bool, ref_template: str) -> Dict[str, Any]
+  schema_json() -> str
+  update_forward_refs() -> None
+  validate(value: Any) -> Self
+}
+class "typing_extensions.TypedDict" as typing_extensions.TypedDict {
+}
+app.rules.classification.ClassificationError --|> pydantic.main.BaseModel
+app.rules.compiler.CompiledRule --|> pydantic.main.BaseModel
+app.rules.cross_rules.CrossRuleError --|> pydantic.main.BaseModel
 app.rules.dsl_models.ArrayFieldSchema --|> app.rules.dsl_models.BaseFieldSchema
+app.rules.dsl_models.AtLeastOnePresentRule --|> pydantic.main.BaseModel
+app.rules.dsl_models.BaseFieldSchema --|> pydantic.main.BaseModel
 app.rules.dsl_models.BooleanFieldSchema --|> app.rules.dsl_models.BaseFieldSchema
+app.rules.dsl_models.ClassificationConfig --|> pydantic.main.BaseModel
+app.rules.dsl_models.ClassificationRule --|> pydantic.main.BaseModel
+app.rules.dsl_models.ComparisonCond --|> pydantic.main.BaseModel
+app.rules.dsl_models.IntegerConstraints --|> pydantic.main.BaseModel
 app.rules.dsl_models.IntegerFieldSchema --|> app.rules.dsl_models.BaseFieldSchema
+app.rules.dsl_models.NumberConstraints --|> pydantic.main.BaseModel
 app.rules.dsl_models.NumberFieldSchema --|> app.rules.dsl_models.BaseFieldSchema
 app.rules.dsl_models.ObjectFieldSchema --|> app.rules.dsl_models.BaseFieldSchema
+app.rules.dsl_models.PathClassificationCondition --|> pydantic.main.BaseModel
+app.rules.dsl_models.PropertyDef --|> pydantic.main.BaseModel
+app.rules.dsl_models.RequiredIfRule --|> pydantic.main.BaseModel
+app.rules.dsl_models.RowFormulaCondition --|> pydantic.main.BaseModel
+app.rules.dsl_models.RowIndicatorCondition --|> pydantic.main.BaseModel
+app.rules.dsl_models.RowPairRatioCondition --|> pydantic.main.BaseModel
+app.rules.dsl_models.RuleDSL --|> pydantic.main.BaseModel
+app.rules.dsl_models.RuleMeta --|> pydantic.main.BaseModel
+app.rules.dsl_models.StringConstraintsModel --|> pydantic.main.BaseModel
 app.rules.dsl_models.StringFieldSchema --|> app.rules.dsl_models.BaseFieldSchema
+app.rules.dsl_models.SumEqualsRule --|> pydantic.main.BaseModel
+app.rules.dsl_models.ThenRequired --|> pydantic.main.BaseModel
 app.rules.dsl_models.BaseFieldSchema --> .Literal : type
 app.rules.dsl_models.ClassificationConfig --> .Literal : strategy
-app.rules.dsl_models.ClassificationConfig --> .Literal : ambiguous_match_resolution
 app.rules.dsl_models.ComparisonCond --> .Literal : op
 app.rules.dsl_models.PathClassificationCondition --> .Literal : op
 app.rules.dsl_models.PathClassificationCondition --> .Literal : conjunction
@@ -250,7 +423,20 @@ app.rules.dsl_models.RowFormulaCondition --> .Literal : op
 app.rules.dsl_models.RowFormulaCondition --> .Literal : conjunction
 app.rules.dsl_models.RowIndicatorCondition --> .Literal : conjunction
 app.rules.dsl_models.RowPairRatioCondition --> .Literal : conjunction
-app.rules.dsl_models.RequiredIfRule --> app.rules.dsl_models.ComparisonCond : if_
+app.rules.classification.RuleMatcher --> app.rules.classification.ConditionEvaluator : _evaluator
 app.rules.compiler.CompiledRule --> app.rules.dsl_models.ObjectFieldSchema : root_schema
-app.rules.dsl_models.RuleDSL --> app.rules.dsl_models.ObjectFieldSchema : schema_
+pydantic.config.ConfigDict --* app.rules.dsl_models.AtLeastOnePresentRule : model_config
+pydantic.config.ConfigDict --* app.rules.dsl_models.BaseFieldSchema : model_config
+pydantic.config.ConfigDict --* app.rules.dsl_models.ClassificationConfig : model_config
+pydantic.config.ConfigDict --* app.rules.dsl_models.ClassificationRule : model_config
+pydantic.config.ConfigDict --* app.rules.dsl_models.ComparisonCond : model_config
+pydantic.config.ConfigDict --* app.rules.dsl_models.PathClassificationCondition : model_config
+pydantic.config.ConfigDict --* app.rules.dsl_models.PropertyDef : model_config
+pydantic.config.ConfigDict --* app.rules.dsl_models.RequiredIfRule : model_config
+pydantic.config.ConfigDict --* app.rules.dsl_models.RowFormulaCondition : model_config
+pydantic.config.ConfigDict --* app.rules.dsl_models.RowIndicatorCondition : model_config
+pydantic.config.ConfigDict --* app.rules.dsl_models.RowPairRatioCondition : model_config
+pydantic.config.ConfigDict --* app.rules.dsl_models.RuleDSL : model_config
+pydantic.config.ConfigDict --* app.rules.dsl_models.RuleMeta : model_config
+pydantic.config.ConfigDict --* app.rules.dsl_models.SumEqualsRule : model_config
 @enduml

@@ -6,6 +6,7 @@ import {
   saveClassNamingGenerationConfig,
   saveClassNamingPromptTemplate,
   savePipelineConfig,
+  testSemanticCleaning,
 } from "../api/client";
 import PrimaryCatalogSettingsSection from "../ui/PrimaryCatalogSettingsSection";
 
@@ -22,6 +23,21 @@ export default function SemanticFallbackSettingsPage() {
   const [classNamingStatus, setClassNamingStatus] = React.useState<string | null>(null);
   const [classNamingBusy, setClassNamingBusy] = React.useState(false);
   const [classNamingMaxNewTokens, setClassNamingMaxNewTokens] = React.useState<number>(24);
+  const [semanticCleaningPrompt, setSemanticCleaningPrompt] = React.useState("");
+  const [semanticCleaningNumCtx, setSemanticCleaningNumCtx] = React.useState<number>(8192);
+  const [semanticCleaningMaxNewTokens, setSemanticCleaningMaxNewTokens] = React.useState<number>(1024);
+  const [semanticCleaningRepetitionPenalty, setSemanticCleaningRepetitionPenalty] = React.useState<number>(1.0);
+  const [semanticCleaningTemperature, setSemanticCleaningTemperature] = React.useState<number>(0.0);
+  const [semanticCleaningTopP, setSemanticCleaningTopP] = React.useState<number>(1.0);
+  const [semanticCleaningEnableThinking, setSemanticCleaningEnableThinking] = React.useState(false);
+  const [semanticCleaningConstrainedDecoding, setSemanticCleaningConstrainedDecoding] = React.useState(true);
+  const [semanticCleaningDoSample, setSemanticCleaningDoSample] = React.useState(false);
+  const [semanticCleaningStatus, setSemanticCleaningStatus] = React.useState<string | null>(null);
+  const [semanticCleaningBusy, setSemanticCleaningBusy] = React.useState(false);
+  const [semanticCleaningTestText, setSemanticCleaningTestText] = React.useState("");
+  const [semanticCleaningTestResult, setSemanticCleaningTestResult] = React.useState("");
+  const [semanticCleaningTestDebugJson, setSemanticCleaningTestDebugJson] = React.useState("");
+  const [semanticCleaningTestBusy, setSemanticCleaningTestBusy] = React.useState(false);
 
   React.useEffect(() => {
     let cancelled = false;
@@ -43,6 +59,37 @@ export default function SemanticFallbackSettingsPage() {
         }
         if (!cancelled && typeof tau2 === "number" && Number.isFinite(tau2)) {
           setSemanticSupportTau2(tau2);
+        }
+        if (!cancelled) {
+          setSemanticCleaningPrompt(String(cfg?.effective?.semantic_cleaning_prompt ?? ""));
+          setSemanticCleaningNumCtx(
+            typeof cfg?.effective?.semantic_cleaning_num_ctx === "number" && Number.isFinite(cfg.effective.semantic_cleaning_num_ctx)
+              ? cfg.effective.semantic_cleaning_num_ctx
+              : 8192,
+          );
+          setSemanticCleaningMaxNewTokens(
+            typeof cfg?.effective?.semantic_cleaning_max_new_tokens === "number" && Number.isFinite(cfg.effective.semantic_cleaning_max_new_tokens)
+              ? cfg.effective.semantic_cleaning_max_new_tokens
+              : 1024,
+          );
+          setSemanticCleaningRepetitionPenalty(
+            typeof cfg?.effective?.semantic_cleaning_repetition_penalty === "number" && Number.isFinite(cfg.effective.semantic_cleaning_repetition_penalty)
+              ? cfg.effective.semantic_cleaning_repetition_penalty
+              : 1.0,
+          );
+          setSemanticCleaningTemperature(
+            typeof cfg?.effective?.semantic_cleaning_temperature === "number" && Number.isFinite(cfg.effective.semantic_cleaning_temperature)
+              ? cfg.effective.semantic_cleaning_temperature
+              : 0.0,
+          );
+          setSemanticCleaningTopP(
+            typeof cfg?.effective?.semantic_cleaning_top_p === "number" && Number.isFinite(cfg.effective.semantic_cleaning_top_p)
+              ? cfg.effective.semantic_cleaning_top_p
+              : 1.0,
+          );
+          setSemanticCleaningEnableThinking(Boolean(cfg?.effective?.semantic_cleaning_enable_thinking));
+          setSemanticCleaningConstrainedDecoding(Boolean(cfg?.effective?.semantic_cleaning_constrained_decoding ?? true));
+          setSemanticCleaningDoSample(Boolean(cfg?.effective?.semantic_cleaning_do_sample));
         }
       } catch {
         if (!cancelled) setStatus("Не удалось загрузить сохранённый порог.");
@@ -103,6 +150,15 @@ export default function SemanticFallbackSettingsPage() {
         semantic_neighbor_similarity_floor_s0: nextS0,
         semantic_neighbor_weight_gamma: nextGamma,
         semantic_support_threshold_tau2: nextTau2,
+        semantic_cleaning_prompt: semanticCleaningPrompt,
+        semantic_cleaning_num_ctx: semanticCleaningNumCtx,
+        semantic_cleaning_max_new_tokens: semanticCleaningMaxNewTokens,
+        semantic_cleaning_repetition_penalty: semanticCleaningRepetitionPenalty,
+        semantic_cleaning_temperature: semanticCleaningTemperature,
+        semantic_cleaning_top_p: semanticCleaningTopP,
+        semantic_cleaning_enable_thinking: semanticCleaningEnableThinking,
+        semantic_cleaning_constrained_decoding: semanticCleaningConstrainedDecoding,
+        semantic_cleaning_do_sample: semanticCleaningDoSample,
       });
       setStatus("Параметры семантической проверки сохранены.");
       window.setTimeout(() => setStatus(null), 4000);
@@ -110,6 +166,34 @@ export default function SemanticFallbackSettingsPage() {
       setStatus(e?.message ?? "Ошибка сохранения порога.");
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function onTestSemanticCleaning() {
+    const txt = String(semanticCleaningTestText || "").trim();
+    if (!txt) {
+      setSemanticCleaningStatus("Введите текст для теста чистки.");
+      return;
+    }
+    setSemanticCleaningTestBusy(true);
+    setSemanticCleaningStatus(null);
+    setSemanticCleaningTestResult("");
+    setSemanticCleaningTestDebugJson("");
+    try {
+      const res = await testSemanticCleaning(txt);
+      setSemanticCleaningTestResult(res.cleaned_text || txt);
+      if (res.debug && typeof res.debug === "object") {
+        setSemanticCleaningTestDebugJson(JSON.stringify(res.debug, null, 2));
+      }
+      setSemanticCleaningStatus(
+        res.cleaned_text
+          ? "Тест выполнен: получен очищенный текст."
+          : "LLM вернула пустой ответ — показан исходный текст (fallback).",
+      );
+    } catch (e: any) {
+      setSemanticCleaningStatus(e?.message ?? "Ошибка теста чистки.");
+    } finally {
+      setSemanticCleaningTestBusy(false);
     }
   }
 
@@ -165,14 +249,35 @@ export default function SemanticFallbackSettingsPage() {
           . Если хотя бы одно условие не выполнено, автоприсвоение класса не делается и требуется экспертная проверка.
         </p>
         <p style={{ margin: 0, color: "#64748b", lineHeight: 1.55, fontSize: 13 }}>
-          Здесь{" "}
+          Обозначения (локальное окружение из k ближайших эталонов N<sub>k</sub>(x), косинусная схожесть запроса с
+          эталоном i — s<sub>i</sub>, индикатор 1[·] равен 1 при истинном условии и 0 иначе). Суммарная взвешенная
+          поддержка класса c:{" "}
           <strong style={{ fontFamily: `"Cambria Math", "Times New Roman", serif` }}>
-            V<sub>best</sub>(c<sup>^</sup>)
-          </strong>{" "}
-          — лучшая схожесть среди соседей выбранного класса, а{" "}
-          <strong style={{ fontFamily: `"Cambria Math", "Times New Roman", serif` }}>P(c<sup>^</sup>)</strong> — доля
-          суммарного веса этого класса после отсечения слабых соседей порогом{" "}
-          <strong style={{ fontFamily: `"Cambria Math", "Times New Roman", serif` }}>s<sub>0</sub></strong>.
+            V<sub>w</sub>(c) = Σ<sub>i∈N<sub>k</sub>(x)</sub> 1[c<sub>i</sub> = c]·w<sub>i</sub>
+          </strong>
+          . Лучшая близость среди соседей класса c:{" "}
+          <strong style={{ fontFamily: `"Cambria Math", "Times New Roman", serif` }}>
+            V<sub>best</sub>(c) = max<sub>i∈N<sub>k</sub>(x), c<sub>i</sub>=c</sub> s<sub>i</sub>
+          </strong>
+          . Нормированная весовая поддержка из (31):{" "}
+          <strong style={{ fontFamily: `"Cambria Math", "Times New Roman", serif` }}>
+            P<sub>0</sub>(c) = V<sub>w</sub>(c) / (ε + Σ<sub>j∈N<sub>k</sub>(x)</sub> w<sub>j</sub>)
+          </strong>
+          . Итоговая поддержка для порога τ<sub>2</sub> (формула (30)):{" "}
+          <strong style={{ fontFamily: `"Cambria Math", "Times New Roman", serif` }}>
+            P(c) = V<sub>best</sub>(c) · V<sub>w</sub>(c) / (ε + Σ<sub>j∈N<sub>k</sub>(x)</sub> w<sub>j</sub>)
+          </strong>
+          , то же что P(c) = V<sub>best</sub>(c) · P<sub>0</sub>(c); при этом{" "}
+          <strong style={{ fontFamily: `"Cambria Math", "Times New Roman", serif` }}>
+            P(c) ≤ V<sub>best</sub>(c)
+          </strong>
+          , так как P<sub>0</sub>(c) ≤ 1. Веса w<sub>i</sub> = max(0, s<sub>i</sub> − s<sub>0</sub>)<sup>γ</sup> задаются
+          полями ниже. Класс{" "}
+          <span style={{ fontFamily: `"Cambria Math", "Times New Roman", serif` }}>c<sup>^</sup></span> выбирают по
+          наибольшему V<sub>w</sub>(c) (при равенстве — по числу соседей и V<sub>best</sub>), затем проверяют
+          V<sub>best</sub>(c<sup>^</sup>) &gt; τ<sub>1</sub> и P(c<sup>^</sup>) &gt; τ<sub>2</sub>. Порог τ<sub>2</sub>{" "}
+          настраивают отдельно от τ<sub>1</sub>; при P = V<sub>best</sub>·P<sub>0</sub> величина P не превосходит
+          V<sub>best</sub>(c<sup>^</sup>) среди соседей выбранного класса.
         </p>
         <div
           style={{
@@ -187,41 +292,19 @@ export default function SemanticFallbackSettingsPage() {
           }}
         >
           <div style={{ fontFamily: `"Cambria Math", "Times New Roman", serif` }}>
-            <strong style={{ fontFamily: "inherit" }}>Формула:</strong> match = 1, если V<sub>best</sub>(c<sup>^</sup>)
-            &gt; τ<sub>1</sub> и P(c<sup>^</sup>) &gt; τ<sub>2</sub>; иначе match = 0.
+            <strong style={{ fontFamily: "inherit" }}>Формула принятия решения:</strong> match = 1, если V
+            <sub>best</sub>(c<sup>^</sup>) &gt; τ<sub>1</sub> и P(c<sup>^</sup>) &gt; τ<sub>2</sub>; иначе match = 0.
           </div>
           <div style={{ marginTop: 6 }}>
             <strong>Интерпретация параметров.</strong>{" "}
             <span style={{ fontFamily: `"Cambria Math", "Times New Roman", serif` }}>τ<sub>1</sub></span> — нижняя
-            граница косинусной близости лучшего эталона среди соседей, претендующих на класс{" "}
-            <span style={{ fontFamily: `"Cambria Math", "Times New Roman", serif` }}>
-              c<sup>^</sup>
-            </span>
-            : рост τ<sub>1</sub> ужесточает критерий и снижает долю автоматически принимаемых решений, снижение τ<sub>1</sub>{" "}
-            делает допуск более мягким.{" "}
-            <span style={{ fontFamily: `"Cambria Math", "Times New Roman", serif` }}>s<sub>0</sub></span> — порог
-            отсечения по схожести: соседи с{" "}
-            <span style={{ fontFamily: `"Cambria Math", "Times New Roman", serif` }}>s ≤ s<sub>0</sub></span> не
-            участвуют в голосовании; при больших s<sub>0</sub> вносят вклад только наиболее близкие к запросу эталоны (весовая
-            поддержка классов сужается), при малых s<sub>0</sub> в голосовании участвует больше соседей со средней близостью.
-            Ненулевой вес соседа задаётся выражением{" "}
-            <span style={{ fontFamily: `"Cambria Math", "Times New Roman", serif` }}>
-              w = max(0, s - s<sub>0</sub>)<sup>γ</sup>
-            </span>
-            , где{" "}
-            <span style={{ fontFamily: `"Cambria Math", "Times New Roman", serif` }}>γ ≥ 1</span>: при{" "}
-            <span style={{ fontFamily: `"Cambria Math", "Times New Roman", serif` }}>γ = 1</span> вес линейно зависит от
-            отступа схожести над порогом — как во взвешенных схемах голосования по фиксированному числу ближайших соседей
-            при монотонном убывании веса с уменьшением близости к запросу; рост γ усиливает
-            преимущество соседей с максимальной схожестью и ослабляет влияние множества умеренно близких эталонов.{" "}
-            <span style={{ fontFamily: `"Cambria Math", "Times New Roman", serif` }}>τ<sub>2</sub></span> — минимальная
-            нормированная доля суммарного веса класса{" "}
-            <span style={{ fontFamily: `"Cambria Math", "Times New Roman", serif` }}>
-              P(c<sup>^</sup>)
-            </span>{" "}
-            среди соседей, участвующих в голосовании; увеличение τ<sub>2</sub> требует более выраженного консенсуса по классу и отсекает случаи
-            размытого распределения весов, уменьшение τ<sub>2</sub> допускает решение при более равномерном распределении
-            голосов между классами.
+            граница для лучшей косинусной близости V<sub>best</sub> среди соседей выбранного класса.{" "}
+            <span style={{ fontFamily: `"Cambria Math", "Times New Roman", serif` }}>τ<sub>2</sub></span> — нижняя
+            граница для P = V<sub>best</sub>·P<sub>0</sub>: при росте τ<sub>2</sub> требуется и высокая лучшая
+            близость по классу (через множитель V<sub>best</sub>), и большая доля веса P<sub>0</sub> у победившего
+            класса в окне (сильнее штраф за «размытие» между классами).
+            Параметры s<sub>0</sub> и γ задают вид весов w; при больших s<sub>0</sub> в голосовании остаются только более
+            близкие к запросу эталоны.
           </div>
         </div>
 
@@ -308,6 +391,106 @@ export default function SemanticFallbackSettingsPage() {
         ) : null}
       </div>
     </div>
+      <div className="card" style={{ padding: 0, overflow: "hidden" }}>
+        <div style={{ padding: "16px 18px", display: "grid", gap: 12 }}>
+          <h2 style={{ margin: 0, fontSize: 17, fontWeight: 700, color: "#0f172a" }}>
+            LLM-чистка описания перед векторизацией
+          </h2>
+          <p style={{ margin: 0, color: "#334155", lineHeight: 1.5, fontSize: 14 }}>
+            Этап применяется перед семантическим поиском: из исходного текста остаются только наименование товара, технические характеристики и количественно-качественный состав.
+          </p>
+          <p style={{ margin: 0, color: "#64748b", lineHeight: 1.45, fontSize: 13 }}>
+            Для чистки используется та же основная модель, что и в извлечении признаков.
+          </p>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 12 }}>
+            <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <span style={{ fontWeight: 600 }}>num_ctx</span>
+              <input type="number" min={256} value={semanticCleaningNumCtx} onChange={(e) => setSemanticCleaningNumCtx(Number(e.target.value))} style={{ width: 110, padding: "6px 8px", borderRadius: 6, border: "1px solid #cbd5e1" }} />
+            </label>
+            <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <span style={{ fontWeight: 600 }}>max_new_tokens</span>
+              <input type="number" min={32} value={semanticCleaningMaxNewTokens} onChange={(e) => setSemanticCleaningMaxNewTokens(Number(e.target.value))} style={{ width: 110, padding: "6px 8px", borderRadius: 6, border: "1px solid #cbd5e1" }} />
+            </label>
+            <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <span style={{ fontWeight: 600 }}>repetition_penalty</span>
+              <input type="number" min={0.5} max={2} step={0.05} value={semanticCleaningRepetitionPenalty} onChange={(e) => setSemanticCleaningRepetitionPenalty(Number(e.target.value))} style={{ width: 110, padding: "6px 8px", borderRadius: 6, border: "1px solid #cbd5e1" }} />
+            </label>
+            <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <span style={{ fontWeight: 600 }}>temperature</span>
+              <input type="number" min={0} max={2} step={0.05} value={semanticCleaningTemperature} onChange={(e) => setSemanticCleaningTemperature(Number(e.target.value))} style={{ width: 110, padding: "6px 8px", borderRadius: 6, border: "1px solid #cbd5e1" }} />
+            </label>
+            <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <span style={{ fontWeight: 600 }}>top_p</span>
+              <input type="number" min={0} max={1} step={0.01} value={semanticCleaningTopP} onChange={(e) => setSemanticCleaningTopP(Number(e.target.value))} style={{ width: 110, padding: "6px 8px", borderRadius: 6, border: "1px solid #cbd5e1" }} />
+            </label>
+          </div>
+          <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
+            <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <input type="checkbox" checked={semanticCleaningEnableThinking} onChange={(e) => setSemanticCleaningEnableThinking(e.target.checked)} />
+              enable_thinking
+            </label>
+            <label
+              style={{ display: "flex", alignItems: "center", gap: 8, cursor: "help" }}
+              title='Включено: в промпт добавляется блок с JSON (ключ answer) и в Ollama уходит format (JSON Schema). Запрос к Ollama идёт через /api/chat (корректное отключение «мышления» у Qwen3). Выключено: свободный текст, без format.'
+            >
+              <input type="checkbox" checked={semanticCleaningConstrainedDecoding} onChange={(e) => setSemanticCleaningConstrainedDecoding(e.target.checked)} />
+              constrained_decoding
+            </label>
+            <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <input type="checkbox" checked={semanticCleaningDoSample} onChange={(e) => setSemanticCleaningDoSample(e.target.checked)} />
+              do_sample
+            </label>
+          </div>
+          <textarea
+            className="fe-textarea-code"
+            value={semanticCleaningPrompt}
+            onChange={(e) => setSemanticCleaningPrompt(e.target.value)}
+            spellCheck={false}
+            style={{ minHeight: 180, border: "1px solid #cbd5e1", borderRadius: 8, padding: "10px 12px", fontSize: 12 }}
+          />
+          <p style={{ margin: 0, color: "#64748b", lineHeight: 1.45, fontSize: 12 }}>
+            Можно явно указать место вставки исходного текста через <code>{"{исходный_текст}"}</code> (или{" "}
+            <code>{"{source_text}"}</code>). Если плейсхолдер не указан, текст добавляется в конец автоматически.
+          </p>
+          <div style={{ display: "grid", gap: 8 }}>
+            <label style={{ fontWeight: 600 }}>Тест чистки: исходный текст</label>
+            <textarea
+              value={semanticCleaningTestText}
+              onChange={(e) => setSemanticCleaningTestText(e.target.value)}
+              spellCheck={false}
+              style={{ minHeight: 120, border: "1px solid #cbd5e1", borderRadius: 8, padding: "8px 10px" }}
+            />
+            <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+              <button type="button" className="btn-secondary" disabled={semanticCleaningTestBusy || semanticCleaningBusy} onClick={() => void onTestSemanticCleaning()}>
+                {semanticCleaningTestBusy ? "Тест..." : "Запустить тест чистки"}
+              </button>
+              <button type="button" className="btn" disabled={busy || semanticCleaningBusy} onClick={() => void onSave()}>
+                {busy ? "Сохранение..." : "Сохранить настройки семантики и чистки"}
+              </button>
+            </div>
+            <label style={{ fontWeight: 600 }}>Результат чистки</label>
+            <textarea value={semanticCleaningTestResult} readOnly style={{ minHeight: 120, border: "1px solid #cbd5e1", borderRadius: 8, padding: "8px 10px", background: "#f8fafc" }} />
+            {semanticCleaningTestDebugJson ? (
+              <details style={{ border: "1px solid #e2e8f0", borderRadius: 8, background: "#fff", padding: "8px 10px" }}>
+                <summary style={{ cursor: "pointer", fontWeight: 600, color: "#334155" }}>
+                  Технический результат (что отправлено и что получено)
+                </summary>
+                <textarea
+                  value={semanticCleaningTestDebugJson}
+                  readOnly
+                  className="fe-textarea-code"
+                  style={{ marginTop: 8, minHeight: 220, border: "1px solid #cbd5e1", borderRadius: 8, padding: "8px 10px", background: "#f8fafc" }}
+                />
+              </details>
+            ) : null}
+            {semanticCleaningStatus ? (
+              <div style={{ color: semanticCleaningStatus.includes("Ошибка") || semanticCleaningStatus.includes("Не удалось") ? "#b91c1c" : "#166534", fontWeight: 600, fontSize: 14 }}>
+                {semanticCleaningStatus}
+              </div>
+            ) : null}
+          </div>
+        </div>
+      </div>
       <div className="card" style={{ padding: 0, overflow: "hidden" }}>
         <div style={{ padding: "16px 18px", display: "grid", gap: 12 }}>
           <h2 style={{ margin: 0, fontSize: 17, fontWeight: 700, color: "#0f172a" }}>

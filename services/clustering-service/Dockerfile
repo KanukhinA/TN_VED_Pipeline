@@ -7,8 +7,11 @@ ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONPATH=/app
 
+COPY services/requirements.base.txt /tmp/requirements.base.txt
 COPY services/clustering-service/requirements.txt /tmp/requirements.txt
-RUN PIP_CONFIG_FILE=/dev/null PIP_REQUIRE_HASHES=0 pip install --no-cache-dir --upgrade pip && PIP_CONFIG_FILE=/dev/null PIP_REQUIRE_HASHES=0 pip install --no-cache-dir -r /tmp/requirements.txt
+RUN PIP_CONFIG_FILE=/dev/null PIP_REQUIRE_HASHES=0 pip install --no-cache-dir --upgrade pip \
+    && PIP_CONFIG_FILE=/dev/null PIP_REQUIRE_HASHES=0 pip install --no-cache-dir \
+        -r /tmp/requirements.base.txt -r /tmp/requirements.txt
 
 COPY services/clustering-service/app /app/app
 

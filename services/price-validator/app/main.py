@@ -19,6 +19,8 @@ def _round2(v: float) -> float:
 
 
 class PriceValidationRequest(BaseModel):
+    """Входные данные для проверки заявленной стоимости декларации."""
+
     declaration_id: str
     description: str
     class_id: str | None = None
@@ -35,7 +37,7 @@ def health() -> dict[str, str]:
 @app.post("/api/v1/price/validate")
 def validate_price(payload: PriceValidationRequest) -> dict[str, object]:
     declared = float(payload.declared_price or 0.0)
-    # Для оценки используем нетто, иначе брутто, иначе fallback.
+    # Для оценки используем массу нетто, иначе брутто, иначе запасное значение.
     mass_kg = (
         float(payload.net_weight_kg)
         if payload.net_weight_kg is not None and payload.net_weight_kg > 0

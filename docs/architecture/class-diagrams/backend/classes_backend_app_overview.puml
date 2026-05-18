@@ -13,10 +13,10 @@ class ".Literal" as .Literal {
 class ".Literal" as .Literal {
 }
 class "app.api.routes_expert_decisions.ExpertDecisionCreate" as app.api.routes_expert_decisions.ExpertDecisionCreate {
-  category : str
-  declaration_id : str
+  category : Optional[str]
+  declaration_id : Optional[str]
   model_config
-  payload : Dict[str, Any]
+  payload : Optional[Dict[str, Any]]
   rule_id : Optional[str]
   summary_ru : str
 }
@@ -40,21 +40,24 @@ class "app.api.routes_expert_decisions.ExpertDecisionListPageOut" as app.api.rou
 }
 class "app.api.routes_expert_decisions.ExpertDecisionPatch" as app.api.routes_expert_decisions.ExpertDecisionPatch {
   model_config
-  resolution : Dict[str, Any]
+  resolution : Optional[Dict[str, Any]]
   status : Literal['pending', 'resolved', 'dismissed']
 }
 class "app.api.routes_feature_extraction_settings.FewShotAssistRunCreate" as app.api.routes_feature_extraction_settings.FewShotAssistRunCreate {
   model_config
-  result : Dict[str, Any]
+  result : Optional[Dict[str, Any]]
   rule_id : str
 }
 class "app.api.routes_feature_extraction_settings.ModelRuntimeSettingsPayload" as app.api.routes_feature_extraction_settings.ModelRuntimeSettingsPayload {
   model_config
-  models : dict[str, dict[str, Any]]
+  models : Optional[dict[str, dict[str, Any]]]
 }
 class "app.api.routes_feature_extraction_settings.PrimaryCatalogSettingsPayload" as app.api.routes_feature_extraction_settings.PrimaryCatalogSettingsPayload {
-  by_group_code : dict[str, Optional[str]]
+  by_group_code : Optional[dict[str, Optional[str]]]
   model_config
+}
+class "app.api.routes_officer_pipeline.LocalOfficerPipelineRunner" as app.api.routes_officer_pipeline.LocalOfficerPipelineRunner {
+  run(payload: OfficerRunRequest, db: Session) -> Dict[str, Any]
 }
 class "app.api.routes_officer_pipeline.OfficerRunRequest" as app.api.routes_officer_pipeline.OfficerRunRequest {
   declaration_id : str
@@ -68,78 +71,15 @@ class "app.api.routes_officer_pipeline.OfficerRunRequest" as app.api.routes_offi
 class "app.api.routes_officer_pipeline.SemanticClassConsistencyRequest" as app.api.routes_officer_pipeline.SemanticClassConsistencyRequest {
   class_id : str
   rule_id : str
-  validated_features : Dict[str, Any]
-}
-class "app.api.routes_rules.CloneRuleRequest" as app.api.routes_rules.CloneRuleRequest {
-  model_id : Optional[str]
-  name : Optional[str]
-}
-class "app.api.routes_rules.CreateRuleResponse" as app.api.routes_rules.CreateRuleResponse {
-  created_at : datetime
-  dsl : Dict[str, Any]
-  rule_id : UUID
-  version : int
+  validated_features : Optional[Dict[str, Any]]
 }
 class "app.api.routes_rules.DSLSchemaResponse" as app.api.routes_rules.DSLSchemaResponse {
   model_config : dict
-  schema_ : Dict[str, Any]
+  schema_ : Optional[Dict[str, Any]]
 }
 class "app.api.routes_rules.ExampleResponse" as app.api.routes_rules.ExampleResponse {
   dsl : Dict[str, Any]
   example_data : Any
-}
-class "app.api.routes_rules.ReferenceExampleBulkIn" as app.api.routes_rules.ReferenceExampleBulkIn {
-  items : list[ReferenceExampleBulkItem]
-}
-class "app.api.routes_rules.ReferenceExampleBulkItem" as app.api.routes_rules.ReferenceExampleBulkItem {
-  assigned_class_id : Optional[str]
-  data : Any
-  description_text : str
-}
-class "app.api.routes_rules.ReferenceExampleBulkOut" as app.api.routes_rules.ReferenceExampleBulkOut {
-  inserted : int
-  skipped : list[dict[str, Any]]
-}
-class "app.api.routes_rules.RuleConflictItem" as app.api.routes_rules.RuleConflictItem {
-  adjustment_recommendations_ru : list[str]
-  ambiguous_example : Optional[Dict[str, Any]]
-  ambiguous_example_note_ru : Optional[str]
-  corridor_risk_ru : Optional[str]
-  left_class_id : str
-  left_rule_index : int
-  left_title : Optional[str]
-  overlap_axis_summary_ru : Optional[str]
-  overlap_columns : list[RuleOverlapColumnItem]
-  overlap_context_note_ru : Optional[str]
-  priority_resolution_ru : Optional[str]
-  range_intersections_ru : list[str]
-  reason_ru : str
-  right_class_id : str
-  right_rule_index : int
-  right_title : Optional[str]
-  rule_class_ids : list[str]
-  rule_indices : list[int]
-  rule_titles : list[Optional[str]]
-  simplified_analysis_note_ru : Optional[str]
-}
-class "app.api.routes_rules.RuleConflictsResponse" as app.api.routes_rules.RuleConflictsResponse {
-  conflicts : list[RuleConflictItem]
-  has_conflicts : bool
-}
-class "app.api.routes_rules.RuleListItem" as app.api.routes_rules.RuleListItem {
-  created_at : datetime
-  description : Optional[str]
-  is_archived : bool
-  model_id : str
-  name : Optional[str]
-  rule_id : UUID
-  tn_ved_group_code : Optional[str]
-  version : int
-}
-class "app.api.routes_rules.RuleOverlapColumnItem" as app.api.routes_rules.RuleOverlapColumnItem {
-  constraints_compact_ru : str
-  label_ru : str
-  rule_index : int
 }
 class "app.api.routes_rules.TemplateDetailsResponse" as app.api.routes_rules.TemplateDetailsResponse {
   description : str
@@ -153,14 +93,246 @@ class "app.api.routes_rules.TemplateListItem" as app.api.routes_rules.TemplateLi
   template_id : str
   title : str
 }
-class "app.api.routes_rules.ValidateRequest" as app.api.routes_rules.ValidateRequest {
+class "app.application.dto.rules_catalog.CloneRuleRequest" as app.application.dto.rules_catalog.CloneRuleRequest {
+  model_id : Optional[str]
+  name : Optional[str]
+}
+class "app.application.dto.rules_catalog.CreateRuleResponse" as app.application.dto.rules_catalog.CreateRuleResponse {
+  created_at : datetime
+  dsl : Dict[str, Any]
+  rule_id : UUID
+  version : int
+}
+class "app.application.dto.rules_catalog.ReferenceExampleBulkIn" as app.application.dto.rules_catalog.ReferenceExampleBulkIn {
+  items : Optional[list[ReferenceExampleBulkItem]]
+}
+class "app.application.dto.rules_catalog.ReferenceExampleBulkItem" as app.application.dto.rules_catalog.ReferenceExampleBulkItem {
+  assigned_class_id : Optional[str]
+  data : Any
+  description_text : str
+}
+class "app.application.dto.rules_catalog.ReferenceExampleBulkOut" as app.application.dto.rules_catalog.ReferenceExampleBulkOut {
+  inserted : int
+  skipped : list[dict[str, Any]]
+}
+class "app.application.dto.rules_catalog.RuleConflictItem" as app.application.dto.rules_catalog.RuleConflictItem {
+  adjustment_recommendations_ru : Optional[list[str]]
+  ambiguous_example : Optional[Dict[str, Any]]
+  ambiguous_example_note_ru : Optional[str]
+  corridor_risk_ru : Optional[str]
+  left_class_id : str
+  left_rule_index : int
+  left_title : Optional[str]
+  overlap_axis_summary_ru : Optional[str]
+  overlap_columns : Optional[list[RuleOverlapColumnItem]]
+  overlap_context_note_ru : Optional[str]
+  priority_resolution_ru : Optional[str]
+  range_intersections_ru : Optional[list[str]]
+  reason_ru : str
+  right_class_id : str
+  right_rule_index : int
+  right_title : Optional[str]
+  rule_class_ids : Optional[list[str]]
+  rule_indices : Optional[list[int]]
+  rule_titles : Optional[list[Optional[str]]]
+  simplified_analysis_note_ru : Optional[str]
+}
+class "app.application.dto.rules_catalog.RuleConflictsResponse" as app.application.dto.rules_catalog.RuleConflictsResponse {
+  conflicts : Optional[list[RuleConflictItem]]
+  has_conflicts : bool
+}
+class "app.application.dto.rules_catalog.RuleListItem" as app.application.dto.rules_catalog.RuleListItem {
+  created_at : datetime
+  description : Optional[str]
+  is_archived : bool
+  model_id : str
+  name : Optional[str]
+  rule_id : UUID
+  tn_ved_group_code : Optional[str]
+  version : int
+}
+class "app.application.dto.rules_catalog.RuleOverlapColumnItem" as app.application.dto.rules_catalog.RuleOverlapColumnItem {
+  constraints_compact_ru : Optional[str]
+  label_ru : Optional[str]
+  rule_index : int
+}
+class "app.application.dto.rules_catalog.ValidateRequest" as app.application.dto.rules_catalog.ValidateRequest {
   data : Any
 }
-class "app.api.routes_rules.ValidateResponse" as app.api.routes_rules.ValidateResponse {
+class "app.application.dto.rules_catalog.ValidateResponse" as app.application.dto.rules_catalog.ValidateResponse {
   assigned_class : Optional[str]
   errors : list[Any]
   ok : bool
   validated_data : Optional[Dict[str, Any]]
+}
+class "app.application.ports.external_services.SemanticSearchPort" as app.application.ports.external_services.SemanticSearchPort {
+  embed_texts(texts: List[str]) -> Dict[str, Any]
+}
+class "app.application.ports.repositories.AppSettingsRepositoryPort" as app.application.ports.repositories.AppSettingsRepositoryPort {
+  get_json(key: str) -> Optional[dict[str, Any]]
+  upsert_json(key: str, value: dict[str, Any]) -> None
+}
+class "app.application.ports.repositories.ExpertDecisionRepositoryPort" as app.application.ports.repositories.ExpertDecisionRepositoryPort {
+  add(row: ExpertDecisionItem) -> None
+  find_pending_by_category() -> Optional[ExpertDecisionItem]
+  get(item_id: uuid.UUID) -> Optional[ExpertDecisionItem]
+  list_page() -> tuple[list[ExpertDecisionItem], int]
+}
+class "app.application.ports.repositories.RuleCatalogRepositoryPort" as app.application.ports.repositories.RuleCatalogRepositoryPort {
+  add(entity: Any) -> None
+  delete(entity: Any) -> None
+  flush() -> None
+  get_active_rule_version(rule_id: uuid.UUID) -> Optional[Any]
+  get_reference_example(rule_id: uuid.UUID, example_id: uuid.UUID) -> Optional[Any]
+  get_rule(rule_id: uuid.UUID) -> Optional[Any]
+  latest_rule_version(rule_id: uuid.UUID) -> Optional[Any]
+  list_active_versions_for_rule(rule_id: uuid.UUID) -> list[Any]
+  list_catalog_with_active_version() -> list[tuple[Any, Any]]
+  list_embeddings_for_example_ids(ids: list[Any]) -> list[Any]
+  list_reference_examples_ordered(rule_id: uuid.UUID) -> list[Any]
+  model_id_exists(model_id: str) -> bool
+  reference_example_normalized_descriptions(rule_id: uuid.UUID) -> set[str]
+}
+class "app.application.use_cases.expert_decisions.CreateExpertDecisionCommand" as app.application.use_cases.expert_decisions.CreateExpertDecisionCommand {
+  category : str
+  declaration_id : str
+  payload : Dict[str, Any]
+  rule_id : Optional[str]
+  summary_ru : str
+  __init__(self, category: str, declaration_id: str, summary_ru: str, payload: Dict[str, Any], rule_id: Optional[str]) -> None
+}
+class "app.application.use_cases.expert_decisions.CreateExpertDecisionUseCase" as app.application.use_cases.expert_decisions.CreateExpertDecisionUseCase {
+  _repo
+  __init__(repo: ExpertDecisionRepositoryPort) -> None
+  _ensure_auto_review_for_approved_officer_decision(row: ExpertDecisionItem) -> None
+  _is_auto_classification_failed(payload: Dict[str, Any]) -> bool
+  _parse_rule_id(raw: Optional[str]) -> Optional[uuid.UUID]
+  execute(cmd: CreateExpertDecisionCommand) -> ExpertDecisionItem
+}
+class "app.application.use_cases.expert_decisions_query.ListExpertDecisionsCommand" as app.application.use_cases.expert_decisions_query.ListExpertDecisionsCommand {
+  category : Optional[str]
+  page : int
+  page_size : int
+  status : Optional[str]
+  __init__(self, status: Optional[str], category: Optional[str], page: int, page_size: int) -> None
+}
+class "app.application.use_cases.expert_decisions_query.ListExpertDecisionsUseCase" as app.application.use_cases.expert_decisions_query.ListExpertDecisionsUseCase {
+  _repo
+  __init__(repo: ExpertDecisionRepositoryPort) -> None
+  execute(cmd: ListExpertDecisionsCommand) -> tuple[list[ExpertDecisionItem], int]
+}
+class "app.application.use_cases.expert_decisions_query.PatchExpertDecisionCommand" as app.application.use_cases.expert_decisions_query.PatchExpertDecisionCommand {
+  item_id : str
+  resolution : dict[str, Any]
+  status : str
+  __init__(self, item_id: str, status: str, resolution: dict[str, Any]) -> None
+}
+class "app.application.use_cases.expert_decisions_query.PatchExpertDecisionUseCase" as app.application.use_cases.expert_decisions_query.PatchExpertDecisionUseCase {
+  _repo
+  __init__(repo: ExpertDecisionRepositoryPort) -> None
+  execute(cmd: PatchExpertDecisionCommand) -> Optional[ExpertDecisionItem]
+}
+class "app.application.use_cases.feature_extraction_settings.GetFeatureExtractionSettingsUseCase" as app.application.use_cases.feature_extraction_settings.GetFeatureExtractionSettingsUseCase {
+  defaults_provider : Callable[[], dict[str, Any]]
+  repo
+  settings_key : str
+  __init__(self, repo: AppSettingsRepositoryPort, settings_key: str, defaults_provider: Callable[[], dict[str, Any]]) -> None
+  execute() -> dict[str, Any]
+}
+class "app.application.use_cases.feature_extraction_settings.PutFeatureExtractionSettingsUseCase" as app.application.use_cases.feature_extraction_settings.PutFeatureExtractionSettingsUseCase {
+  repo
+  settings_key : str
+  __init__(self, repo: AppSettingsRepositoryPort, settings_key: str) -> None
+  execute(payload: dict[str, Any]) -> dict[str, Any]
+}
+class "app.application.use_cases.officer_pipeline.OfficerPipelineRunnerPort" as app.application.use_cases.officer_pipeline.OfficerPipelineRunnerPort {
+  run(payload: Any, db: Session) -> Dict[str, Any]
+}
+class "app.application.use_cases.officer_pipeline.ValidateOfficerDeclarationUseCase" as app.application.use_cases.officer_pipeline.ValidateOfficerDeclarationUseCase {
+  runner
+  __init__(self, runner: OfficerPipelineRunnerPort) -> None
+  execute(payload: Any, db: Session) -> Dict[str, Any]
+}
+class "app.application.use_cases.rules_catalog.GetRuleWithActiveVersionCommand" as app.application.use_cases.rules_catalog.GetRuleWithActiveVersionCommand {
+  rule_id : UUID
+  __init__(self, rule_id: uuid.UUID) -> None
+}
+class "app.application.use_cases.rules_catalog.GetRuleWithActiveVersionUseCase" as app.application.use_cases.rules_catalog.GetRuleWithActiveVersionUseCase {
+  _repo
+  __init__(repo: RuleCatalogRepositoryPort) -> None
+  execute(cmd: GetRuleWithActiveVersionCommand) -> tuple[Any, Any]
+}
+class "app.application.use_cases.rules_catalog.ValidateRuleCommand" as app.application.use_cases.rules_catalog.ValidateRuleCommand {
+  data : Any
+  rule_id : UUID
+  __init__(self, rule_id: uuid.UUID, data: Any) -> None
+}
+class "app.application.use_cases.rules_catalog.ValidateRuleUseCase" as app.application.use_cases.rules_catalog.ValidateRuleUseCase {
+  _compiler : Any
+  _repo
+  __init__(repo: RuleCatalogRepositoryPort, compiler: Any) -> None
+  execute(cmd: ValidateRuleCommand) -> tuple[bool, list[Any], Any, str | None]
+}
+class "app.application.use_cases.rules_catalog_operations.ArchiveRuleUseCase" as app.application.use_cases.rules_catalog_operations.ArchiveRuleUseCase {
+  _repo
+  __init__(repo: RuleCatalogRepositoryPort) -> None
+  execute(rule_id: uuid.UUID) -> dict[str, bool]
+}
+class "app.application.use_cases.rules_catalog_operations.BulkReferenceExamplesUseCase" as app.application.use_cases.rules_catalog_operations.BulkReferenceExamplesUseCase {
+  _repo
+  __init__(repo: RuleCatalogRepositoryPort) -> None
+  execute(rule_id: uuid.UUID, body: ReferenceExampleBulkIn) -> ReferenceExampleBulkOut
+}
+class "app.application.use_cases.rules_catalog_operations.CloneRuleUseCase" as app.application.use_cases.rules_catalog_operations.CloneRuleUseCase {
+  _repo
+  __init__(repo: RuleCatalogRepositoryPort) -> None
+  execute(rule_id: uuid.UUID, req: CloneRuleRequest) -> CreateRuleResponse
+}
+class "app.application.use_cases.rules_catalog_operations.CreateRuleUseCase" as app.application.use_cases.rules_catalog_operations.CreateRuleUseCase {
+  _repo
+  __init__(repo: RuleCatalogRepositoryPort) -> None
+  execute(dsl_in: Dict[str, Any]) -> CreateRuleResponse
+}
+class "app.application.use_cases.rules_catalog_operations.DeleteReferenceExampleUseCase" as app.application.use_cases.rules_catalog_operations.DeleteReferenceExampleUseCase {
+  _repo
+  __init__(repo: RuleCatalogRepositoryPort) -> None
+  execute(rule_id: uuid.UUID, example_id: uuid.UUID) -> dict[str, str]
+}
+class "app.application.use_cases.rules_catalog_operations.DeleteRuleUseCase" as app.application.use_cases.rules_catalog_operations.DeleteRuleUseCase {
+  _repo
+  __init__(repo: RuleCatalogRepositoryPort) -> None
+  execute(rule_id: uuid.UUID) -> dict[str, bool]
+}
+class "app.application.use_cases.rules_catalog_operations.GetClassificationConflictsUseCase" as app.application.use_cases.rules_catalog_operations.GetClassificationConflictsUseCase {
+  _repo
+  __init__(repo: RuleCatalogRepositoryPort) -> None
+  execute(rule_id: uuid.UUID) -> RuleConflictsResponse
+}
+class "app.application.use_cases.rules_catalog_operations.GetSemanticThresholdUseCase" as app.application.use_cases.rules_catalog_operations.GetSemanticThresholdUseCase {
+  _global_default
+  _repo
+  __init__(repo: RuleCatalogRepositoryPort) -> None
+  execute(rule_id: uuid.UUID) -> Dict[str, Any]
+}
+class "app.application.use_cases.rules_catalog_operations.ListReferenceExamplesUseCase" as app.application.use_cases.rules_catalog_operations.ListReferenceExamplesUseCase {
+  _repo
+  __init__(repo: RuleCatalogRepositoryPort) -> None
+  execute(rule_id: uuid.UUID) -> Dict[str, Any]
+}
+class "app.application.use_cases.rules_catalog_operations.ListRulesUseCase" as app.application.use_cases.rules_catalog_operations.ListRulesUseCase {
+  _repo
+  __init__(repo: RuleCatalogRepositoryPort) -> None
+  execute() -> list[RuleListItem]
+}
+class "app.application.use_cases.rules_catalog_operations.UnarchiveRuleUseCase" as app.application.use_cases.rules_catalog_operations.UnarchiveRuleUseCase {
+  _repo
+  __init__(repo: RuleCatalogRepositoryPort) -> None
+  execute(rule_id: uuid.UUID) -> dict[str, bool]
+}
+class "app.application.use_cases.rules_catalog_operations.UpdateRuleUseCase" as app.application.use_cases.rules_catalog_operations.UpdateRuleUseCase {
+  _repo
+  __init__(repo: RuleCatalogRepositoryPort) -> None
+  execute(rule_id: uuid.UUID, dsl_in: Dict[str, Any]) -> CreateRuleResponse
 }
 class "app.db.base.Base" as app.db.base.Base {
 }
@@ -242,6 +414,43 @@ class "app.db.models.RuleVersion" as app.db.models.RuleVersion {
   rule_id : Mapped[uuid.UUID]
   version : Mapped[int]
 }
+class "app.infrastructure.http.semantic_search_client.HttpSemanticSearchClient" as app.infrastructure.http.semantic_search_client.HttpSemanticSearchClient {
+  base_url
+  timeout : float
+  __init__(base_url: str, timeout: float) -> None
+  embed_texts(texts: List[str]) -> Dict[str, Any]
+}
+class "app.infrastructure.repositories.sqlalchemy_app_settings.SqlAlchemyAppSettingsRepository" as app.infrastructure.repositories.sqlalchemy_app_settings.SqlAlchemyAppSettingsRepository {
+  db
+  __init__(db: Session) -> None
+  get_json(key: str) -> Optional[dict[str, Any]]
+  upsert_json(key: str, value: dict[str, Any]) -> None
+}
+class "app.infrastructure.repositories.sqlalchemy_expert_decisions.SqlAlchemyExpertDecisionRepository" as app.infrastructure.repositories.sqlalchemy_expert_decisions.SqlAlchemyExpertDecisionRepository {
+  db
+  __init__(db: Session) -> None
+  add(row: ExpertDecisionItem) -> None
+  find_pending_by_category() -> Optional[ExpertDecisionItem]
+  get(item_id: uuid.UUID) -> Optional[ExpertDecisionItem]
+  list_page() -> tuple[list[ExpertDecisionItem], int]
+}
+class "app.infrastructure.repositories.sqlalchemy_rule_catalog.SqlAlchemyRuleCatalogRepository" as app.infrastructure.repositories.sqlalchemy_rule_catalog.SqlAlchemyRuleCatalogRepository {
+  db
+  __init__(db: Session) -> None
+  add(entity: Any) -> None
+  delete(entity: Any) -> None
+  flush() -> None
+  get_active_rule_version(rule_id: uuid.UUID) -> Optional[RuleVersion]
+  get_reference_example(rule_id: uuid.UUID, example_id: uuid.UUID) -> Optional[RuleReferenceExample]
+  get_rule(rule_id: uuid.UUID) -> Optional[Rule]
+  latest_rule_version(rule_id: uuid.UUID) -> Optional[RuleVersion]
+  list_active_versions_for_rule(rule_id: uuid.UUID) -> list[RuleVersion]
+  list_catalog_with_active_version() -> list[tuple[Rule, RuleVersion]]
+  list_embeddings_for_example_ids(ids: list[uuid.UUID]) -> list[RuleReferenceEmbedding]
+  list_reference_examples_ordered(rule_id: uuid.UUID) -> list[RuleReferenceExample]
+  model_id_exists(model_id: str) -> bool
+  reference_example_normalized_descriptions(rule_id: uuid.UUID) -> set[str]
+}
 class "app.main.ClassifyStubRequest" as app.main.ClassifyStubRequest {
   description : str
   features : dict[str, object] | None
@@ -258,9 +467,36 @@ class "app.pipeline.validator.CompiledRuleCacheKey" as app.pipeline.validator.Co
   version : int
   __init__(self, rule_id: uuid.UUID, rule_version_id: uuid.UUID, version: int) -> None
 }
+class "app.pipeline.validator.RuleValidationService" as app.pipeline.validator.RuleValidationService {
+  _cache
+  __init__(cache: Optional[CompiledRuleCache]) -> None
+  validate_with_rule(rule_id: uuid.UUID, data: Any, db: Session) -> Tuple[bool, list[Any], Optional[dict[str, Any]], Optional[str]]
+}
+class "app.primary_catalog_settings.PrimaryCatalogService" as app.primary_catalog_settings.PrimaryCatalogService {
+  get_effective_map(db: Session) -> Dict[str, str]
+  validate_and_save(db: Session, mapping: Dict[str, Optional[str]]) -> Dict[str, Any]
+}
+class "app.rules.classification.ClassificationEngine" as app.rules.classification.ClassificationEngine {
+  evaluate(data: Any, config: Optional[ClassificationConfig]) -> Tuple[bool, Optional[str], List[ClassificationError]]
+  find_first_matching(data: Any, config: Optional[ClassificationConfig]) -> Optional[ClassificationRule]
+  semantic_check(data: Any, config: Optional[ClassificationConfig], candidate_class_id: str) -> tuple[bool, Optional[str]]
+}
 class "app.rules.classification.ClassificationError" as app.rules.classification.ClassificationError {
   details : Optional[Dict[str, Any]]
   message : str
+}
+class "app.rules.classification.ConditionEvaluator" as app.rules.classification.ConditionEvaluator {
+  _description_candidates(data: Any) -> List[Any]
+  _extract_path_values(data: Any, path: str) -> List[Any]
+  _path_holds(data: Any, cond: PathClassificationCondition) -> bool
+  evaluate(data: Any, cond: ClassificationCondition) -> bool
+}
+class "app.rules.classification.RuleMatcher" as app.rules.classification.RuleMatcher {
+  _evaluator
+  __init__(evaluator: Optional[ConditionEvaluator]) -> None
+  condition_holds(data: Any, cond: ClassificationCondition) -> bool
+  rule_matches(data: Any, rule: ClassificationRule) -> bool
+  rule_matches_by_groups(data: Any, conditions: List[ClassificationCondition]) -> bool
 }
 class "app.rules.compiler.CompiledRule" as app.rules.compiler.CompiledRule {
   classification : Optional[ClassificationConfig]
@@ -286,7 +522,7 @@ class "app.rules.dsl_models.ArrayFieldSchema" as app.rules.dsl_models.ArrayField
 class "app.rules.dsl_models.AtLeastOnePresentRule" as app.rules.dsl_models.AtLeastOnePresentRule {
   min_count : int
   model_config
-  paths : List[str]
+  paths : Optional[List[str]]
   template : Literal['atLeastOnePresent']
 }
 class "app.rules.dsl_models.BaseFieldSchema" as app.rules.dsl_models.BaseFieldSchema {
@@ -298,18 +534,16 @@ class "app.rules.dsl_models.BooleanFieldSchema" as app.rules.dsl_models.BooleanF
   type : Literal['boolean']
 }
 class "app.rules.dsl_models.ClassificationConfig" as app.rules.dsl_models.ClassificationConfig {
-  ambiguous_match_resolution
   declared_class_path : Optional[str]
-  default_class_id : Optional[str]
   model_config
-  rules : List[ClassificationRule]
+  rules : Optional[List[ClassificationRule]]
   strategy
   _migrate_legacy_validate_declared(data: Any) -> Any
 }
 class "app.rules.dsl_models.ClassificationRule" as app.rules.dsl_models.ClassificationRule {
-  class_id : str
-  condition_groups : List[str]
-  conditions : List[ClassificationCondition]
+  class_id : Optional[str]
+  condition_groups : Optional[List[str]]
+  conditions : Optional[List[ClassificationCondition]]
   model_config
   priority : int
   title : Optional[str]
@@ -319,7 +553,7 @@ class "app.rules.dsl_models.ClassificationRule" as app.rules.dsl_models.Classifi
 class "app.rules.dsl_models.ComparisonCond" as app.rules.dsl_models.ComparisonCond {
   model_config
   op
-  path : str
+  path : Optional[str]
   value : Optional[Union[str, float, int, bool, List[Union[str, float, int, bool]]]]
 }
 class "app.rules.dsl_models.ComparisonOp" as app.rules.dsl_models.ComparisonOp {
@@ -347,8 +581,8 @@ class "app.rules.dsl_models.NumberFieldSchema" as app.rules.dsl_models.NumberFie
 }
 class "app.rules.dsl_models.ObjectFieldSchema" as app.rules.dsl_models.ObjectFieldSchema {
   additional_properties : bool
-  properties : List[PropertyDef]
-  required : List[str]
+  properties : Optional[List[PropertyDef]]
+  required : Optional[List[str]]
   type : Literal['object']
 }
 class "app.rules.dsl_models.PathClassificationCondition" as app.rules.dsl_models.PathClassificationCondition {
@@ -356,79 +590,81 @@ class "app.rules.dsl_models.PathClassificationCondition" as app.rules.dsl_models
   group_id : Optional[str]
   model_config
   op
-  path : str
-  primary : bool
+  path : Optional[str]
+  primary : Optional[bool]
   type : Literal['path']
   value : Optional[Union[str, float, int, bool, List[Union[str, float, int, bool]]]]
+  _normalize_description_path_alias(v: Any) -> str
+  _validate_value_for_operator() -> PathClassificationCondition
 }
 class "app.rules.dsl_models.PropertyDef" as app.rules.dsl_models.PropertyDef {
   model_config
-  name : str
+  name : Optional[str]
   schema_ : str
 }
 class "app.rules.dsl_models.RequiredIfRule" as app.rules.dsl_models.RequiredIfRule {
-  if_
+  if_ : Optional[ComparisonCond]
   model_config
   template : Literal['requiredIf']
   then : str
 }
 class "app.rules.dsl_models.RowFormulaCondition" as app.rules.dsl_models.RowFormulaCondition {
-  array_path : str
+  array_path : Optional[str]
   conjunction
-  formula : str
+  formula : Optional[str]
   group_id : Optional[str]
   model_config
-  name_field : str
+  name_field : Optional[str]
   op
-  primary : bool
-  tolerance_rel : float
+  primary : Optional[bool]
+  tolerance_rel : Optional[float]
   type : Literal['rowFormula']
   value : float
-  value_field : str
-  variables : Dict[str, str]
+  value_field : Optional[str]
+  variables : Optional[Dict[str, str]]
   _normalize_variable_map(v: Any) -> Dict[str, str]
   _validate_keys_and_formula() -> RowFormulaCondition
 }
 class "app.rules.dsl_models.RowIndicatorCondition" as app.rules.dsl_models.RowIndicatorCondition {
-  array_path : str
+  array_path : Optional[str]
   conjunction
   group_id : Optional[str]
   model_config
-  name_equals : str
-  name_field : str
+  name_equals : Optional[str]
+  name_field : Optional[str]
   op : Optional[ComparisonOpType]
-  primary : bool
+  primary : Optional[bool]
   type : Literal['rowIndicator']
   value : Optional[Union[str, float, int, bool, List[Union[str, float, int, bool]]]]
-  value_field : str
+  value_field : Optional[str]
   value_max : Optional[float]
   value_min : Optional[float]
   _row_indicator_range_or_op() -> RowIndicatorCondition
 }
 class "app.rules.dsl_models.RowPairRatioCondition" as app.rules.dsl_models.RowPairRatioCondition {
-  array_path : str
+  array_path : Optional[str]
   conjunction
   group_id : Optional[str]
-  left_name : str
+  left_name : Optional[str]
   model_config
-  name_field : str
-  primary : bool
-  ratio_left : float
-  ratio_right : float
-  right_name : str
-  tolerance_rel : float
+  name_field : Optional[str]
+  primary : Optional[bool]
+  ratio_left : Optional[float]
+  ratio_right : Optional[float]
+  right_name : Optional[str]
+  tolerance_rel : Optional[float]
   type : Literal['rowPairRatio']
-  value_field : str
+  value_field : Optional[str]
   _names_distinct() -> RowPairRatioCondition
   _normalize_pair_names(v: Any) -> str
 }
 class "app.rules.dsl_models.RuleDSL" as app.rules.dsl_models.RuleDSL {
   classification : Optional[ClassificationConfig]
-  cross_rules : List[CrossRule]
+  cross_rules : Optional[List[CrossRule]]
   meta : Optional[RuleMeta]
   model_config
-  model_id : str
-  schema_
+  model_id : Optional[str]
+  schema_ : Optional[ObjectFieldSchema]
 }
 class "app.rules.dsl_models.RuleMeta" as app.rules.dsl_models.RuleMeta {
   description : Optional[str]
@@ -456,12 +692,12 @@ class "app.rules.dsl_models.StringFieldSchema" as app.rules.dsl_models.StringFie
 class "app.rules.dsl_models.SumEqualsRule" as app.rules.dsl_models.SumEqualsRule {
   expected : float
   model_config
-  path : str
+  path : Optional[str]
   template : Literal['sumEquals']
   tolerance : float
 }
 class "app.rules.dsl_models.ThenRequired" as app.rules.dsl_models.ThenRequired {
-  required_paths : List[str]
+  required_paths : Optional[List[str]]
 }
 class "app.rules.path_utils.PathStep" as app.rules.path_utils.PathStep {
   kind : Literal['prop', 'wildcard']
@@ -480,6 +716,166 @@ class "app.rules.rule_overlap.RuleOverlapDetail" as app.rules.rule_overlap.RuleO
   simplified_analysis_note_ru : Optional[str]
   __init__(self, overlaps: bool, reason_ru: str, corridor_risk_ru: Optional[str], overlap_context_note_ru: Optional[str], simplified_analysis_note_ru: Optional[str], priority_resolution_ru: Optional[str], range_intersections_ru: list[str], adjustment_recommendations_ru: list[str], overlap_axis_summary_ru: Optional[str]) -> None
 }
+class "pydantic.config.ConfigDict" as pydantic.config.ConfigDict {
+  alias_generator : Callable[[str], str] | AliasGenerator | None
+  allow_inf_nan : bool
+  arbitrary_types_allowed : bool
+  cache_strings : bool | Literal['all', 'keys', 'none']
+  coerce_numbers_to_str : bool
+  defer_build : bool
+  extra : ExtraValues | None
+  field_title_generator : Callable[[str, FieldInfo | ComputedFieldInfo], str] | None
+  from_attributes : bool
+  frozen : bool
+  hide_input_in_errors : bool
+  ignored_types : tuple[type, ...]
+  json_encoders : dict[type[object], JsonEncoder] | None
+  json_schema_extra : JsonDict | JsonSchemaExtraCallable | None
+  json_schema_mode_override : Literal['validation', 'serialization', None]
+  json_schema_serialization_defaults_required : bool
+  loc_by_alias : bool
+  model_title_generator : Callable[[type], str] | None
+  plugin_settings : dict[str, object] | None
+  polymorphic_serialization : bool
+  populate_by_name : bool
+  protected_namespaces : tuple[str | Pattern[str], ...]
+  regex_engine : Literal['rust-regex', 'python-re']
+  revalidate_instances : Literal['always', 'never', 'subclass-instances']
+  schema_generator : type[_GenerateSchema] | None
+  ser_json_bytes : Literal['utf8', 'base64', 'hex']
+  ser_json_inf_nan : Literal['null', 'constants', 'strings']
+  ser_json_temporal : Literal['iso8601', 'seconds', 'milliseconds']
+  ser_json_timedelta : Literal['iso8601', 'float']
+  serialize_by_alias : bool
+  str_max_length : int | None
+  str_min_length : int
+  str_strip_whitespace : bool
+  str_to_lower : bool
+  str_to_upper : bool
+  strict : bool
+  title : str | None
+  url_preserve_empty_path : bool
+  use_attribute_docstrings : bool
+  use_enum_values : bool
+  val_json_bytes : Literal['utf8', 'base64', 'hex']
+  val_temporal_unit : Literal['seconds', 'milliseconds', 'infer']
+  validate_assignment : bool
+  validate_by_alias : bool
+  validate_by_name : bool
+  validate_default : bool
+  validate_return : bool
+  validation_error_cause : bool
+}
+class "pydantic.main.BaseModel" as pydantic.main.BaseModel {
+  __class_vars__ : ClassVar[set[str]]
+  __fields__ : dict[str, FieldInfo]
+  __fields_set__ : set[str]
+  __pretty__
+  __private_attributes__ : ClassVar[Dict[str, ModelPrivateAttr]]
+  __pydantic_complete__ : ClassVar[bool]
+  __pydantic_computed_fields__ : ClassVar[Dict[str, ComputedFieldInfo]]
+  __pydantic_core_schema__ : ClassVar[CoreSchema]
+  __pydantic_custom_init__ : ClassVar[bool]
+  __pydantic_decorators__ : ClassVar[_decorators.DecoratorInfos]
+  __pydantic_extra__ : Dict[str, Any] | None
+  __pydantic_extra_info__ : ClassVar[PydanticExtraInfo | None]
+  __pydantic_fields__ : ClassVar[Dict[str, FieldInfo]]
+  __pydantic_fields_set__ : set[str]
+  __pydantic_generic_metadata__ : ClassVar[_generics.PydanticGenericMetadata]
+  __pydantic_parent_namespace__ : Optional[ClassVar[Dict[str, Any] | None]]
+  __pydantic_post_init__ : ClassVar[None | Literal['model_post_init']]
+  __pydantic_private__ : Dict[str, Any] | None
+  __pydantic_root_model__ : ClassVar[bool]
+  __pydantic_serializer__ : ClassVar[SchemaSerializer]
+  __pydantic_setattr_handlers__ : ClassVar[Dict[str, Callable[[BaseModel, str, Any], None]]]
+  __pydantic_validator__ : ClassVar[SchemaValidator | PluggableSchemaValidator]
+  __repr_name__
+  __repr_recursion__
+  __repr_str__
+  __rich_repr__
+  __signature__ : ClassVar[Signature]
+  __slots__ : tuple
+  model_config : ClassVar[ConfigDict]
+  model_extra : dict[str, Any] | None
+  model_fields_set : set[str]
+  __class_getitem__(typevar_values: type[Any] | tuple[type[Any], ...]) -> type[BaseModel] | _forward_ref.PydanticRecursiveRef
+  __copy__() -> Self
+  __deepcopy__(memo: dict[int, Any] | None) -> Self
+  __delattr__(item: str) -> Any
+  __eq__(other: Any) -> bool
+  __get_pydantic_core_schema__() -> CoreSchema
+  __get_pydantic_json_schema__() -> JsonSchemaValue
+  __getattr__(item: str) -> Any
+  __getstate__() -> dict[Any, Any]
+  __init__() -> None
+  {abstract}__init_subclass__()
+  __iter__() -> TupleGenerator
+  {abstract}__pydantic_init_subclass__() -> None
+  {abstract}__pydantic_on_complete__() -> None
+  __replace__() -> Self
+  __repr__() -> str
+  __repr_args__() -> _repr.ReprArgs
+  __setattr__(name: str, value: Any) -> None
+  __setstate__(state: dict[Any, Any]) -> None
+  __str__() -> str
+  _calculate_keys() -> Any
+  _copy_and_set_values() -> Any
+  _get_value() -> Any
+  _iter() -> Any
+  _setattr_handler(name: str, value: Any) -> Callable[[BaseModel, str, Any], None] | None
+  construct(_fields_set: set[str] | None) -> Self
+  copy() -> Self
+  dict() -> Dict[str, Any]
+  from_orm(obj: Any) -> Self
+  json() -> str
+  model_computed_fields() -> dict[str, ComputedFieldInfo]
+  model_construct(_fields_set: set[str] | None) -> Self
+  model_copy() -> Self
+  model_dump() -> dict[str, Any]
+  model_dump_json() -> str
+  model_fields() -> dict[str, FieldInfo]
+  model_json_schema(by_alias: bool, ref_template: str, schema_generator: type[GenerateJsonSchema], mode: JsonSchemaMode) -> dict[str, Any]
+  model_parametrized_name(params: tuple[type[Any], ...]) -> str
+  {abstract}model_post_init() -> None
+  model_rebuild() -> bool | None
+  model_validate(obj: Any) -> Self
+  model_validate_json(json_data: str | bytes | bytearray) -> Self
+  model_validate_strings(obj: Any) -> Self
+  parse_file(path: str | Path) -> Self
+  parse_obj(obj: Any) -> Self
+  parse_raw(b: str | bytes) -> Self
+  schema(by_alias: bool, ref_template: str) -> Dict[str, Any]
+  schema_json() -> str
+  update_forward_refs() -> None
+  validate(value: Any) -> Self
+}
+class "typing_extensions.TypedDict" as typing_extensions.TypedDict {
+}
+app.api.routes_expert_decisions.ExpertDecisionCreate --|> pydantic.main.BaseModel
+app.api.routes_expert_decisions.ExpertDecisionItemOut --|> pydantic.main.BaseModel
+app.api.routes_expert_decisions.ExpertDecisionListPageOut --|> pydantic.main.BaseModel
+app.api.routes_expert_decisions.ExpertDecisionPatch --|> pydantic.main.BaseModel
+app.api.routes_feature_extraction_settings.FewShotAssistRunCreate --|> pydantic.main.BaseModel
+app.api.routes_feature_extraction_settings.ModelRuntimeSettingsPayload --|> pydantic.main.BaseModel
+app.api.routes_feature_extraction_settings.PrimaryCatalogSettingsPayload --|> pydantic.main.BaseModel
+app.api.routes_officer_pipeline.LocalOfficerPipelineRunner --|> app.application.use_cases.officer_pipeline.OfficerPipelineRunnerPort
+app.api.routes_officer_pipeline.OfficerRunRequest --|> pydantic.main.BaseModel
+app.api.routes_officer_pipeline.SemanticClassConsistencyRequest --|> pydantic.main.BaseModel
+app.api.routes_rules.DSLSchemaResponse --|> pydantic.main.BaseModel
+app.api.routes_rules.ExampleResponse --|> pydantic.main.BaseModel
+app.api.routes_rules.TemplateDetailsResponse --|> pydantic.main.BaseModel
+app.api.routes_rules.TemplateListItem --|> pydantic.main.BaseModel
+app.application.dto.rules_catalog.CloneRuleRequest --|> pydantic.main.BaseModel
+app.application.dto.rules_catalog.CreateRuleResponse --|> pydantic.main.BaseModel
+app.application.dto.rules_catalog.ReferenceExampleBulkIn --|> pydantic.main.BaseModel
+app.application.dto.rules_catalog.ReferenceExampleBulkItem --|> pydantic.main.BaseModel
+app.application.dto.rules_catalog.ReferenceExampleBulkOut --|> pydantic.main.BaseModel
+app.application.dto.rules_catalog.RuleConflictItem --|> pydantic.main.BaseModel
+app.application.dto.rules_catalog.RuleConflictsResponse --|> pydantic.main.BaseModel
+app.application.dto.rules_catalog.RuleListItem --|> pydantic.main.BaseModel
+app.application.dto.rules_catalog.RuleOverlapColumnItem --|> pydantic.main.BaseModel
+app.application.dto.rules_catalog.ValidateRequest --|> pydantic.main.BaseModel
+app.application.dto.rules_catalog.ValidateResponse --|> pydantic.main.BaseModel
 app.db.models.AppSetting --|> app.db.base.Base
 app.db.models.ExpertDecisionItem --|> app.db.base.Base
 app.db.models.FewShotAssistRun --|> app.db.base.Base
@@ -487,15 +883,36 @@ app.db.models.Rule --|> app.db.base.Base
 app.db.models.RuleReferenceEmbedding --|> app.db.base.Base
 app.db.models.RuleReferenceExample --|> app.db.base.Base
 app.db.models.RuleVersion --|> app.db.base.Base
+app.main.ClassifyStubRequest --|> pydantic.main.BaseModel
+app.rules.classification.ClassificationError --|> pydantic.main.BaseModel
+app.rules.compiler.CompiledRule --|> pydantic.main.BaseModel
+app.rules.cross_rules.CrossRuleError --|> pydantic.main.BaseModel
 app.rules.dsl_models.ArrayFieldSchema --|> app.rules.dsl_models.BaseFieldSchema
+app.rules.dsl_models.AtLeastOnePresentRule --|> pydantic.main.BaseModel
+app.rules.dsl_models.BaseFieldSchema --|> pydantic.main.BaseModel
 app.rules.dsl_models.BooleanFieldSchema --|> app.rules.dsl_models.BaseFieldSchema
+app.rules.dsl_models.ClassificationConfig --|> pydantic.main.BaseModel
+app.rules.dsl_models.ClassificationRule --|> pydantic.main.BaseModel
+app.rules.dsl_models.ComparisonCond --|> pydantic.main.BaseModel
+app.rules.dsl_models.IntegerConstraints --|> pydantic.main.BaseModel
 app.rules.dsl_models.IntegerFieldSchema --|> app.rules.dsl_models.BaseFieldSchema
+app.rules.dsl_models.NumberConstraints --|> pydantic.main.BaseModel
 app.rules.dsl_models.NumberFieldSchema --|> app.rules.dsl_models.BaseFieldSchema
 app.rules.dsl_models.ObjectFieldSchema --|> app.rules.dsl_models.BaseFieldSchema
+app.rules.dsl_models.PathClassificationCondition --|> pydantic.main.BaseModel
+app.rules.dsl_models.PropertyDef --|> pydantic.main.BaseModel
+app.rules.dsl_models.RequiredIfRule --|> pydantic.main.BaseModel
+app.rules.dsl_models.RowFormulaCondition --|> pydantic.main.BaseModel
+app.rules.dsl_models.RowIndicatorCondition --|> pydantic.main.BaseModel
+app.rules.dsl_models.RowPairRatioCondition --|> pydantic.main.BaseModel
+app.rules.dsl_models.RuleDSL --|> pydantic.main.BaseModel
+app.rules.dsl_models.RuleMeta --|> pydantic.main.BaseModel
+app.rules.dsl_models.StringConstraintsModel --|> pydantic.main.BaseModel
 app.rules.dsl_models.StringFieldSchema --|> app.rules.dsl_models.BaseFieldSchema
+app.rules.dsl_models.SumEqualsRule --|> pydantic.main.BaseModel
+app.rules.dsl_models.ThenRequired --|> pydantic.main.BaseModel
 app.rules.dsl_models.BaseFieldSchema --> .Literal : type
 app.rules.dsl_models.ClassificationConfig --> .Literal : strategy
-app.rules.dsl_models.ClassificationConfig --> .Literal : ambiguous_match_resolution
 app.rules.dsl_models.ComparisonCond --> .Literal : op
 app.rules.dsl_models.PathClassificationCondition --> .Literal : op
 app.rules.dsl_models.PathClassificationCondition --> .Literal : conjunction
@@ -503,8 +920,47 @@ app.rules.dsl_models.RowFormulaCondition --> .Literal : op
 app.rules.dsl_models.RowFormulaCondition --> .Literal : conjunction
 app.rules.dsl_models.RowIndicatorCondition --> .Literal : conjunction
 app.rules.dsl_models.RowPairRatioCondition --> .Literal : conjunction
+app.application.use_cases.feature_extraction_settings.GetFeatureExtractionSettingsUseCase --> app.application.ports.repositories.AppSettingsRepositoryPort : repo
+app.application.use_cases.feature_extraction_settings.PutFeatureExtractionSettingsUseCase --> app.application.ports.repositories.AppSettingsRepositoryPort : repo
+app.application.use_cases.officer_pipeline.ValidateOfficerDeclarationUseCase --> app.application.use_cases.officer_pipeline.OfficerPipelineRunnerPort : runner
+app.pipeline.validator.RuleValidationService --> app.pipeline.validator.CompiledRuleCache : _cache
 app.pipeline.validator.CompiledRuleCache --> app.pipeline.validator.CompiledRuleCacheKey : _cache
-app.rules.dsl_models.RequiredIfRule --> app.rules.dsl_models.ComparisonCond : if_
+app.rules.classification.RuleMatcher --> app.rules.classification.ConditionEvaluator : _evaluator
 app.rules.compiler.CompiledRule --> app.rules.dsl_models.ObjectFieldSchema : root_schema
-app.rules.dsl_models.RuleDSL --> app.rules.dsl_models.ObjectFieldSchema : schema_
+pydantic.config.ConfigDict --* app.api.routes_expert_decisions.ExpertDecisionCreate : model_config
+pydantic.config.ConfigDict --* app.api.routes_expert_decisions.ExpertDecisionPatch : model_config
+pydantic.config.ConfigDict --* app.api.routes_feature_extraction_settings.FewShotAssistRunCreate : model_config
+pydantic.config.ConfigDict --* app.api.routes_feature_extraction_settings.ModelRuntimeSettingsPayload : model_config
+pydantic.config.ConfigDict --* app.api.routes_feature_extraction_settings.PrimaryCatalogSettingsPayload : model_config
+pydantic.config.ConfigDict --* app.rules.dsl_models.AtLeastOnePresentRule : model_config
+pydantic.config.ConfigDict --* app.rules.dsl_models.BaseFieldSchema : model_config
+pydantic.config.ConfigDict --* app.rules.dsl_models.ClassificationConfig : model_config
+pydantic.config.ConfigDict --* app.rules.dsl_models.ClassificationRule : model_config
+pydantic.config.ConfigDict --* app.rules.dsl_models.ComparisonCond : model_config
+pydantic.config.ConfigDict --* app.rules.dsl_models.PathClassificationCondition : model_config
+pydantic.config.ConfigDict --* app.rules.dsl_models.PropertyDef : model_config
+pydantic.config.ConfigDict --* app.rules.dsl_models.RequiredIfRule : model_config
+pydantic.config.ConfigDict --* app.rules.dsl_models.RowFormulaCondition : model_config
+pydantic.config.ConfigDict --* app.rules.dsl_models.RowIndicatorCondition : model_config
+pydantic.config.ConfigDict --* app.rules.dsl_models.RowPairRatioCondition : model_config
+pydantic.config.ConfigDict --* app.rules.dsl_models.RuleDSL : model_config
+pydantic.config.ConfigDict --* app.rules.dsl_models.RuleMeta : model_config
+pydantic.config.ConfigDict --* app.rules.dsl_models.SumEqualsRule : model_config
+app.application.ports.repositories.ExpertDecisionRepositoryPort --o app.application.use_cases.expert_decisions.CreateExpertDecisionUseCase : _repo
+app.application.ports.repositories.ExpertDecisionRepositoryPort --o app.application.use_cases.expert_decisions_query.ListExpertDecisionsUseCase : _repo
+app.application.ports.repositories.ExpertDecisionRepositoryPort --o app.application.use_cases.expert_decisions_query.PatchExpertDecisionUseCase : _repo
+app.application.ports.repositories.RuleCatalogRepositoryPort --o app.application.use_cases.rules_catalog.GetRuleWithActiveVersionUseCase : _repo
+app.application.ports.repositories.RuleCatalogRepositoryPort --o app.application.use_cases.rules_catalog.ValidateRuleUseCase : _repo
+app.application.ports.repositories.RuleCatalogRepositoryPort --o app.application.use_cases.rules_catalog_operations.ArchiveRuleUseCase : _repo
+app.application.ports.repositories.RuleCatalogRepositoryPort --o app.application.use_cases.rules_catalog_operations.BulkReferenceExamplesUseCase : _repo
+app.application.ports.repositories.RuleCatalogRepositoryPort --o app.application.use_cases.rules_catalog_operations.CloneRuleUseCase : _repo
+app.application.ports.repositories.RuleCatalogRepositoryPort --o app.application.use_cases.rules_catalog_operations.CreateRuleUseCase : _repo
+app.application.ports.repositories.RuleCatalogRepositoryPort --o app.application.use_cases.rules_catalog_operations.DeleteReferenceExampleUseCase : _repo
+app.application.ports.repositories.RuleCatalogRepositoryPort --o app.application.use_cases.rules_catalog_operations.DeleteRuleUseCase : _repo
+app.application.ports.repositories.RuleCatalogRepositoryPort --o app.application.use_cases.rules_catalog_operations.GetClassificationConflictsUseCase : _repo
+app.application.ports.repositories.RuleCatalogRepositoryPort --o app.application.use_cases.rules_catalog_operations.GetSemanticThresholdUseCase : _repo
+app.application.ports.repositories.RuleCatalogRepositoryPort --o app.application.use_cases.rules_catalog_operations.ListReferenceExamplesUseCase : _repo
+app.application.ports.repositories.RuleCatalogRepositoryPort --o app.application.use_cases.rules_catalog_operations.ListRulesUseCase : _repo
+app.application.ports.repositories.RuleCatalogRepositoryPort --o app.application.use_cases.rules_catalog_operations.UnarchiveRuleUseCase : _repo
+app.application.ports.repositories.RuleCatalogRepositoryPort --o app.application.use_cases.rules_catalog_operations.UpdateRuleUseCase : _repo
 @enduml

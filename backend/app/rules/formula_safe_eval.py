@@ -35,6 +35,7 @@ def eval_numeric_formula(formula: str, variables: Dict[str, float]) -> float:
 
 
 def _eval_node(node: ast.AST, env: Dict[str, float]) -> float:
+    """Рекурсивно вычисляет AST-узел с белым списком допустимых операций."""
     if isinstance(node, ast.Constant):
         if isinstance(node.value, bool):
             raise ValueError("formula: логические значения не поддерживаются")

@@ -54,8 +54,9 @@ export default function TnVedEaeuPicker(props: TnVedEaeuPickerProps) {
           <strong>Не полный классификатор.</strong> Сейчас в дереве только фрагмент из репозитория ({TN_VED_CHILDREN_BUILD_INFO.rowCount} кодов в
           источнике, ожидается полный файл с тысячами позиций). Чтобы в листбоксе были <strong>все коды из вашего «ТН ВЭД.xlsx»</strong>, положите
           файл в <code style={{ fontSize: 11 }}>data/ТН ВЭД.xlsx</code> и выполните из корня репозитория:{" "}
-          <code style={{ fontSize: 11 }}>python scripts/build_tn_ved_tree.py</code>
-          {` `}(при нескольких листах: <code style={{ fontSize: 11 }}>--sheet all</code>). Подробности — <code style={{ fontSize: 11 }}>data/README.md</code>.
+          <code style={{ fontSize: 11 }}>python scripts/build_tn_ved_tree_from_xlsx.py</code>
+          {` `}(при нескольких листах см. <code style={{ fontSize: 11 }}>--help</code> у скрипта). Подробности — раздел «Справочник ТН ВЭД в интерфейсе» в корневом{" "}
+          <code style={{ fontSize: 11 }}>README.md</code>.
         </div>
       ) : null}
       {manualInputInlineLabel || manualInputAside ? (
