@@ -119,6 +119,7 @@ services:
       context: .
       dockerfile: services/clustering-service/Dockerfile
     container_name: pipeline_clustering_service
+    gpus: all
     depends_on:
       postgres:
         condition: service_healthy

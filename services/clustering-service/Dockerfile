@@ -1,4 +1,4 @@
-# Образ с PyTorch+CUDA: эмбеддинги SentenceTransformer идут на GPU при пробросе устройства (см. docker-compose.clustering-gpu.yml).
+# Образ с PyTorch+CUDA: docker-compose.yml по умолчанию пробрасывает GPU для эмбеддингов SentenceTransformer.
 FROM pytorch/pytorch:2.4.1-cuda12.1-cudnn9-runtime
 
 WORKDIR /app

@@ -162,7 +162,7 @@ flowchart TD
 
 **Тома:** `pgdata` — база; `ollama_data` — модели. Порт Postgres **5432** проброшен на хост для локальной разработки backend без Docker.
 
-**GPU:** для кластеризации можно наложить [`docker-compose.clustering-gpu.yml`](docker-compose.clustering-gpu.yml) (нужны NVIDIA Container Toolkit). У `ollama` в compose по умолчанию `gpus: all` — на CPU-only хосте строку следует убрать.
+**GPU:** `ollama` и `clustering-service` в `docker-compose.yml` запускаются с `gpus: all`, поэтому нужны NVIDIA-драйвер и NVIDIA Container Toolkit.
 
 ---
 
@@ -210,25 +210,11 @@ docker compose up -d
 docker compose ps
 ```
 
-Полная пересборка без кэша (после крупных изменений):
-
-```bash
-docker compose build --no-cache
-docker compose up -d --force-recreate
-```
-
 ### 3. Модель Ollama
 
 ```bash
 docker compose exec ollama ollama pull llama3.1:8b
 docker compose exec ollama ollama list
-```
-
-Если `ollama` не стартует из‑за GPU:
-
-```bash
-# уберите gpus: all в docker-compose.yml, затем:
-docker compose up -d ollama
 ```
 
 ### 4. Интерфейсы
@@ -267,8 +253,7 @@ curl -s -X POST http://localhost:8000/api/validate \
 ### Остановка
 
 ```bash
-docker compose down          # контейнеры остановлены, тома сохранены
-docker compose down -v       # + удаление pgdata и ollama_data
+docker compose down
 ```
 
 ### Обновление на сервере
@@ -341,7 +326,7 @@ python scripts/build_tn_ved_tree_from_xlsx.py --help
 ### Backend локально
 
 ```bash
-docker compose up -d postgres   # или весь compose
+docker compose up -d postgres
 cd backend
 pip install -r requirements.docker.txt
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
@@ -388,3 +373,4 @@ cd services/orchestrator && pytest
 Проект дипломной / исследовательской разработки. Лицензия в репозитории не указана — уточняйте у авторов перед использованием вне учебного контура.
 
 **Статус:** активный MVP; API и схемы данных могут меняться без semver-гарантий.
+
