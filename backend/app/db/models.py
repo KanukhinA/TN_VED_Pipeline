@@ -1,3 +1,13 @@
+"""
+ORM-модели PostgreSQL 16: данные модуля создания справочников и экспертизы.
+
+Rule / RuleVersion — справочник и версии машиночитаемого описания (dsl_json);
+RuleReferenceExample, RuleReferenceEmbedding — эталоны и сохранённые векторы для семантики;
+FewShotAssistRun — журнал подбора few-shot на вкладке настройки справочников;
+AppSetting — конфигурации промптов и основной справочник по ТН ВЭД;
+ExpertDecisionItem — задачи очереди экспертизы. Классификация — в rules, не в ORM.
+"""
+
 from __future__ import annotations
 
 import uuid

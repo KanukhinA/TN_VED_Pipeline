@@ -1,4 +1,9 @@
-"""Выполнение межполевых правил DSL: связь нескольких путей в данных одной декларации."""
+"""
+Межполевые правила структуры признаков декларации (шаблоны sumEquals, requiredIf и др.).
+
+Проверка связей между полями одной декларации после прохождения схемы Pydantic — до
+классификации по разделу «Классы». validate_cross_rules в цепочке compile_rule.validate().
+"""
 
 from __future__ import annotations
 
@@ -15,8 +20,8 @@ from .dsl_models import (
     ComparisonCond,
     ComparisonOpType,
 )
-from .numeric_cell import coerce_numeric_cell_to_scalar
-from .path_utils import extract_first_value, extract_values, path_exists
+from .primitives.numeric_cell import coerce_numeric_cell_to_scalar
+from .primitives.path_utils import extract_first_value, extract_values, path_exists
 
 
 class CrossRuleError(BaseModel):
@@ -85,6 +90,7 @@ def validate_cross_rules(data: Any, rules: List[CrossRule]) -> List[CrossRuleErr
     errors: List[CrossRuleError] = []
 
     for rule in rules:
+        # Каждый шаблон межполевого правила проверяется независимо; ошибки накапливаются.
         if isinstance(rule, SumEqualsRule):
             values = extract_values(data, rule.path)
             numeric_values: List[float] = []
@@ -122,11 +128,11 @@ def validate_cross_rules(data: Any, rules: List[CrossRule]) -> List[CrossRuleErr
             cond: ComparisonCond = rule.if_
             left = extract_first_value(data, cond.path)
 
-            # Для equals/gt/.. требуется cond.value
+            # Для equals и порядковых op (gt — строго больше, gte — не меньше, lt — строго меньше, lte — не более) нужен cond.value
             satisfied = _compare(left, cond.op, cond.value)
 
             if satisfied:
-                # Проверяем наличие всех обязательных путей, только если условие if выполнено.
+                # Обязательные поля проверяем только когда предикат «если» уже истинен.
                 for req_path in rule.then.required_paths:
                     if not path_exists(data, req_path):
                         errors.append(

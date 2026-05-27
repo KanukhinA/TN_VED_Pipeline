@@ -1,4 +1,9 @@
-"""Проверки meta.feature_extraction_configs без зависимости от FastAPI."""
+"""
+Проверка блока meta.feature_extraction_configs в машиночитаемом описании справочника.
+
+Согласованность конфигураций промптов для модуля извлечения признаков LLM (вкладка
+«Настройка справочников») перед сохранением в PostgreSQL. PutFeatureExtractionSettingsUseCase.
+"""
 
 from __future__ import annotations
 

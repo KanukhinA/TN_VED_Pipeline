@@ -10,6 +10,7 @@
 
 - [Возможности](#возможности)
 - [Архитектура](#архитектура)
+- [Структура репозитория](#структура-репозитория)
 - [Стек](#стек)
 - [Быстрый старт](#быстрый-старт)
 - [Сервисы и порты](#сервисы-и-порты)
@@ -31,7 +32,7 @@
 | **Экспертиза** | Передаёт спорные случаи в очередь эксперта; обновление правил и таксономии |
 | **Стоимость** | Шаг сверки цены в общем пайплайне (в прототипе — упрощённая заглушка) |
 
-Подробные правила классификации в справочнике — в [`docs/README-klassifikaciya-spravochnika.md`](docs/README-klassifikaciya-spravochnika.md).
+Правила классификации в справочнике задаются в DSL (`backend/app/rules/`); сценарии покрыты тестами в [`backend/tests/test_classification.py`](backend/tests/test_classification.py).
 
 ---
 
@@ -163,6 +164,187 @@ flowchart TD
 **Тома:** `pgdata` — база; `ollama_data` — модели. Порт Postgres **5432** проброшен на хост для локальной разработки backend без Docker.
 
 **GPU:** `ollama` и `clustering-service` в `docker-compose.yml` запускаются с `gpus: all`, поэтому нужны NVIDIA-драйвер и NVIDIA Container Toolkit.
+
+---
+
+## Структура репозитория
+
+Ниже — карта каталогов и ключевых файлов: что за что отвечает и куда смотреть при доработке. Вложенные `__pycache__`, `node_modules`, `dist`, тома Docker и локальные кэши в описании не перечислены.
+
+### Корень проекта
+
+| Путь | Назначение |
+|------|------------|
+| [`docker-compose.yml`](docker-compose.yml) | Сборка и запуск всех контейнеров: Postgres, Ollama, микросервисы, два frontend, сети и тома `pgdata` / `ollama_data`. |
+| [`requirements.txt`](requirements.txt) | Зависимости для ноутбука и вспомогательных скриптов вне Docker-образов сервисов. |
+| [`.dockerignore`](.dockerignore) | Исключения при `docker build` (ускорение контекста сборки). |
+| [`numeric_feature_extraction_validation.ipynb`](numeric_feature_extraction_validation.ipynb) | Исследовательская проверка извлечения числовых признаков (не входит в runtime пайплайна). |
+| [`archive/`](archive/) | Устаревшие или вынесенные артефакты; на работу compose не влияет. |
+
+### [`config/`](config/)
+
+| Файл | Назначение |
+|------|------------|
+| [`llm_models.json`](config/llm_models.json) | Эталонный список моделей и параметров генерации для извлечения признаков; монтируется в backend и preprocessing, дублируется в БД после правок в UI. |
+
+### [`data/`](data/) и [`scripts/`](scripts/)
+
+| Путь | Назначение |
+|------|------------|
+| `data/` | Локальные входные данные (например, Excel «ТН ВЭД»); в git обычно только `.gitkeep`. |
+| [`scripts/build_tn_ved_tree_from_xlsx.py`](scripts/build_tn_ved_tree_from_xlsx.py) | Генерация дерева кодов ТН ВЭД для frontend (`tnVedChildren.generated.ts`). |
+
+### [`shared/`](shared/) — общий Python-код
+
+Копируется в образы backend и микросервисов; единые контракты для LLM и разбора JSON.
+
+| Файл / каталог | Назначение |
+|----------------|------------|
+| [`extraction_prompt.py`](shared/extraction_prompt.py) | Тексты и сборка промпта извлечения признаков из описания декларации. |
+| [`json_recovery.py`](shared/json_recovery.py) | Восстановление «битого» JSON из ответа модели (обрезки, лишние запятые). |
+| [`llm_runtime/`](shared/llm_runtime/) | Абстракция вызова LLM: `config.py` — настройки, `ollama_backend.py` / `vllm_backend.py` — транспорт, `compat.py` — совместимость API. |
+
+### [`backend/`](backend/) — движок правил (FastAPI)
+
+Контейнер `pipeline_rules_engine`, порт **8005**. Хранит справочники в PostgreSQL, компилирует DSL, классифицирует декларации, отдаёт API эксперту и оркестратору.
+
+| Путь | Назначение |
+|------|------------|
+| [`Dockerfile`](backend/Dockerfile) | Образ: зависимости, `app/`, `shared/extraction_prompt.py`, `config/llm_models.json`. |
+| [`requirements.docker.txt`](backend/requirements.docker.txt) | Python-зависимости образа. |
+| [`pytest.ini`](backend/pytest.ini) | Настройки `pytest` для `backend/tests/`. |
+
+#### `backend/app/` — приложение
+
+| Путь | Назначение |
+|------|------------|
+| [`main.py`](backend/app/main.py) | Точка входа Uvicorn: создание FastAPI-приложения, healthcheck. |
+| [`composition.py`](backend/app/composition.py) | Сборка зависимостей (репозитории, use case) для маршрутов. |
+| [`primary_catalog_settings.py`](backend/app/primary_catalog_settings.py) | Настройки «основного» справочника для UI и API. |
+
+**`app/api/`** — HTTP-маршруты (тонкий слой):
+
+| Файл | Назначение |
+|------|------------|
+| [`routes_rules.py`](backend/app/api/routes_rules.py) | CRUD справочника, валидация DSL, логические пересечения правил, семантические пороги. |
+| [`routes_officer_pipeline.py`](backend/app/api/routes_officer_pipeline.py) | Контур инспектора: прогон декларации по справочнику. |
+| [`routes_expert_decisions.py`](backend/app/api/routes_expert_decisions.py) | Очередь экспертизы, решения по классам и именованию. |
+| [`routes_feature_extraction_settings.py`](backend/app/api/routes_feature_extraction_settings.py) | Настройки моделей и промптов извлечения признаков. |
+
+**`app/application/`** — сценарии и доменная логика без HTTP:
+
+| Каталог | Назначение |
+|---------|------------|
+| [`use_cases/`](backend/app/application/use_cases/) | Сценарии: `rules_catalog.py`, `officer_pipeline.py`, `expert_decisions*.py`, настройки извлечения. |
+| [`services/`](backend/app/application/services/) | Сервисы: `classification_conflicts.py` (пересечения правил), `rule_list.py`, `reference_embeddings.py`, метаданные DSL. |
+| [`dto/`](backend/app/application/dto/) | DTO для ответов API (конфликты, списки правил). |
+| [`ports/`](backend/app/application/ports/) | Интерфейсы репозиториев и внешних сервисов. |
+
+**`app/infrastructure/`** — реализации портов:
+
+| Путь | Назначение |
+|------|------------|
+| [`repositories/sqlalchemy_*.py`](backend/app/infrastructure/repositories/) | Доступ к PostgreSQL: справочник, решения эксперта, настройки. |
+| [`http/semantic_search_client.py`](backend/app/infrastructure/http/semantic_search_client.py) | HTTP-клиент к сервису семантического поиска. |
+
+**`app/db/`** — ORM:
+
+| Файл | Назначение |
+|------|------------|
+| [`models.py`](backend/app/db/models.py) | Таблицы: версии справочника, правила, эталоны, настройки, очереди. |
+| [`session.py`](backend/app/db/session.py) | Сессия SQLAlchemy, `DATABASE_URL` по умолчанию. |
+
+**`app/pipeline/`** — валидация officer-контура:
+
+| Файл | Назначение |
+|------|------------|
+| [`validator.py`](backend/app/pipeline/validator.py) | Сводная проверка результата пайплайна инспектора (правила + семантика). |
+
+**`app/rules/`** — исполнение DSL справочника (без БД и HTTP):
+
+```
+rules/
+├── dsl_models.py          # Pydantic-модели DSL: схема признаков, условия, правила классов
+├── compiler.py            # Компиляция dsl_json → динамическая Pydantic-схема + validate()
+├── cross_rules.py         # Межполевые ограничения (суммы, обязательность)
+├── schema_normalize.py    # lower() для строк enum перед валидацией
+├── officer_validation_errors_ru.py  # Тексты ошибок для UI инспектора
+├── primitives/            # Низкоуровневые примитивы
+│   ├── path_utils.py      # Пути JSON: prop, array[*]
+│   ├── numeric_cell.py    # Число или интервал [min, max] в ячейке показателя
+│   └── formula_safe_eval.py  # Безопасный eval формул (+ − × ÷)
+├── classification/        # Рантайм классификации
+│   ├── predicates.py      # Матчинг условий, RuleMatcher, first_match
+│   ├── messages_ru.py     # Русские формулировки невыполненных условий
+│   ├── engine.py          # evaluate_classification, semantic_check
+│   └── errors.py          # ClassificationError
+└── analysis/
+    └── overlap.py         # Логические пересечения между правилами (экран эксперта)
+```
+
+Файлы `path_utils.py`, `numeric_cell.py`, `formula_safe_eval.py`, `rule_overlap.py` в корне `rules/` — тонкие прокси для старых импортов; новый код лучше подключать из `primitives/`, `classification/`, `analysis/`.
+
+**`app/examples/`** — демо DSL (например, удобрения) для тестов и документации.
+
+**`backend/tests/`** — автотесты движка правил:
+
+| Файл | Что проверяет |
+|------|----------------|
+| `test_classification.py` | Классификация: приоритеты, показатели, формулы, описание. |
+| `test_rules_overlap.py` | Пересечения правил и сервис конфликтов. |
+| `test_schema_normalize.py` | Нормализация enum-строк. |
+| `test_pipeline_validator.py` | Валидатор officer-пайплайна. |
+| `test_expert_decisions_*.py` | Создание и починка очереди экспертизы. |
+
+### [`services/`](services/) — микросервисы пайплайна
+
+Общий [`requirements.base.txt`](services/requirements.base.txt) подключается в Dockerfile отдельных сервисов. Каждый каталог: `Dockerfile`, `requirements.txt`, `app/main.py`.
+
+| Сервис | Ключевые файлы | Назначение |
+|--------|----------------|------------|
+| [**api-gateway**](services/api-gateway/) | `app/main.py`, [`config/pipeline.json`](services/api-gateway/config/pipeline.json) | Единая точка `/api` для UI: прокси к оркестратору и backend, `/ready`, `/health`. |
+| | `app/pipeline_config.py` | Загрузка шагов пайплайна из JSON. |
+| | `app/semantic_cleaning.py`, `few_shot_uncertainty.py` | Очистка текста и эвристики неопределённости. |
+| | [`config/prompt_generator.json`](services/api-gateway/config/prompt_generator.json) | Настройки генератора промптов. |
+| [**orchestrator**](services/orchestrator/) | `app/main.py` | Сценарий проверки декларации: preprocessing → rules → semantic → naming → price. |
+| | `app/pipeline_config.py`, `semantic_cleaning.py` | Те же контракты, что у gateway (файл pipeline смонтирован из gateway). |
+| | `tests/` | Тесты потока validate и очистки текста. |
+| [**preprocessing**](services/preprocessing/) | `app/main.py`, `llm_runtime_bridge.py` | Извлечение признаков из текста ДТ через LLM. |
+| [**semantic-search**](services/semantic-search/) | `app/main.py` | kNN по эмбеддингам эталонов (`sentence-transformers`). |
+| [**llm-naming**](services/llm-naming/) | `app/main.py`, `config/class_naming_prompt.txt` | Предложение имени класса по эталонам. |
+| [**clustering-service**](services/clustering-service/) | `app/main.py` | Кластеризация эталонов (k-means) для таксономии эксперта. |
+| [**price-validator**](services/price-validator/) | `app/main.py` | Шаг сверки стоимости (в MVP — упрощённая логика). |
+
+### [`frontend/`](frontend/) — React (Vite + TypeScript)
+
+Два образа из одного кода: **эксперт** (`VITE_UI_MODE=expert`, порт 8081) и **инспектор** (`officer`, 8082). Статика отдаётся nginx ([`nginx.conf`](frontend/nginx.conf)).
+
+| Путь | Назначение |
+|------|------------|
+| [`src/main.tsx`](frontend/src/main.tsx), [`App.tsx`](frontend/src/App.tsx) | Точка входа, маршруты expert/officer. |
+| [`src/api/client.ts`](frontend/src/api/client.ts) | Все вызовы API Gateway (`VITE_API_BASE`). |
+| [`src/pages/`](frontend/src/pages/) | Экраны: мастер справочника, валидация инспектора, очередь решений, архив, настройки. |
+| [`src/ui/`](frontend/src/ui/) | Переиспользуемые блоки: редактор признаков, ТН ВЭД, правила классификации, импорт датасета. |
+| [`src/expert/`](frontend/src/expert/) | Логика эксперта: черновик справочника, kNN-отображение, очередь решений, числовые характеристики. |
+| [`src/catalog/`](frontend/src/catalog/) | Деревья и справочники кодов ТН ВЭД (в т.ч. `tnVedChildren.generated.ts`). |
+| [`src/rjsf/`](frontend/src/rjsf/) | JSON Schema Form для редактирования DSL и метасхемы. |
+| [`src/utils/`](frontend/src/utils/) | JSON recovery, парсинг таблиц, форматирование колонок классов. |
+| [`package.json`](frontend/package.json), [`vite.config.ts`](frontend/vite.config.ts) | Сборка и dev-сервер. |
+
+### [`docs/`](docs/) — проектная документация
+
+| Путь | Назначение |
+|------|------------|
+| [`architecture/backend-oop-transition.md`](docs/architecture/backend-oop-transition.md) | Описание слоёв application / infrastructure в backend. |
+| [`architecture/class-diagrams/backend/`](docs/architecture/class-diagrams/backend/) | PlantUML: пакеты и классы API, rules, db, pipeline. |
+
+Подробные правила DSL в интерфейсе эксперта описаны в UI и в тестах `backend/tests/test_classification.py`; отдельный `docs/README-klassifikaciya-spravochnika.md` при необходимости добавляется в репозиторий отдельно.
+
+### Поток данных (кратко)
+
+1. **Инспектор** → Gateway `/api/validate` → Orchestrator → Preprocessing (LLM) → Backend (классификация по DSL) → Semantic-search → при необходимости LLM-naming → Price-validator.  
+2. **Эксперт** → Gateway → Backend: правки `dsl_json`, проверка пересечений, эталоны, настройки моделей; Clustering-service — офлайн-кластеры.  
+3. **Состояние** — PostgreSQL (`backend/app/db/models.py`); **модели LLM** — Ollama (том `ollama_data`) или vLLM по `LLM_BACKEND`.
 
 ---
 
@@ -360,10 +542,10 @@ cd services/orchestrator && pytest
 
 | Документ | Описание |
 |----------|----------|
-| [`docs/README-klassifikaciya-spravochnika.md`](docs/README-klassifikaciya-spravochnika.md) | Правила классификации в справочнике (DSL, условия, приоритеты) |
+| [Структура репозитория](#структура-репозитория) (этот README) | Карта каталогов и назначение файлов |
 | [`docs/architecture/backend-oop-transition.md`](docs/architecture/backend-oop-transition.md) | Переход backend на слои application / infrastructure |
 | [`docs/architecture/class-diagrams/`](docs/architecture/class-diagrams/) | PlantUML-диаграммы классов (для разработчиков) |
-| [`backend/README.md`](backend/README.md) | API движка правил |
+| [`backend/tests/test_classification.py`](backend/tests/test_classification.py) | Примеры поведения DSL-классификации |
 | [`docker-compose.yml`](docker-compose.yml) | Источник правды по сервисам и томам |
 
 ---

@@ -1,4 +1,9 @@
-"""Тесты детерминированного классификатора Rule DSL."""
+"""
+Автотесты правило-ориентированной классификации по справочнику (модуль rules.classification).
+
+Проверка условий по полям структуры, таблице показателей, полному описанию,
+режим «первое подходящее», группы условий.
+"""
 
 from app.rules.classification import evaluate_classification
 from app.rules.dsl_models import (
@@ -28,7 +33,7 @@ def test_first_match_priority_and_order():
 
 
 def test_first_match_same_priority_prefers_stricter_gte():
-    """При одинаковом priority выигрывает правило с более высоким нижним порогом (gte)."""
+    """При одинаковом priority выигрывает правило с более высоким нижним порогом (gte — не меньше)."""
     g12 = RowIndicatorCondition(
         type="rowIndicator",
         array_path="показатели",
@@ -285,7 +290,7 @@ def test_row_indicator_two_number_cell_must_fully_fit_rule_range():
 
 
 def test_path_numeric_tolerance_rel_gte_and_equals():
-    """path: tolerance_rel расширяет числовые пороги (gte / equals)."""
+    """path: tolerance_rel расширяет числовые пороги (gte — не меньше / equals)."""
     cfg_gte = ClassificationConfig(
         strategy="first_match",
         rules=[

@@ -14,7 +14,7 @@ import {
 } from "../api/client";
 import CatalogListSection from "../ui/CatalogListSection";
 import ClassificationRulesPanel, {
-  classificationHasTnVedForAllRules,
+  classificationMissingTnVedClassIds,
   classificationToDslPayload,
   parseClassificationFromDsl,
   type UiClassification,
@@ -283,6 +283,12 @@ export default function CatalogUnifiedWizard() {
       window.alert("Укажите главу ТН ВЭД на шаге 1. Поле обязательно для сохранения.");
       return;
     }
+    if (flowStep === 1 && !canCompleteStructure()) {
+      window.alert(
+        "Заполните структуру: главу ТН ВЭД, название справочника и хотя бы одно поле (числовое, текстовое, массив или «прочее»).",
+      );
+      return;
+    }
     const normalizedDraft = normalizeNumericCharacteristicsDraft(numericCharsDraft);
     const rebuilt = numericCharacteristicsToDsl(normalizedDraft);
     const modelId = (dsl.model_id?.trim() || rebuilt.model_id || "").trim();
@@ -290,14 +296,10 @@ export default function CatalogUnifiedWizard() {
       window.alert("Не удалось сформировать идентификатор модели (model_id). Проверьте название справочника на шаге 1.");
       return;
     }
-    if (!classificationHasTnVedForAllRules(classificationUi)) {
-      window.alert("Для каждого класса с идентификатором укажите код ТН ВЭД ЕАЭС на шаге «Классы».");
-      return;
-    }
     setBusy(true);
     try {
       setNumericCharsDraft(normalizedDraft);
-      const payload = {
+      const payload: Record<string, unknown> = {
         ...dsl,
         model_id: modelId,
         schema: rebuilt.schema,
@@ -309,6 +311,13 @@ export default function CatalogUnifiedWizard() {
           numeric_characteristics_draft: rebuilt.meta?.numeric_characteristics_draft,
         },
       };
+      // Шаг 1 — только структура и meta; классификация из БД не перезаписывается.
+      // Шаги 2–3 — сохраняем актуальные классы из UI.
+      if (flowStep >= 2) {
+        const classificationPayload = classificationToDslPayload(classificationUi);
+        if (classificationPayload) payload.classification = classificationPayload;
+        else delete payload.classification;
+      }
       const res = await saveRule(payload, ruleId);
       setDsl(payload);
       setRuleId(res.rule_id);
@@ -367,6 +376,7 @@ export default function CatalogUnifiedWizard() {
       setNumericCharsDraft(d);
       setSavedSource("numericCharacteristics");
       setDsl({ ...full.dsl, cross_rules: [] });
+      setClassificationUiState(parseClassificationFromDsl(full.dsl?.classification));
       const rawTn = full.dsl?.meta?.tn_ved_group_code;
       setTnVedGroupCode(
         rawTn != null && String(rawTn).trim() !== "" ? normalizeTnVedChapterMeta(String(rawTn)) ?? "" : "",
@@ -388,6 +398,7 @@ export default function CatalogUnifiedWizard() {
     setFlowStep(1);
     setNumericCharsDraft(defaultNumericCharacteristicsDraft());
     setDsl(emptyDsl());
+    setClassificationUiState(parseClassificationFromDsl(undefined));
     setTnVedGroupCode("");
     setSavedSource(null);
     setRuleId(null);
@@ -410,6 +421,7 @@ export default function CatalogUnifiedWizard() {
       setNumericCharsDraft({ ...numericFromMeta, modelId: cloned.dsl?.model_id ?? numericFromMeta.modelId });
       setSavedSource("numericCharacteristics");
       setDsl({ ...cloned.dsl, cross_rules: [] });
+      setClassificationUiState(parseClassificationFromDsl(cloned.dsl?.classification));
       const rawTn = cloned.dsl?.meta?.tn_ved_group_code;
       setTnVedGroupCode(
         rawTn != null && String(rawTn).trim() !== "" ? normalizeTnVedChapterMeta(String(rawTn)) ?? "" : "",
@@ -601,7 +613,7 @@ export default function CatalogUnifiedWizard() {
             }}
           >
             <button type="button" className="btn" disabled={busy} onClick={() => void handleSave()}>
-              Сохранить справочник
+              Сохранить структуру
             </button>
             <button type="button" className="btn" disabled={!canCompleteStructure()} onClick={goToRulesStep}>
               Далее
@@ -644,8 +656,11 @@ export default function CatalogUnifiedWizard() {
               type="button"
               className="btn"
               onClick={() => {
-                if (!classificationHasTnVedForAllRules(classificationUi)) {
-                  window.alert("Для каждого класса с идентификатором укажите код ТН ВЭД ЕАЭС.");
+                const missing = classificationMissingTnVedClassIds(classificationUi);
+                if (missing.length > 0) {
+                  window.alert(
+                    `Перед шагом «Проверка правил» укажите код ТН ВЭД ЕАЭС для классов: ${missing.join(", ")}.`,
+                  );
                   return;
                 }
                 setFlowStep(3);

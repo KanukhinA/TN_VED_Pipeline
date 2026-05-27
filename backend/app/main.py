@@ -29,7 +29,6 @@ def create_app() -> FastAPI:
 
     @app.on_event("startup")
     def _startup() -> None:
-        # Создаём таблицы при старте сервиса (для локального/development запуска).
         create_db_and_tables()
 
     app.include_router(rules_router)
@@ -39,12 +38,10 @@ def create_app() -> FastAPI:
 
     @app.get("/health")
     def health() -> dict[str, str]:
-        """Healthcheck для оркестратора/балансировщика."""
         return {"status": "ok", "service": "rules-engine"}
 
     @app.post("/api/pipeline/classify-stub")
     def classify_stub(payload: ClassifyStubRequest) -> dict[str, object]:
-        """Упрощённая заглушка классификации для интеграционных тестов UI/пайплайна."""
         matched = payload.tnved_code is not None and payload.tnved_code.startswith("31")
         return {
             "matched": matched,
@@ -57,4 +54,3 @@ def create_app() -> FastAPI:
 
 
 app = create_app()
-

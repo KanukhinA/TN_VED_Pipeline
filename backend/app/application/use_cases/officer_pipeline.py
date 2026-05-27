@@ -1,4 +1,10 @@
-"""Тонкая обёртка officer-пайплайна: делегирует реализацию из routes_officer_pipeline."""
+"""
+Контракт сквозной проверки декларации для интерфейса инспектора.
+
+ValidateOfficerDeclarationUseCase делегирует LocalOfficerPipelineRunner (routes_officer_pipeline):
+извлечение признаков, валидация по схеме справочника, правило-ориентированная и семантическая
+классификация в составе оркестратора.
+"""
 
 from __future__ import annotations
 

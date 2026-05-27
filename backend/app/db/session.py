@@ -1,4 +1,10 @@
-"""Подключение к PostgreSQL, создание схемы и dependency `get_db_session` для FastAPI."""
+"""
+Подключение движка правил к PostgreSQL (postgresql+psycopg2, SQLAlchemy 2).
+
+create_db_and_tables — инициализация схемы при старте контейнера; get_db_session — сессия
+на один HTTP-запрос FastAPI (транзакционное ведение справочников и экспертизы).
+Строка подключения — DATABASE_URL.
+"""
 
 from __future__ import annotations
 

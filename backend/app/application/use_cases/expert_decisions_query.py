@@ -1,4 +1,9 @@
-"""Use case'ы чтения и обновления очереди expert-decisions (список с пагинацией, patch статуса)."""
+"""
+Очередь экспертизы: список с фильтрами и подтверждение/отклонение экспертом.
+
+При согласии — обновление эталонов в справочнике. ListExpertDecisionsUseCase,
+PatchExpertDecisionUseCase; api/routes_expert_decisions.
+"""
 
 from __future__ import annotations
 

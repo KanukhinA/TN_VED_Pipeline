@@ -1,4 +1,10 @@
-"""Кэш компиляции DSL и валидация активных версий правил перед классификацией."""
+"""
+Семантическая валидация признаков декларации по активной версии справочника (Pydantic).
+
+Загрузка dsl_json из PostgreSQL, компиляция в rules.compiler, кэш версий на время запроса.
+Контур интерфейса инспектора после извлечения характеристик LLM: схема структуры и межполевые
+правила до правило-ориентированной классификации.
+"""
 
 from __future__ import annotations
 
@@ -67,6 +73,7 @@ class RuleValidationService:
         if rv is None:
             return (False, [{"message": "Active rule version not found"}], None, None)
         compiled = self._cache.get_or_compile(rv)
+        # validate() внутри: pydantic → межполевые правила → назначение class_id.
         ok, errors, validated_data, assigned_class = compiled.validate(data)
         return (ok, errors, validated_data, assigned_class)
 

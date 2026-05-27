@@ -1,3 +1,7 @@
+"""
+Автотесты восстановления очереди подтверждения наименований классов (LLM naming).
+"""
+
 from __future__ import annotations
 
 from app.application.use_cases.expert_decisions import CreateExpertDecisionUseCase

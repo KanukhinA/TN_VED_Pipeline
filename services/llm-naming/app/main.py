@@ -35,8 +35,9 @@ DEFAULT_CLASS_NAMING_PROMPT_TEMPLATE = (
     "{catalog_block}\n\n"
     "Описание товара неизвестного класса:\n"
     "{description}\n\n"
-    "Ответ: одна строка — краткое имя класса в стиле справочника: 2-5 слов через '_' (до 40 символов), "
-    "допустимы буквы/цифры/подчеркивание.\n"
+    "Ответ: одна строка — краткое имя класса в стиле справочника, как в списке выше "
+    "(обычно 1–3 слова через пробел или дефис; доли через «:» допустимы). До 80 символов. "
+    "Подчёркивание не требуется.\n"
     "Запрещено: чисто цифровой ответ, код ТН ВЭД, шаблоны вроде 3102500000_0001.\n"
     "Без кавычек, без пояснений и без markdown."
 )
@@ -215,11 +216,17 @@ def _save_generation_config(max_new_tokens: int) -> dict[str, int]:
 
 
 def _normalize_class_token(text: str) -> str:
+    """Нормализует имя класса: сохраняет пробелы, дефисы и «:», как в class_id справочника."""
     line = (text or "").strip().split("\n")[0].strip()
     line = re.sub(r"^[\"']|[\"']$", "", line)
-    token = "".join(c if (c.isalnum() or c in "_-") else "_" for c in line[:48])
-    token = re.sub(r"_+", "_", token).strip("_")
-    return token or "CLASS"
+    chars: list[str] = []
+    for c in line[:80]:
+        if c.isalnum() or c in "-:":
+            chars.append(c)
+        elif c.isspace():
+            chars.append(" ")
+    token = re.sub(r"\s+", " ", "".join(chars)).strip()
+    return token or "новый класс"
 
 
 def _looks_like_classifier_code(token: str, tnved_code: str | None) -> bool:
@@ -228,7 +235,7 @@ def _looks_like_classifier_code(token: str, tnved_code: str | None) -> bool:
         return True
     if re.fullmatch(r"\d{6,14}(_\d{1,6})?", t):
         return True
-    if re.fullmatch(r"[0-9_]+", t):
+    if re.sub(r"[\s\-:]", "", t).isdigit():
         return True
     tn_digits = re.sub(r"\D", "", str(tnved_code or ""))
     tok_digits = re.sub(r"\D", "", t)
@@ -240,16 +247,16 @@ def _looks_like_classifier_code(token: str, tnved_code: str | None) -> bool:
 def _fallback_class_name(description: str, existing: list[str]) -> str:
     words = [w.lower() for w in re.findall(r"[A-Za-zА-Яа-я0-9]+", description or "")]
     meaningful = [w for w in words if len(w) >= 3 and not w.isdigit()]
-    base = "class_" + "_".join(meaningful[:3]) if meaningful else "class_new_product"
-    token = _normalize_class_token(base)[:40] or "class_new_product"
+    base = " ".join(meaningful[:4]) if meaningful else "новый класс"
+    token = _normalize_class_token(base)
     existing_norm = {str(x).strip().lower() for x in existing if str(x).strip()}
     if token.lower() not in existing_norm:
         return token
     for i in range(2, 100):
-        cand = _normalize_class_token(f"{token}_{i}")[:40]
+        cand = _normalize_class_token(f"{token} {i}")
         if cand.lower() not in existing_norm:
             return cand
-    return "class_new_product"
+    return "новый класс"
 
 
 def _ollama_running_models(timeout: float = 3.0) -> list[str]:

@@ -1,4 +1,10 @@
-"""Сохранение и пакетный пересчёт эмбеддингов эталонных примеров."""
+"""
+Векторные представления эталонных описаний товаров для семантической классификации.
+
+Вызов микросервиса semantic-search, сохранение в PostgreSQL (RuleReferenceEmbedding).
+Дозаполнение кэша для officer-пайплайна и пакетный пересчёт по справочнику — API эталонов
+интерфейса эксперта.
+"""
 
 from __future__ import annotations
 
@@ -92,6 +98,7 @@ def backfill_missing_reference_embeddings(
         return {"processed": len(examples), "embedded": 0, "skipped": len(examples)}
 
     embedded = 0
+    # Пакетные запросы к semantic-search, чтобы не перегружать сервис одним огромным телом.
     for start in range(0, len(targets), _EMBED_CHUNK):
         chunk = targets[start : start + _EMBED_CHUNK]
         texts = [(ex.description_text or "").strip() for ex in chunk]

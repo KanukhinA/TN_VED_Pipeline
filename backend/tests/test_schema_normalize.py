@@ -1,4 +1,8 @@
-"""Нормализация строк с enum до валидации и проход в compile_rule.validate."""
+"""
+Автотесты нормализации признаков перед Pydantic (schema_normalize).
+
+Согласованность перечислений в структуре справочника.
+"""
 
 from app.rules.compiler import compile_rule
 from app.rules.dsl_models import ObjectFieldSchema, RuleDSL

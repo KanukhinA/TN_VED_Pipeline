@@ -1,5 +1,8 @@
 """
-Нормализация входных данных под схему DSL до Pydantic-валидации.
+Предобработка признаков декларации перед семантической валидацией Pydantic.
+
+Приведение строк перечислений к нижнему регистру по схеме справочника — согласованность
+сравнений при правило-ориентированной классификации (постобработка ответа LLM).
 """
 
 from __future__ import annotations
@@ -37,6 +40,7 @@ def lowercase_enum_constrained_strings(data: Any, schema: FieldSchema) -> Any:
     if isinstance(schema, StringFieldSchema):
         if isinstance(data, str):
             c = schema.constraints
+            # Перечисление в схеме — подсказка для сравнения без учёта регистра ввода.
             if c is not None and c.enum is not None and len(c.enum) > 0:
                 return data.lower()
         return data

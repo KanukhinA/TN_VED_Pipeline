@@ -1,3 +1,10 @@
+"""
+PostgreSQL: справочники, версии dsl_json, эталоны и эмбеддинги (SQLAlchemy 2).
+
+Реализация RuleCatalogRepositoryPort для сценариев модуля создания машиночитаемых правил.
+Таблицы Rule, RuleVersion, RuleReferenceExample, RuleReferenceEmbedding.
+"""
+
 from __future__ import annotations
 
 from typing import Any, Optional
@@ -9,7 +16,6 @@ from ...db.models import Rule, RuleReferenceEmbedding, RuleReferenceExample, Rul
 
 
 class SqlAlchemyRuleCatalogRepository:
-    """SQLAlchemy-адаптер доступа к справочникам и активным версиям."""
 
     def __init__(self, db: Session) -> None:
         self.db = db

@@ -1,3 +1,10 @@
+"""
+PostgreSQL: прикладные настройки движка правил (SQLAlchemy 2).
+
+AppSettingsRepositoryPort — промпты извлечения признаков, карта основного справочника
+по группе ТН ВЭД (таблица AppSetting).
+"""
+
 from __future__ import annotations
 
 from datetime import datetime
@@ -9,7 +16,6 @@ from ...db.models import AppSetting
 
 
 class SqlAlchemyAppSettingsRepository:
-    """SQLAlchemy-адаптер key-value настроек приложения."""
 
     def __init__(self, db: Session) -> None:
         self.db = db

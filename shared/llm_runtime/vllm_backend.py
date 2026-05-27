@@ -1,6 +1,8 @@
-"""HTTP-клиент к vLLM через OpenAI-compatible API (/v1/completions, /v1/models).
+"""
+HTTP-клиент к vLLM (OpenAI-compatible API) — целевое промышленное развёртывание LLM.
 
-Имена моделей — как на стороне сервера vLLM (часто HuggingFace id), не теги Ollama.
+Пакетная генерация на GPU; имена моделей со стороны сервера vLLM. В дипломном прототипе
+описан как планируемая альтернатива Ollama (LLM_BACKEND=vllm).
 """
 
 from __future__ import annotations

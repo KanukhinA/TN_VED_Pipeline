@@ -1,3 +1,10 @@
+"""
+Конфигурация LLM-runtime: выбор Ollama или vLLM, базовые URL контейнеров.
+
+Переменные окружения LLM_BACKEND, OLLAMA_BASE_URL, VLLM_BASE_URL — единые для пайплайна
+в docker compose.
+"""
+
 from __future__ import annotations
 
 import os

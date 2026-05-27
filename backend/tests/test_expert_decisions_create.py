@@ -1,3 +1,7 @@
+"""
+Автотесты постановки задач в очередь экспертизы (CreateExpertDecisionUseCase).
+"""
+
 from __future__ import annotations
 
 import uuid

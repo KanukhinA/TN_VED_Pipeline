@@ -585,7 +585,7 @@ export default function FeatureExtractionModelAdmin({
                               }}
                               title="Остановить запуск модели (keep_alive=0)"
                               aria-label="Остановить запуск модели"
-                              disabled={busy || rowOtherBusy || rowSelfBusy}
+                              disabled={Boolean(action)}
                               onClick={() => void runPause(m)}
                             >
                               {isBusy(m, "pause") ? (
@@ -604,7 +604,7 @@ export default function FeatureExtractionModelAdmin({
                               }}
                               title="Запустить модель на сервере (при отсутствии образа — подкачать, затем запустить инференс)"
                               aria-label="Запустить модель"
-                              disabled={busy || rowOtherBusy || rowSelfBusy}
+                              disabled={Boolean(action)}
                               onClick={() => void runDeploy(m)}
                             >
                               {isBusy(m, "deploy") ? (
@@ -623,7 +623,7 @@ export default function FeatureExtractionModelAdmin({
                             }}
                             title="Удалить образ с диска"
                             aria-label="Удалить образ"
-                            disabled={busy || rowOtherBusy || rowSelfBusy}
+                            disabled={Boolean(action)}
                             onClick={() => void runDelete(m)}
                           >
                             {isBusy(m, "delete") ? (

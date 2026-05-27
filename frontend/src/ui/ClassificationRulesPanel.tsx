@@ -157,11 +157,18 @@ const FULL_DESCRIPTION_PATH = "description_text";
 
 /** Все правила с непустым class_id имеют выбранный код ТН ВЭД ЕАЭС */
 export function classificationHasTnVedForAllRules(ui: UiClassification): boolean {
-  return ui.rules.every((r) => {
-    const id = r.class_id;
-    if (!id) return true;
-    return !!normalizeTnVedEaeuCode(r.tn_ved_group_code ?? "");
-  });
+  return classificationMissingTnVedClassIds(ui).length === 0;
+}
+
+/** Идентификаторы классов без кода ТН ВЭД ЕАЭС (2/4/6/8/10 цифр). */
+export function classificationMissingTnVedClassIds(ui: UiClassification): string[] {
+  const missing: string[] = [];
+  for (const r of ui.rules) {
+    const id = String(r.class_id ?? "").trim();
+    if (!id) continue;
+    if (!normalizeTnVedEaeuCode(r.tn_ved_group_code ?? "")) missing.push(id);
+  }
+  return missing;
 }
 
 function emptyClassification(): UiClassification {

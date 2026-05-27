@@ -1,2 +1,5 @@
-"""Port interfaces for repositories and external services."""
+"""
+Контракты прикладного слоя движка правил.
 
+Абстракции доступа к PostgreSQL и к микросервису семантического поиска; реализации — в infrastructure.
+"""

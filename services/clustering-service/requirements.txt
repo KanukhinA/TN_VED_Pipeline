@@ -1,5 +1,6 @@
 psycopg2-binary>=2.9.0
-numpy>=1.26.0,<2.0.0
+# В образе pytorch/pytorch уже numpy 2.x; верхняя граница <2 тянет лишний wheel (~18 МБ) и чаще рвёт сборку по сети.
+numpy>=1.26.0
 scikit-learn>=1.4.0
 # transformers>=4.48 требует API torch.library.custom_op, несовместимого с torch 2.4 из базового образа.
 transformers>=4.41.0,<4.48.0

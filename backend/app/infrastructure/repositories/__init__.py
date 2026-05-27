@@ -1,2 +1,5 @@
-"""SQLAlchemy repository adapters."""
+"""
+Реализации хранилищ движка правил на SQLAlchemy 2.
 
+Справочники и dsl_json, экспертиза, пары ключ–значение настроек — таблицы PostgreSQL.
+"""

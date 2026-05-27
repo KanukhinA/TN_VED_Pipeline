@@ -1,9 +1,12 @@
 """
-Устойчивое извлечение и парсинг JSON из ответов LLM.
+Извлечение и разбор структурированных данных из ответов больших языковых моделей.
 
-Исторически согласовано с extract_json_from_response / parse_json_safe из внешнего
-проекта LLM_QuantityExtractor_Evaluator; в репозитории — единый источник для preprocessing,
-api-gateway, orchestrator и фронтенда.
+Общий компонент модуля извлечения характеристик (сервис предобработки, шлюз API, оркестратор):
+реализует этапы «выделение JSON-подобного фрагмента» и «парсинг с восстановлением синтаксиса»
+многоэтапная процедура: маркер «Ответ:», блок ```json, нормализация кавычек и None→null,
+вставка пропущенных запятых, завершение обрезанных структур, запасной разбор при ошибке json.loads.
+После разбора признаки проходят семантическую валидацию по схеме справочника в Pydantic уже
+в движке правил или сервисе предобработки.
 """
 
 from __future__ import annotations
@@ -16,17 +19,20 @@ from typing import Any
 
 def _extract_json_like(s: str) -> str:
     """
-    Извлекает JSON-подстроку:
-    1) fenced ```json ... ```
-    2) иначе — от первой '{' до конца (или '[')
+    Вырезает из произвольной строки фрагмент, похожий на JSON.
+
+    Порядок: блок ```json ... ```, иначе текст от первой «{» или «[» до конца строки.
+    Не проверяет корректность — только границы кандидата.
     """
     if not isinstance(s, str):
         return ""
 
+    # Сначала ищем оформленный блок кода (частый формат ответов моделей).
     m = re.search(r"```(?:json)?\s*(.*?)\s*```", s, flags=re.IGNORECASE | re.DOTALL)
     if m:
         return m.group(1).strip()
 
+    # Убираем маркеры списков markdown в начале и берём от первой структурной скобки.
     s_stripped = re.sub(r"^[\s\*\-#>]+", "", s.lstrip())
     idx = s_stripped.find("{")
     if idx != -1:
@@ -38,6 +44,7 @@ def _extract_json_like(s: str) -> str:
 
 
 def _autofix_commas(s: str) -> str:
+    """Исправляет типичные синтаксические огрехи: слипшиеся объекты и хвостовые запятые."""
     s = re.sub(r"}\s*{", "}, {", s)
     s = re.sub(r"}\s*\n\s*{", "},\n{", s)
     s = re.sub(r"]\s*{", "], {", s)
@@ -47,12 +54,19 @@ def _autofix_commas(s: str) -> str:
 
 
 def _balance_and_close(s: str) -> str:
+    """
+    Дозакрывает незакрытые кавычки, объекты и массивы в обрезанном ответе модели.
+
+    Обходит строку посимвольно, не считая скобки внутри строковых литералов.
+    В конце дописывает недостающие «]» и «}» по накопленной глубине вложенности.
+    """
     depth_obj = 0
     depth_arr = 0
     in_string = False
     escape = False
 
     for ch in s:
+        # Внутри строки обратный слэш откладывает смену режима кавычек.
         if ch == "\\" and not escape:
             escape = True
             continue
@@ -66,6 +80,7 @@ def _balance_and_close(s: str) -> str:
             in_string = not in_string
             continue
 
+        # Скобки вне строки меняют счётчики вложенности.
         if not in_string:
             if ch == "{":
                 depth_obj += 1
@@ -78,6 +93,7 @@ def _balance_and_close(s: str) -> str:
                 if depth_arr > 0:
                     depth_arr -= 1
 
+    # Обрыв посреди строкового значения: закрываем кавычку и при необходимости дописываем значение.
     if in_string:
         s = s + '"'
         if re.search(r'[,{]\s*"[^"]*"$', s.rstrip()):
@@ -86,6 +102,7 @@ def _balance_and_close(s: str) -> str:
     s_stripped = s.rstrip()
     if s_stripped:
         last_non_ws = s_stripped[-1]
+        # Обрыв на двоеточии или запятой — подставляем null или убираем висячую запятую.
         if last_non_ws == ":":
             s = s.rstrip() + " null"
         elif last_non_ws == ",":
@@ -103,8 +120,10 @@ def _balance_and_close(s: str) -> str:
 
 def parse_json_safe(s: str) -> Any:
     """
-    Парсер JSON с автопочинкой и дозакрытием скобок.
-    Возвращает dict, list или {} при неудаче.
+    Разбирает строку в dict или list с поэтапной нормализацией.
+
+    Возвращает пустой dict, если вход пустой, фрагмент не найден или разбор не удался.
+    Скалярные значения (число, строка без обёртки) не возвращаются — только объект или массив.
     """
     if not isinstance(s, str) or not s.strip():
         return {}
@@ -115,11 +134,13 @@ def parse_json_safe(s: str) -> Any:
 
     s_clean = fragment
     try:
+        # Иногда модель отдаёт буквальные «\\n» вместо перевода строки.
         s_clean = s_clean.replace("\\n", "\n").replace("\\t", "\t").replace("\\r", "\r")
     except Exception:
         pass
     s_clean = s_clean.replace("\r", "").strip()
 
+    # Типографские кавычки и Python None → форма, близкая к JSON.
     s_clean = (
         s_clean.replace("\u201c", '"')
         .replace("\u201d", '"')
@@ -141,6 +162,7 @@ def parse_json_safe(s: str) -> Any:
     except json.JSONDecodeError:
         pass
 
+    # Запасной путь: одинарные кавычки и Python-синтаксис, если JSON строго не прошёл.
     s_eval = re.sub(r"\bnull\b", "None", s_clean)
     try:
         data = ast.literal_eval(s_eval)
@@ -154,7 +176,12 @@ def parse_json_safe(s: str) -> Any:
 
 def extract_json_from_response(response_text: str) -> str:
     """
-    Выделяет JSON-часть из ответа модели (маркеры «Ответ:» / fenced block / первая скобка).
+    Выделяет JSON-часть из полного текста ответа модели.
+
+    Приоритет:
+    1) текст после последнего «Ответ:» / «answer:» (модель часто пишет пояснение, затем JSON);
+    2) последний блок ```json ... ``` во всём ответе;
+    3) подстрока от первой «{» или «[».
     """
     if not response_text:
         return ""
@@ -162,6 +189,7 @@ def extract_json_from_response(response_text: str) -> str:
     response_lower = response_text.lower()
     answer_markers = ("ответ:", "answer:")
     for marker in answer_markers:
+        # Берём последнее вхождение маркера — там обычно финальный структурированный ответ.
         last_idx = -1
         search_pos = 0
         while True:
@@ -197,6 +225,7 @@ def extract_json_from_response(response_text: str) -> str:
             if json_part.strip():
                 return json_part
 
+    # Маркера «Ответ:» нет — ищем последний json-блок по всему тексту.
     json_blocks = list(
         re.finditer(r"```(?:json)?\s*(.*?)\s*```", response_text, flags=re.IGNORECASE | re.DOTALL)
     )
@@ -222,12 +251,17 @@ def extract_json_from_response(response_text: str) -> str:
 
 
 def parse_json_from_model_response(response_text: str) -> Any:
-    """Извлечение кандидата + устойчивый парсинг (удобная точка входа для пайплайна)."""
+    """
+    Точка входа для пайплайна: выделить фрагмент из ответа модели и разобрать его.
+
+    Возвращает dict, list или {} при полной неудаче разбора.
+    """
     fragment = extract_json_from_response(response_text)
     return parse_json_safe(fragment)
 
 
 def is_valid_json_object(s: str) -> bool:
+    """Проверяет, что после устойчивого разбора получился непустой объект (словарь)."""
     try:
         parsed = parse_json_safe(s)
         return isinstance(parsed, dict) and bool(parsed)

@@ -1,7 +1,11 @@
-from __future__ import annotations
+"""
+Образец справочника удобрений: структура массовых долей и правила определения класса.
 
-# Пример DSL для декларации удобрения на основе массовых долей.
-# Он используется и как пример для UI, и как тестовый кейс для validate-эндпойнта.
+Демонстрация машиночитаемого описания для API и интерфейса эксперта (проверка validate,
+межполевое правило суммы долей). FERTILIZER_RULE_DSL, FERTILIZER_DECLARATION_EXAMPLE.
+"""
+
+from __future__ import annotations
 
 
 FERTILIZER_DECLARATION_EXAMPLE = {

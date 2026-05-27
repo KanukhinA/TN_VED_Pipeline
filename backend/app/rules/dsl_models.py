@@ -1,6 +1,10 @@
-"""Pydantic-модели DSL справочника: схема полей декларации, межполевые правила, блок classification.
+"""
+Предметно-ориентированный язык справочника: модели Pydantic для dsl_json.
 
-Валидаторы нормализуют коды ТН ВЭД ЕАЭС и мигрируют устаревшие фрагменты JSON при загрузке версий правил.
+Машиночитаемое описание структуры числовых и текстовых характеристик товарной группы (ТН ВЭД)
+и правил определения класса в подразделе «Классы»: условия по полям, таблице показателей,
+отношению A:B, формулам, полному описанию декларации. Валидация при сохранении в PostgreSQL;
+исполнение — compiler и classification.
 """
 
 from __future__ import annotations
@@ -10,7 +14,7 @@ from typing import Annotated, Literal, Optional, Union, List, Dict, Any
 
 from pydantic import BaseModel, Field, ConfigDict, field_validator, model_validator
 
-from .formula_safe_eval import validate_formula_identifiers
+from .primitives.formula_safe_eval import validate_formula_identifiers
 
 
 FieldType = Literal["object", "array", "string", "number", "integer", "boolean"]
@@ -159,6 +163,7 @@ class SumEqualsRule(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+# Порядковые операторы path/cross: gt (строго больше), gte (не меньше), lt (строго меньше), lte (не более).
 ComparisonOpType = Literal[
     "equals",
     "notEquals",
@@ -173,7 +178,9 @@ ComparisonOpType = Literal[
     "notRegex",
 ]
 
+# Источник «Полное описание декларации» в интерфейсе эксперта.
 CANONICAL_DESCRIPTION_PATH = "description_text"
+# Согласование с признаковым JSON после извлечения характеристик LLM (см. classification._description_candidates).
 DESCRIPTION_PATH_ALIASES = frozenset({"description", "description_text"})
 
 
@@ -219,12 +226,13 @@ ClassificationStrategy = Literal["first_match", "exactly_one"]
 
 ConditionConjunction = Literal["and", "or"]
 
+# Операторы формулы по строке таблицы: gt (строго больше), gte (не меньше), lt (строго меньше), lte (не более).
 RowFormulaOp = Literal["equals", "gt", "gte", "lt", "lte"]
 _ROW_FORMULA_VAR_KEY_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
 
 
 class PathClassificationCondition(BaseModel):
-    """Условие по пути в нормализованном JSON, включая канонический путь полного описания."""
+    """Условие по полю структуры признаков декларации (источник данных в подразделе «Условия»)."""
 
     type: Literal["path"] = "path"
     path: str = Field(
@@ -241,7 +249,8 @@ class PathClassificationCondition(BaseModel):
         ge=0.0,
         le=1.0,
         description=(
-            "Для числовых сравнений (equals, gt, gte, lt, lte): относительный допуск к порогу. "
+            "Для числовых сравнений (equals; gt — строго больше; gte — не меньше; "
+            "lt — строго меньше; lte — не более): относительный допуск к порогу. "
             "0 — строгое сравнение; для equals — как у формулы (масштаб max(|факт|,|порог|,ε)); "
             "для неравенств — полоса у границы порога размером tolerance_rel·max(|порог|,ε)."
         ),
@@ -250,7 +259,7 @@ class PathClassificationCondition(BaseModel):
     conjunction: ConditionConjunction = "and"
     primary: bool = Field(
         default=True,
-        description="Если False, условие не обязательно для срабатывания правила (уточнение при совпадении основных).",
+        description="Соответствует флажку «Основное условие» в интерфейсе эксперта.",
     )
 
     model_config = ConfigDict(extra="forbid")

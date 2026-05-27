@@ -1,3 +1,12 @@
+"""
+Контракты хранилища PostgreSQL для сценариев движка правил.
+
+RuleCatalogRepositoryPort — справочники, версии с dsl_json, эталоны и эмбеддинги;
+ExpertDecisionRepositoryPort — очередь экспертизы интерфейса эксперта;
+AppSettingsRepositoryPort — промпты извлечения признаков и карта основного справочника
+по группе ТН ВЭД. Реализации — SqlAlchemy-репозитории в infrastructure.
+"""
+
 from __future__ import annotations
 
 from typing import Any, Optional, Protocol
@@ -7,7 +16,6 @@ from ...db.models import ExpertDecisionItem
 
 
 class ExpertDecisionRepositoryPort(Protocol):
-    """Порт репозитория экспертных решений для application-слоя."""
 
     def find_pending_by_category(
         self,

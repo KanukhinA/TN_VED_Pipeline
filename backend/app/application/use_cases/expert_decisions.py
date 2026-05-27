@@ -1,4 +1,9 @@
-"""Создание задач expert-decisions и доменные правила (LLM naming, auto_classification_review)."""
+"""
+Постановка задачи в очередь экспертизы интерфейса эксперта.
+
+CreateExpertDecisionUseCase: подтверждение имён классов (сервис генерации наименований),
+автоматическая проверка классификации и связанные категории. Запись в ExpertDecisionItem.
+"""
 
 from __future__ import annotations
 
@@ -174,6 +179,7 @@ class CreateExpertDecisionUseCase:
             payload.setdefault("llm_naming_suggested_class", suggested)
 
         if category in ("class_name_confirmation", "auto_classification_review"):
+            # Не плодим дубликаты pending по той же декларации — дополняем существующую карточку.
             existing = self._repo.find_pending_by_category(
                 category=category,
                 declaration_id=declaration_id,

@@ -1,4 +1,9 @@
-"""Основной справочник на код группы ТН ВЭД (meta.tn_ved_group_code): хранение в AppSetting."""
+"""
+Выбор основного справочника на код группы ТН ВЭД ЕАЭС (вкладка «Настройка справочников»).
+
+Карта «группа ТН ВЭД → справочник» в AppSetting; оркестратор и officer-пайплайн по ней
+выбирают dsl_json для классификации декларации. PrimaryCatalogService, валидация по meta.tn_ved_group_code.
+"""
 
 from __future__ import annotations
 
@@ -56,6 +61,7 @@ def get_effective_primary_catalog_map(db: Session) -> Dict[str, str]:
         if len(rlist) == 1:
             out[g] = str(rlist[0])
             continue
+        # Несколько справочников на одну группу ТН ВЭД: берём сохранённый выбор или минимальный UUID.
         if g in stored:
             try:
                 su = uuid.UUID(str(stored[g]).strip())

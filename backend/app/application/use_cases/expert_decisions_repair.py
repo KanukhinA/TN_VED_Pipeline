@@ -1,4 +1,9 @@
-"""Разовое восстановление очереди подтверждения имён классов для legacy-записей."""
+"""
+Служебное восстановление очереди подтверждения наименований классов (LLM naming).
+
+Для записей, созданных до появления задач экспертизы. RepairLlmNamingExpertQueueUseCase;
+одноразовый вызов из API администрирования.
+"""
 
 from __future__ import annotations
 
@@ -91,6 +96,7 @@ class RepairLlmNamingExpertQueueUseCase:
         for row in rows:
             stats["review_rows_scanned"] += 1
             payload = self._payload_dict(row)
+            # Подтягиваем результат именования из связанного решения инспектора, если в карточке его ещё нет.
             if not CreateExpertDecisionUseCase._meaningful_llm_class_name(payload):
                 llm = self._officer_llm_from_linked(payload) or self._officer_llm_by_declaration(row.declaration_id)
                 if llm and self._merge_llm_into_review_payload(row, llm):

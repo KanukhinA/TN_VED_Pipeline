@@ -1,3 +1,12 @@
+"""
+Компиляция dsl_json справочника в исполняемые правила проверки (Pydantic 2).
+
+После загрузки из PostgreSQL: динамическая схема структуры признаков, нормализация перечислений,
+межполевые правила (суммы, обязательность полей), затем при validate() — правило-ориентированная
+классификация (раздел «Классы»). Используется при validate в интерфейсе эксперта и при проверке
+декларации инспектором.
+"""
+
 from __future__ import annotations
 
 import itertools
@@ -169,15 +178,14 @@ class CompiledRule(BaseModel):
             data = lowercase_enum_constrained_strings(data, self.root_schema)
             validated = self.model.model_validate(data)
         except Exception as e:
-            # В MVP отдадим сырые ошибки pydantic как строки.
             return (False, [str(e)], None, None)
 
-        # Cross-rule evaluator работает по dict-структуре.
         validated_dict = validated.model_dump()
         errors = validate_cross_rules(validated_dict, self.cross_rules)
         if errors:
             return (False, [e.model_dump() for e in errors], validated_dict, None)
 
+        # Класс назначается только если схема и межполевые ограничения уже прошли.
         ok_clf, assigned, clf_errors = evaluate_classification(validated_dict, self.classification)
         if not ok_clf:
             return (False, [e.model_dump() for e in clf_errors], validated_dict, None)

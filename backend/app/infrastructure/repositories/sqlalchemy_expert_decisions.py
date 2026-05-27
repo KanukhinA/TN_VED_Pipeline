@@ -1,3 +1,9 @@
+"""
+PostgreSQL: очередь экспертизы интерфейса эксперта (SQLAlchemy 2).
+
+ExpertDecisionRepositoryPort — ExpertDecisionItem, фильтрация, подтверждение задач.
+"""
+
 from __future__ import annotations
 
 from typing import Optional
@@ -9,7 +15,6 @@ from ...db.models import ExpertDecisionItem
 
 
 class SqlAlchemyExpertDecisionRepository:
-    """SQLAlchemy-адаптер репозитория экспертных решений."""
 
     def __init__(self, db: Session) -> None:
         self.db = db

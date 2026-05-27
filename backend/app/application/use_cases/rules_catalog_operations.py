@@ -1,4 +1,10 @@
-"""Use case'ы каталога правил: список, CRUD, конфликты, семантика, эталоны."""
+"""
+Жизненный цикл справочников и правил определения класса в PostgreSQL.
+
+Создание, изменение, версионирование dsl_json, архив, клонирование; логические пересечения;
+эталонные примеры для семантики; порог семантической схожести. Транзакционное сохранение
+для интерфейса эксперта (модуль создания машиночитаемых правил). api/routes_rules.
+"""
 
 from __future__ import annotations
 
@@ -71,6 +77,7 @@ class ListRulesUseCase:
         qn = (q or "").strip().lower()
         result: list[RuleListItem] = []
         for rule, rv in rows:
+            # Фильтр по подстроке в model_id, имени или коде группы ТН ВЭД из meta.
             dsl_json = rv.dsl_json if isinstance(rv.dsl_json, dict) else {}
             tn = meta_tn_ved_group_code(dsl_json)
             if not catalog_row_matches_search(
@@ -147,6 +154,7 @@ class UpdateRuleUseCase:
         dsl = _parse_and_compile_dsl(dsl_in)
         validate_feature_extraction_configs(dsl.meta)
         _require_tn_ved_group(dsl)
+        # В каждый момент активна ровно одна версия DSL на справочник.
         for v in self._repo.list_active_versions_for_rule(rule_id):
             v.is_active = False
         latest = self._repo.latest_rule_version(rule_id)

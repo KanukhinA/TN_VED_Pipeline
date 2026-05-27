@@ -1,4 +1,13 @@
-"""Построение списка конфликтов классификации (логика эндпоинта classification-conflicts)."""
+"""
+Формирование ответа API «проверка правил на логические пересечения» для интерфейса эксперта.
+
+Сервисный слой движка правил: по всем правилам определения класса из активной версии справочника
+строит список ситуаций, когда одна декларация могла бы удовлетворить нескольким записям раздела
+«Классы». Опирается на модуль rules.rule_overlap; при пересечении по возможности добавляет
+синтетический пример признакового JSON для экрана пересечений.
+
+Сценарий GetClassificationConflictsUseCase; маршрут classification-conflicts в api/routes_rules.
+"""
 
 from __future__ import annotations
 
@@ -37,6 +46,13 @@ def rule_overlap_columns_for_indices(
 
 
 def classification_conflict_items_for_rules(rules: Sequence[ClassificationRule]) -> list[RuleConflictItem]:
+    """
+    Список записей о логических пересечениях для отчёта интерфейса эксперта.
+
+    Сначала выполняется попарная проверка всех правил определения класса; рёбра «пересекаются»
+    объединяются в связные компоненты, чтобы для трёх и более классов выдать одну карточку
+    конфликта с общим примером признаков вместо дублирования пар.
+    """
     rules_list = list(rules)
     n = len(rules_list)
     conflicts: list[RuleConflictItem] = []
@@ -57,6 +73,7 @@ def classification_conflict_items_for_rules(rules: Sequence[ClassificationRule])
         idxs = sorted(comp)
         if len(idxs) < 2:
             continue
+        # Группа из трёх и более правил: один синтетический пример и одна запись конфликта.
         grp = [rules_list[i] for i in idxs]
         titles = [(rules_list[i].title or "").strip() or str(rules_list[i].class_id or f"правило {i + 1}") for i in idxs]
         ex: Optional[Dict[str, Any]] = None
@@ -99,6 +116,7 @@ def classification_conflict_items_for_rules(rules: Sequence[ClassificationRule])
         for a, b in combinations(idxs, 2):
             pairs_subsumed.add((a, b))
 
+    # Оставшиеся пары: только те, что не вошли в групповой конфликт выше.
     for i in range(n):
         for j in range(i + 1, n):
             if (i, j) in pairs_subsumed:

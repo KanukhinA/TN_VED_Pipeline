@@ -1,9 +1,8 @@
-"""Прямой HTTP-клиент к Ollama (/api/chat для генерации, /api/tags).
+"""
+HTTP-клиент к Ollama в учебном и демонстрационном контуре (контейнер docker compose).
 
-Генерация идёт через ``/api/chat``, а не ``/api/generate``: у моделей с цепочкой
-мышления (Qwen3 и др.) в ``/api/generate`` отключение thinking в ``options`` не
-срабатывает, все токены уходят в скрытый trace, поле ``response`` остаётся
-пустым при ``eval_count == num_predict``. См. ollama/ollama#14793.
+Генерация через /api/chat (извлечение признаков из описания товара, имена классов).
+Для моделей с режимом «мышления» /api/generate не используется — иначе пустой ответ.
 """
 
 from __future__ import annotations
